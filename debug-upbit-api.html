@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upbit API调试</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .result { margin: 20px 0; padding: 10px; border: 1px solid #ccc; }
+        .error { background-color: #ffe6e6; border-color: #ff9999; }
+        .success { background-color: #e6ffe6; border-color: #99ff99; }
+        .info { background-color: #e6f3ff; border-color: #99ccff; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+    <h1>Upbit API调试</h1>
+    <button onclick="debugUpbitAPI()">调试Upbit API</button>
+    <div id="result" class="result"></div>
+
+    <script>
+        async function debugUpbitAPI() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<p>正在调试Upbit API...</p>';
+            
+            try {
+                // 测试Upbit API
+                resultDiv.innerHTML += '<p>1. 开始API调用...</p>';
+                
+                const response = await fetch('https://api.upbit.com/v1/ticker?markets=USDT-BTC,USDT-ETH');
+                
+                resultDiv.innerHTML += `<p>2. API响应状态: ${response.status} ${response.statusText}</p>`;
+                
+                // 检查响应头
+                const headers = Array.from(response.headers.entries());
+                resultDiv.innerHTML += '<p>3. 响应头:</p>';
+                resultDiv.innerHTML += '<pre>' + JSON.stringify(headers, null, 2) + '</pre>';
+                
+                // 尝试解析响应体
+                try {
+                    const data = await response.json();
+                    resultDiv.innerHTML += '<p>4. 响应数据:</p>';
+                    resultDiv.innerHTML += '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                    
+                    // 检查数据格式
+                    if (Array.isArray(data)) {
+                        resultDiv.innerHTML += '<p class="success">5. 数据格式正确，是数组</p>';
+                        
+                        // 检查数组元素
+                        data.forEach((item, index) => {
+                            resultDiv.innerHTML += `<p>6. 第${index + 1}个元素:</p>`;
+                            resultDiv.innerHTML += '<pre>' + JSON.stringify(item, null, 2) + '</pre>';
+                            
+                            if (item.market && item.trade_price) {
+                                resultDiv.innerHTML += '<p class="success">✓ 包含market和trade_price字段</p>';
+                            } else {
+                                resultDiv.innerHTML += '<p class="error">✗ 缺少必要字段</p>';
+                            }
+                        });
+                    } else {
+                        resultDiv.innerHTML += '<p class="error">5. 数据格式错误，不是数组</p>';
+                    }
+                } catch (jsonError) {
+                    resultDiv.innerHTML += `<p class="error">4. JSON解析错误: ${jsonError.message}</p>`;
+                    
+                    // 尝试获取原始响应文本
+                    try {
+                        const text = await response.text();
+                        resultDiv.innerHTML += '<p>5. 原始响应文本:</p>';
+                        resultDiv.innerHTML += '<pre>' + text + '</pre>';
+                    } catch (textError) {
+                        resultDiv.innerHTML += `<p class="error">5. 获取文本失败: ${textError.message}</p>`;
+                    }
+                }
+                
+            } catch (error) {
+                resultDiv.innerHTML += `<p class="error">API调用失败: ${error.message}</p>`;
+                resultDiv.innerHTML += '<p>可能的原因:</p>';
+                resultDiv.innerHTML += '<ul>';
+                resultDiv.innerHTML += '<li>跨域限制 (CORS)</li>';
+                resultDiv.innerHTML += '<li>网络连接问题</li>';
+                resultDiv.innerHTML += '<li>API服务器问题</li>';
+                resultDiv.innerHTML += '</ul>';
+            }
+        }
+    </script>
+</body>
+</html>

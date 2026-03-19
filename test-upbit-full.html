@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upbit全量USDT交易对测试</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .result { margin: 20px 0; padding: 10px; border: 1px solid #ccc; }
+        .error { background-color: #ffe6e6; border-color: #ff9999; }
+        .success { background-color: #e6ffe6; border-color: #99ff99; }
+        pre { white-space: pre-wrap; word-wrap: break-word; max-height: 300px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <h1>Upbit全量USDT交易对测试</h1>
+    <button onclick="testUpbitFull()">测试全量USDT交易对</button>
+    <div id="result" class="result"></div>
+
+    <script>
+        async function testUpbitFull() {
+            const result = document.getElementById('result');
+            result.innerHTML = '<p>测试中...</p>';
+            
+            try {
+                // 1. 获取所有市场列表
+                result.innerHTML += '<p>1. 获取市场列表...</p>';
+                const marketResponse = await fetch('https://api.upbit.com/v1/market/all');
+                
+                if (!marketResponse.ok) {
+                    throw new Error(`获取市场列表失败: ${marketResponse.status} ${marketResponse.statusText}`);
+                }
+                
+                const marketsData = await marketResponse.json();
+                result.innerHTML += `<p>获取到 ${marketsData.length} 个市场</p>`;
+                
+                // 2. 过滤出USDT交易对
+                const usdtMarkets = marketsData.filter(market => market.market.startsWith('USDT-'));
+                result.innerHTML += `<p>过滤出 ${usdtMarkets.length} 个USDT交易对</p>`;
+                
+                // 显示前10个USDT交易对
+                const first10Markets = usdtMarkets.slice(0, 10).map(m => m.market).join(', ');
+                result.innerHTML += `<p>前10个USDT交易对: ${first10Markets}</p>`;
+                
+                // 3. 分批获取价格数据
+                const batchSize = 10;
+                const prices = {};
+                
+                for (let i = 0; i < usdtMarkets.length; i += batchSize) {
+                    const batch = usdtMarkets.slice(i, i + batchSize);
+                    const marketsParam = batch.map(m => m.market).join(',');
+                    const url = `https://api.upbit.com/v1/ticker?markets=${marketsParam}`;
+                    
+                    result.innerHTML += `<p>获取批次 ${Math.floor(i/batchSize) + 1}...</p>`;
+                    
+                    const tickerResponse = await fetch(url);
+                    if (tickerResponse.ok) {
+                        const tickerData = await tickerResponse.json();
+                        
+                        tickerData.forEach(item => {
+                            const symbol = item.market.replace('USDT-', '');
+                            prices[symbol] = item.trade_price;
+                        });
+                    } else {
+                        result.innerHTML += `<p class="error">批次 ${Math.floor(i/batchSize) + 1} 失败</p>`;
+                    }
+                }
+                
+                // 4. 显示结果
+                result.innerHTML += `<p class="success">获取成功！</p>`;
+                result.innerHTML += `<p>共获取到 ${Object.keys(prices).length} 个USDT交易对的价格</p>`;
+                result.innerHTML += '<p>部分价格数据:</p>';
+                
+                const sortedSymbols = Object.keys(prices).sort();
+                const displayData = sortedSymbols.slice(0, 20).map(symbol => `${symbol}: ${prices[symbol]} USDT`).join('<br>');
+                result.innerHTML += `<pre>${displayData}</pre>`;
+                
+            } catch (error) {
+                result.innerHTML += `<p class="error">错误: ${error.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>

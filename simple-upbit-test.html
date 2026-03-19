@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upbit API简单测试</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .result { margin: 20px 0; padding: 10px; border: 1px solid #ccc; }
+        .error { background-color: #ffe6e6; border-color: #ff9999; }
+        .success { background-color: #e6ffe6; border-color: #99ff99; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+    <h1>Upbit API简单测试</h1>
+    <button onclick="testUpbit()">测试Upbit API</button>
+    <div id="result" class="result"></div>
+
+    <script>
+        async function testUpbit() {
+            const result = document.getElementById('result');
+            result.innerHTML = '<p>测试中...</p>';
+            
+            try {
+                // 测试Upbit API
+                const response = await fetch('https://api.upbit.com/v1/ticker?markets=USDT-BTC,USDT-ETH');
+                
+                result.innerHTML += `<p>状态: ${response.status} ${response.statusText}</p>`;
+                
+                if (response.ok) {
+                    const text = await response.text();
+                    result.innerHTML += '<p>响应文本:</p>';
+                    result.innerHTML += '<pre>' + text + '</pre>';
+                    
+                    try {
+                        const data = JSON.parse(text);
+                        result.innerHTML += '<p class="success">JSON解析成功</p>';
+                        result.innerHTML += '<p>数据类型: ' + (Array.isArray(data) ? '数组' : typeof data) + '</p>';
+                        
+                        if (Array.isArray(data)) {
+                            result.innerHTML += `<p>数组长度: ${data.length}</p>`;
+                            data.forEach((item, i) => {
+                                result.innerHTML += `<p>元素 ${i}:</p>`;
+                                result.innerHTML += '<pre>' + JSON.stringify(item, null, 2) + '</pre>';
+                            });
+                        }
+                    } catch (e) {
+                        result.innerHTML += `<p class="error">JSON解析错误: ${e.message}</p>`;
+                    }
+                } else {
+                    result.innerHTML += '<p class="error">API请求失败</p>';
+                }
+            } catch (e) {
+                result.innerHTML += `<p class="error">请求错误: ${e.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>

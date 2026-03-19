@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upbit多币种测试</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .result { margin: 20px 0; padding: 10px; border: 1px solid #ccc; }
+        .error { background-color: #ffe6e6; border-color: #ff9999; }
+        .success { background-color: #e6ffe6; border-color: #99ff99; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+    <h1>Upbit多币种测试</h1>
+    <button onclick="testUpbitMultiple()">测试多币种API</button>
+    <div id="result" class="result"></div>
+
+    <script>
+        async function testUpbitMultiple() {
+            const result = document.getElementById('result');
+            result.innerHTML = '<p>测试中...</p>';
+            
+            try {
+                // 测试多个USDT交易对
+                const symbols = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'MATIC', 'LTC', 'BCH'];
+                const markets = symbols.map(symbol => `USDT-${symbol}`).join(',');
+                
+                const url = `https://api.upbit.com/v1/ticker?markets=${markets}`;
+                result.innerHTML += `<p>API URL: ${url}</p>`;
+                
+                const response = await fetch(url);
+                result.innerHTML += `<p>状态: ${response.status} ${response.statusText}</p>`;
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    result.innerHTML += '<p class="success">API调用成功</p>';
+                    result.innerHTML += `<p>返回 ${data.length} 个币种</p>`;
+                    
+                    data.forEach(item => {
+                        const symbol = item.market.replace('USDT-', '');
+                        result.innerHTML += `<p>${symbol}: ${item.trade_price} USDT</p>`;
+                    });
+                } else {
+                    result.innerHTML += '<p class="error">API请求失败</p>';
+                }
+            } catch (e) {
+                result.innerHTML += `<p class="error">请求错误: ${e.message}</p>`;
+            }
+        }
+    </script>
+</body>
+</html>

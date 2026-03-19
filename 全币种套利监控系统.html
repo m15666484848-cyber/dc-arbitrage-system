@@ -1,0 +1,1688 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>DC 全币种套利监控系统</title>
+    <style>
+        * {margin:0; padding:0; box-sizing:border-box;}
+        body {font-family:'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#0a0e1a; color:#e0e0e0; padding:20px; line-height:1.5;}
+        .container {max-width:1400px; margin:0 auto;}
+        
+        header {text-align:center; margin-bottom:30px; padding:30px 0; background:linear-gradient(135deg, #141b2d 0%, #1a2332 100%); border-radius:16px; box-shadow:0 8px 32px rgba(0, 200, 83, 0.1);}
+        h1 {color:#00c853; font-size:32px; margin-bottom:15px; font-weight:700; text-shadow:0 0 20px rgba(0, 200, 83, 0.3);}
+        .subtitle {color:#8ba4be; font-size:16px; margin-bottom:20px;}
+        
+        .panel {background:#141b2d; border-radius:16px; padding:24px; margin-bottom:24px; border:1px solid #2a3f5f; box-shadow:0 4px 16px rgba(0, 0, 0, 0.2); transition:all 0.3s ease;}
+        .panel:hover {box-shadow:0 8px 24px rgba(0, 200, 83, 0.1); transform:translateY(-2px);}
+        .panel-title {color:#00c853; font-size:20px; margin-bottom:20px; display:flex; align-items:center; gap:10px; font-weight:600;}
+        
+        .stats-grid {display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:20px; margin-bottom:24px;}
+        .stat-card {background:linear-gradient(135deg, #1a2332 0%, #1e2a40 100%); padding:20px; border-radius:12px; border-left:4px solid #00c853; box-shadow:0 4px 12px rgba(0, 0, 0, 0.15); transition:all 0.3s ease;}
+        .stat-card:hover {transform:scale(1.02); box-shadow:0 6px 16px rgba(0, 200, 83, 0.15);}
+        .stat-label {color:#8ba4be; font-size:13px; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;}
+        .stat-value {color:#fff; font-size:28px; font-weight:bold;}
+        .stat-card.warning {border-left-color:#ff9800;}
+        .stat-card.danger {border-left-color:#ff5252;}
+        
+        .controls {display:flex; gap:16px; flex-wrap:wrap; align-items:center; padding:20px; background:#1a2332; border-radius:12px; margin-bottom:20px;}
+        .btn {background:#00c853; color:#fff; border:none; padding:12px 24px; border-radius:8px; cursor:pointer; font-size:14px; font-weight:600; transition:all 0.3s ease; box-shadow:0 4px 12px rgba(0, 200, 83, 0.3);}
+        .btn:hover {background:#00a843; transform:translateY(-2px); box-shadow:0 6px 16px rgba(0, 200, 83, 0.4);}
+        .btn-secondary {background:#2a3f5f; box-shadow:0 4px 12px rgba(42, 63, 95, 0.3);}
+        .btn-secondary:hover {background:#3a5270; transform:translateY(-2px); box-shadow:0 6px 16px rgba(42, 63, 95, 0.4);}
+        
+        .config-group {display:flex; align-items:center; gap:10px; margin-right:10px;}
+        .config-group label {color:#8ba4be; font-size:14px; font-weight:500;}
+        .config-group input, .config-group select {background:#1a2332; border:1px solid #2a3f5f; color:#fff; padding:10px 12px; border-radius:8px; font-size:14px; transition:all 0.3s ease;}
+        .config-group input:focus, .config-group select:focus {outline:none; border-color:#00c853; box-shadow:0 0 0 3px rgba(0, 200, 83, 0.1);}
+        
+        .switch {position:relative; display:inline-block; width:56px; height:28px;}
+        .switch input {opacity:0; width:0; height:0;}
+        .slider {position:absolute; cursor:pointer; top:0; left:0; right:0; bottom:0; background:#2a3f5f; transition:.4s; border-radius:28px;}
+        .slider:before {position:absolute; content:""; height:20px; width:20px; left:4px; bottom:4px; background:#fff; transition:.4s; border-radius:50%;}
+        input:checked + .slider {background:#00c853;}
+        input:checked + .slider:before {transform:translateX(28px);}
+        
+        .tabs {display:flex; gap:12px; margin-bottom:20px; border-bottom:1px solid #2a3f5f; padding-bottom:10px;}
+        .tab {padding:12px 24px; background:#1a2332; border-radius:8px; cursor:pointer; border-bottom:3px solid transparent; transition:all 0.3s ease; font-size:14px; font-weight:500;}
+        .tab:hover {background:#2a3f5f;}
+        .tab.active {background:#2a3f5f; border-bottom-color:#00c853; color:#00c853; font-weight:600; transform:translateY(-2px);}
+        
+        table {width:100%; border-collapse:collapse; font-size:14px;}
+        th {background:#1a2332; padding:14px; text-align:left; font-weight:600; color:#8ba4be; border-bottom:2px solid #2a3f5f; position:sticky; top:0; z-index:10;}
+        td {padding:14px; border-bottom:1px solid #2a3f5f; transition:all 0.3s ease;}
+        tr:hover {background:#1a2332; transform:translateX(4px);}
+        
+        .profit {color:#00c853; font-weight:bold;}
+        .loss {color:#ff5252;}
+        .opportunity {animation:flash 1.5s infinite;}
+        .high-profit {color:#ffd700; font-weight:bold; text-shadow:0 0 10px rgba(255, 215, 0, 0.5);}
+        
+        @keyframes flash {
+            0%, 100% {background:rgba(0, 200, 83, 0.1);}
+            50% {background:transparent;}
+        }
+        
+        .exchange-tag {padding:4px 8px; border-radius:4px; font-size:12px; font-weight:bold; margin-right:6px; transition:all 0.3s ease;}
+        .exchange-tag:hover {transform:scale(1.05);}
+        .binance {background:#f3ba2f; color:#000;}
+        .bithumb {background:#00a6ed; color:#fff;}
+        .upbit {background:#21c532; color:#fff;}
+        .huobi {background:#0075ff; color:#fff;}
+        .okx {background:#00c087; color:#fff;}
+        
+        /* DC Logo 样式 */
+        .dc-logo {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 70px;
+            height: 70px;
+            background: linear-gradient(135deg, #00c853 0%, #00a843 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28px;
+            font-weight: bold;
+            color: #fff;
+            box-shadow: 0 0 30px rgba(0, 200, 83, 0.8);
+            z-index: 9999;
+            animation: pulse 2s infinite;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .dc-logo:hover {
+            transform: scale(1.1);
+            box-shadow: 0 0 40px rgba(0, 200, 83, 1);
+        }
+        
+        @keyframes pulse {
+            0% { box-shadow: 0 0 30px rgba(0, 200, 83, 0.6); }
+            50% { box-shadow: 0 0 40px rgba(0, 200, 83, 0.9); }
+            100% { box-shadow: 0 0 30px rgba(0, 200, 83, 0.6); }
+        }
+        
+        .table-container {max-height:600px; overflow-y:auto; border-radius:12px; border:1px solid #2a3f5f;}
+        .table-container::-webkit-scrollbar {width:8px;}
+        .table-container::-webkit-scrollbar-track {background:#1a2332; border-radius:4px;}
+        .table-container::-webkit-scrollbar-thumb {background:#2a3f5f; border-radius:4px;}
+        .table-container::-webkit-scrollbar-thumb:hover {background:#3a5270;}
+        
+        .filter {display:flex; gap:12px; margin-bottom:20px;}
+        .filter input {background:#1a2332; border:1px solid #2a3f5f; color:#fff; padding:12px; border-radius:8px; flex:1; font-size:14px; transition:all 0.3s ease;}
+        .filter input:focus {outline:none; border-color:#00c853; box-shadow:0 0 0 3px rgba(0, 200, 83, 0.1);}
+        
+        .log-panel {background:#0a0e1a; border-radius:12px; padding:20px; height:200px; overflow-y:auto; font-family:'Consolas', monospace; font-size:13px; border:1px solid #2a3f5f;}
+        .log-panel::-webkit-scrollbar {width:8px;}
+        .log-panel::-webkit-scrollbar-track {background:#1a2332; border-radius:4px;}
+        .log-panel::-webkit-scrollbar-thumb {background:#2a3f5f; border-radius:4px;}
+        .log-panel::-webkit-scrollbar-thumb:hover {background:#3a5270;}
+        
+        .log-entry {margin-bottom:6px; padding:4px 0; border-bottom:1px solid #1a2332;}
+        .log-time {color:#5a6f8f; margin-right:10px;}
+        .log-success {color:#00c853;}
+        .log-warning {color:#ff9800;}
+        .log-error {color:#ff5252;}
+        
+        /* 响应式设计 */
+        @media (max-width: 1200px) {
+            .stats-grid {grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));}
+            .controls {flex-direction:column; align-items:flex-start;}
+            .config-group {width:100%; justify-content:space-between;}
+        }
+        
+        @media (max-width: 768px) {
+            body {padding:10px;}
+            .container {max-width:100%;}
+            .stats-grid {grid-template-columns:1fr;}
+            .tabs {flex-wrap:wrap;}
+            .tab {padding:10px 16px; font-size:13px;}
+            table {font-size:13px;}
+            th, td {padding:10px;}
+            .dc-logo {width:60px; height:60px; font-size:24px;}
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- DC Logo 悬浮按钮 -->
+        <div class="dc-logo">DC</div>
+        <header>
+            <div style="display: flex; align-items: center; justify-content: center; gap: 20px; margin-bottom: 15px;">
+                <div style="font-size: 48px; font-weight: bold; color: #00c853; text-shadow: 0 0 10px rgba(0, 200, 83, 0.5);">DC</div>
+                <h1 style="margin: 0;">🚀 全币种跨交易所套利监控系统</h1>
+            </div>
+            <p class="subtitle">实时监控 币安 / Bithumb / Upbit / OKX 交叉套利机会 ? 支持现货/合约 ? 支持USDT交易对</p>
+        </header>
+        
+        <div class="panel">
+            <div class="panel-title">📊 系统状态</div>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">监控币种</div>
+                    <div class="stat-value" id="coinCount">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">套利机会</div>
+                    <div class="stat-value" id="opportunityCount">-</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-label">USDT/KRW 汇率</div>
+                    <div class="stat-value" id="krwRate">1330</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">最小挂单量</div>
+                    <div class="stat-value" id="orderThreshold">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">最后更新</div>
+                    <div class="stat-value" id="lastUpdate">-</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <div class="panel-title">🎮 控制面板</div>
+            <div class="controls">
+                <button class="btn" onclick="refreshData()">🔄 手动刷新</button>
+                <div class="config-group">
+                    <span>自动刷新:</span>
+                    <label class="switch">
+                        <input type="checkbox" id="autoRefresh" onclick="toggleAutoRefresh()" checked>
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+                <div class="config-group">
+                    <label>刷新间隔:</label>
+                    <select id="refreshInterval">
+                        <option value="3000">3秒</option>
+                        <option value="5000">5秒</option>
+                        <option value="10000">10秒</option>
+                    </select>
+                </div>
+                <div class="config-group">
+                    <label>利润阈值 (%):</label>
+                    <input type="number" id="profitThreshold" value="0.5" min="0.1" max="10" step="0.1">
+                    <button class="btn btn-secondary" onclick="setThreshold()">应用</button>
+                </div>
+                <div class="config-group">
+                    <label>手续费 (%):</label>
+                    <input type="number" id="feeRate" value="0.35" min="0" max="2" step="0.01">
+                </div>
+                <div class="config-group">
+                    <label>最小挂单量 (USDT):</label>
+                    <input type="number" id="minOrderAmount" value="50" min="0" max="10000" step="10">
+                    <button class="btn btn-secondary" onclick="setOrderAmountThreshold()">应用</button>
+                </div>
+                <div class="config-group">
+                    <label>飞书Webhook:</label>
+                    <input type="text" id="feishuWebhook" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" style="width: 350px;">
+                    <button class="btn btn-secondary" onclick="testWebhook()">测试</button>
+                    <label class="switch">
+                        <input type="checkbox" id="webhookEnabled" onclick="toggleWebhook()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+                <div class="config-group">
+                    <label>通知利润阈值 (%):</label>
+                    <input type="number" id="notificationThreshold" value="1.0" min="0.1" max="10" step="0.1">
+                    <button class="btn btn-secondary" onclick="setNotificationThreshold()">应用</button>
+                </div>
+                <div class="config-group">
+                    <label>通知冷却 (秒):</label>
+                    <input type="number" id="notificationCooldown" value="30" min="5" max="300" step="5">
+                    <button class="btn btn-secondary" onclick="setNotificationCooldown()">应用</button>
+                </div>
+                <div class="config-group">
+                    <span>真实API数据:</span>
+                    <label class="switch">
+                        <input type="checkbox" id="useRealAPI" onclick="toggleRealAPI()" checked>
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <div class="panel-title">📈 套利机会</div>
+            <div class="tabs">
+                <div class="tab active" onclick="switchTab('binance-bithumb')">币安 ↔ Bithumb</div>
+                <div class="tab" onclick="switchTab('binance-upbit')">币安 ↔ Upbit</div>
+                <div class="tab" onclick="switchTab('binance-huobi')">币安 ↔ 火币</div>
+                <div class="tab" onclick="switchTab('binance-okx')">币安 ↔ OKX</div>
+                <div class="tab" onclick="switchTab('all')">全部机会</div>
+            </div>
+            <div class="tabs">
+                <div class="tab active" onclick="switchMarket('spot')">现货</div>
+                <div class="tab" onclick="switchMarket('contract')">合约</div>
+                <div class="tab" onclick="switchMarket('all')">全部市场</div>
+            </div>
+            <div class="filter">
+                <input type="text" id="searchInput" placeholder="搜索币种..." oninput="filterTable()">
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>币种</th>
+                            <th>市场类型</th>
+                            <th>交易所</th>
+                            <th>买入价</th>
+                            <th>卖出价</th>
+                            <th>USDT换算价</th>
+                            <th>价差%</th>
+                            <th>利润%</th>
+                            <th>操作方向</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody id="dataTable">
+                        <tr><td colspan="10">正在加载数据...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <div class="panel-title">📋 系统日志</div>
+            <div class="log-panel" id="logPanel"></div>
+        </div>
+    </div>
+
+<script>
+// 全局配置
+const config = {
+    autoRefresh: true,
+    refreshInterval: 3000,
+    profitThreshold: 0.5,
+    feeRate: 0.35,
+    krwUsdRate: 1330,
+    currentTab: 'binance-bithumb',
+    currentMarket: 'spot', // spot/contract/all
+    minOrderAmount: 50, // 过滤掉买1/卖1挂单量价值低于50USDT的币种
+    feishuWebhook: '',
+    webhookEnabled: false,
+    notificationThreshold: 1.0, // 只有利润≥这个值才推送通知
+    lastNotificationTime: 0,
+    notificationCooldown: 30000, // 通知冷却时间（毫秒），避免重复提醒
+    useRealAPI: true, // 是否使用真实API
+    apiTimeout: 5000 // API请求超时时间
+};
+
+// 页面加载时从localStorage读取保存的配置
+function loadConfig() {
+
+    if (savedConfig) {
+        try {
+            const parsed = JSON.parse(savedConfig);
+            Object.assign(config, parsed);
+            
+            // 确保数值类型正确
+            config.profitThreshold = parseFloat(config.profitThreshold);
+            config.feeRate = parseFloat(config.feeRate);
+            config.refreshInterval = parseInt(config.refreshInterval);
+            config.minOrderAmount = parseInt(config.minOrderAmount);
+            config.notificationThreshold = parseFloat(config.notificationThreshold);
+            config.notificationCooldown = parseInt(config.notificationCooldown);
+            config.webhookEnabled = Boolean(config.webhookEnabled);
+            config.autoRefresh = Boolean(config.autoRefresh);
+            config.useRealAPI = Boolean(config.useRealAPI);
+            
+            // 更新页面输入框
+            document.getElementById('profitThreshold').value = config.profitThreshold;
+            document.getElementById('feeRate').value = config.feeRate;
+            document.getElementById('refreshInterval').value = config.refreshInterval;
+            document.getElementById('minOrderAmount').value = config.minOrderAmount;
+            document.getElementById('feishuWebhook').value = config.feishuWebhook || '';
+            document.getElementById('notificationThreshold').value = config.notificationThreshold;
+            document.getElementById('notificationCooldown').value = config.notificationCooldown / 1000;
+            document.getElementById('webhookEnabled').checked = config.webhookEnabled;
+            document.getElementById('autoRefresh').checked = config.autoRefresh;
+            if (document.getElementById('useRealAPI')) {
+                document.getElementById('useRealAPI').checked = config.useRealAPI;
+            }
+            
+            // 如果开启了自动刷新，恢复定时器
+            if (config.autoRefresh) {
+                if (refreshTimer) clearInterval(refreshTimer);
+                refreshTimer = setInterval(refreshData, config.refreshInterval);
+                document.getElementById('refreshRate').textContent = `${config.refreshInterval / 1000}秒`;
+            }
+            
+            addLog('💾 已加载保存的配置', 'info');
+            if (config.webhookEnabled) {
+                addLog(`✅ Webhook已自动恢复，阈值: ${config.notificationThreshold}%`, 'info');
+            }
+            if (config.useRealAPI) {
+                addLog('✅ 已启用真实API数据', 'info');
+            }
+        } catch (e) {
+            addLog(`⚠️ 配置加载失败: ${e.message}，使用默认配置`, 'warning');
+        }
+    }
+}
+
+// 保存配置到localStorage
+function saveConfig() {
+    const configToSave = {
+        profitThreshold: config.profitThreshold,
+        feeRate: config.feeRate,
+        refreshInterval: config.refreshInterval,
+        minOrderAmount: config.minOrderAmount,
+        feishuWebhook: config.feishuWebhook,
+        webhookEnabled: config.webhookEnabled,
+        notificationThreshold: config.notificationThreshold,
+        notificationCooldown: config.notificationCooldown,
+        autoRefresh: config.autoRefresh,
+        useRealAPI: config.useRealAPI
+    };
+
+}
+
+// 币种列表 (全币种)
+const coinList = [
+    'BTC', 'ETH', 'XRP', 'ADA', 'DOT', 'LINK', 'LTC', 'BCH', 'XLM', 'EOS',
+
+    'MANA', 'SAND', 'AXS', 'ALGO', 'ICP', 'FIL', 'TRX', 'VET', 'QNT', 'EGLD',
+
+
+    'ORDI', 'SUI', 'SEI', 'PYTH', 'JUP', 'WIF', 'BONK', 'XAI',
+    'FET', 'AGIX', 'ROSE', 'KAVA', 'CELR', 'FTT', 'OKB', 'HT', 'BNB', 'CRO',
+    'LEO', 'LUNC', 'USTC', 'NEAR', 'FLOW', 'HBAR', 'XMR', 'ZEC', 'DASH', 'RVN',
+    'KSM', 'DOT', 'TFUEL', 'THETA', 'ENJ', 'CHZ', 'ZIL', 'ONE', 'IOST', 'NEO',
+    'ONT', 'QTUM', 'BTG', 'BCD', 'ZRX', 'BAT', 'REP', 'MAID', 'STEEM', 'GXS'
+];
+
+// 模拟价格数据
+let priceData = {
+    binance: { spot: {}, contract: {} },
+    bithumb: { spot: {} },
+    upbit: { spot: {} },
+    huobi: { spot: {}, contract: {} },
+    okx: { spot: {}, contract: {} }
+};
+
+// 币种基础数据 (价格+挂单量)
+let coinBaseData = {};
+
+let refreshTimer = null;
+let allOpportunities = [];
+
+// 日志函数
+function addLog(message, type = 'info') {
+    const logPanel = document.getElementById('logPanel');
+    const entry = document.createElement('div');
+    entry.className = `log-entry log-${type}`;
+    const time = new Date().toLocaleTimeString();
+    entry.innerHTML = `<span class="log-time">[${time}]</span>${message}`;
+    logPanel.appendChild(entry);
+    logPanel.scrollTop = logPanel.scrollHeight;
+    
+    // 限制日志数量
+    while (logPanel.children.length > 100) {
+        logPanel.removeChild(logPanel.firstChild);
+    }
+}
+
+// 格式化数字
+function formatNumber(num, decimals = 4) {
+    if (num === undefined || num === null) return '-';
+    return num.toFixed(decimals);
+}
+
+function formatPrice(num) {
+    if (num === undefined || num === null) return '-';
+    if (num >= 1000) return num.toFixed(2);
+    if (num >= 1) return num.toFixed(4);
+    return num.toFixed(6);
+}
+
+// 全局变量，用于跟踪价格趋势
+let priceTrends = {};
+
+// 初始化价格趋势
+function initPriceTrends() {
+    coinList.forEach(coin => {
+        priceTrends[coin] = {
+            direction: Math.random() > 0.5 ? 1 : -1, // 1: 上涨, -1: 下跌
+            strength: Math.random() * 0.5 + 0.5, // 趋势强度
+            volatility: Math.random() * 0.005 + 0.001 // 波动率
+        };
+    });
+}
+
+// 生成模拟价格
+function generateMockPrices() {
+    // 初始化价格趋势（如果尚未初始化）
+    if (Object.keys(priceTrends).length === 0) {
+        initPriceTrends();
+    }
+    
+    // 基础价格 (USDT) 和 买1/卖1挂单量 (USDT价值)
+    const baseData = {
+        'BTC': { basePrice: 62000, volatility: 0.003, bidAmount: 2000000, askAmount: 1800000 },
+        'ETH': { basePrice: 3200, volatility: 0.004, bidAmount: 800000, askAmount: 750000 },
+        'XRP': { basePrice: 0.55, volatility: 0.01, bidAmount: 50000, askAmount: 48000 },
+        'ADA': { basePrice: 0.52, volatility: 0.008, bidAmount: 20000, askAmount: 18000 },
+        'DOT': { basePrice: 7.8, volatility: 0.006, bidAmount: 30000, askAmount: 28000 },
+        'LINK': { basePrice: 18.5, volatility: 0.007, bidAmount: 15000, askAmount: 14000 },
+        'LTC': { basePrice: 85, volatility: 0.005, bidAmount: 25000, askAmount: 23000 },
+        'BCH': { basePrice: 420, volatility: 0.006, bidAmount: 10000, askAmount: 9500 },
+        'XLM': { basePrice: 0.18, volatility: 0.012, bidAmount: 8000, askAmount: 7500 },
+        'EOS': { basePrice: 1.2, volatility: 0.009, bidAmount: 5000, askAmount: 4800 },
+        'SOL': { basePrice: 95, volatility: 0.008, bidAmount: 100000, askAmount: 95000 },
+        'AVAX': { basePrice: 35, volatility: 0.007, bidAmount: 25000, askAmount: 23000 },
+        'MATIC': { basePrice: 0.8, volatility: 0.01, bidAmount: 30000, askAmount: 28000 },
+        'DOGE': { basePrice: 0.08, volatility: 0.015, bidAmount: 40000, askAmount: 38000 },
+        'SHIB': { basePrice: 0.000028, volatility: 0.02, bidAmount: 25000, askAmount: 23000 },
+        'ATOM': { basePrice: 10.5, volatility: 0.007, bidAmount: 8000, askAmount: 7500 },
+        'UNI': { basePrice: 6.8, volatility: 0.008, bidAmount: 6000, askAmount: 5800 },
+        'AAVE': { basePrice: 105, volatility: 0.006, bidAmount: 4000, askAmount: 3800 },
+
+        'YFI': { basePrice: 7500, volatility: 0.004, bidAmount: 1500, askAmount: 1400 },
+        'MANA': { basePrice: 0.45, volatility: 0.01, bidAmount: 3000, askAmount: 2800 },
+        'SAND': { basePrice: 0.5, volatility: 0.011, bidAmount: 2500, askAmount: 2300 },
+        'AXS': { basePrice: 8, volatility: 0.012, bidAmount: 2000, askAmount: 1800 },
+        'ALGO': { basePrice: 0.19, volatility: 0.013, bidAmount: 3500, askAmount: 3300 },
+        'ICP': { basePrice: 12, volatility: 0.01, bidAmount: 4000, askAmount: 3800 },
+        'FIL': { basePrice: 4.8, volatility: 0.009, bidAmount: 3000, askAmount: 2800 },
+        'TRX': { basePrice: 0.11, volatility: 0.012, bidAmount: 20000, askAmount: 18000 },
+        'VET': { basePrice: 0.025, volatility: 0.015, bidAmount: 1500, askAmount: 1400 },
+        'QNT': { basePrice: 110, volatility: 0.007, bidAmount: 1000, askAmount: 950 },
+        'EGLD': { basePrice: 42, volatility: 0.008, bidAmount: 800, askAmount: 750 },
+        // 新增币种
+        'APT': { basePrice: 12, volatility: 0.01, bidAmount: 15000, askAmount: 14000 },
+        'OP': { basePrice: 3.2, volatility: 0.011, bidAmount: 12000, askAmount: 11000 },
+
+        'STX': { basePrice: 2.5, volatility: 0.01, bidAmount: 8000, askAmount: 7500 },
+        'INJ': { basePrice: 35, volatility: 0.013, bidAmount: 6000, askAmount: 5800 },
+        'IMX': { basePrice: 2.2, volatility: 0.011, bidAmount: 7000, askAmount: 6800 },
+        'RNDR': { basePrice: 8.5, volatility: 0.012, bidAmount: 9000, askAmount: 8500 },
+        'AR': { basePrice: 30, volatility: 0.014, bidAmount: 4000, askAmount: 3800 },
+        'FTM': { basePrice: 0.65, volatility: 0.013, bidAmount: 10000, askAmount: 9500 },
+        'GRT': { basePrice: 0.22, volatility: 0.015, bidAmount: 12000, askAmount: 11500 },
+        'LDO': { basePrice: 3.8, volatility: 0.01, bidAmount: 8000, askAmount: 7800 },
+
+        'MKR': { basePrice: 2500, volatility: 0.006, bidAmount: 2000, askAmount: 1900 },
+        'SNX': { basePrice: 4.2, volatility: 0.011, bidAmount: 3500, askAmount: 3300 },
+        'COMP': { basePrice: 85, volatility: 0.009, bidAmount: 2000, askAmount: 1900 },
+        'DYDX': { basePrice: 2.8, volatility: 0.012, bidAmount: 5000, askAmount: 4800 },
+        'GMX': { basePrice: 42, volatility: 0.01, bidAmount: 1500, askAmount: 1400 },
+        'BLUR': { basePrice: 0.85, volatility: 0.013, bidAmount: 7000, askAmount: 6800 },
+        'PEPE': { basePrice: 0.0000012, volatility: 0.025, bidAmount: 20000, askAmount: 19000 },
+        'FLOKI': { basePrice: 0.00025, volatility: 0.02, bidAmount: 15000, askAmount: 14000 },
+        'ORDI': { basePrice: 55, volatility: 0.014, bidAmount: 4000, askAmount: 3800 },
+        'SUI': { basePrice: 1.5, volatility: 0.012, bidAmount: 25000, askAmount: 24000 },
+        'SEI': { basePrice: 0.8, volatility: 0.013, bidAmount: 18000, askAmount: 17000 },
+        'PYTH': { basePrice: 0.6, volatility: 0.011, bidAmount: 8000, askAmount: 7800 },
+        'JUP': { basePrice: 1.2, volatility: 0.014, bidAmount: 12000, askAmount: 11500 },
+        'WIF': { basePrice: 2.8, volatility: 0.015, bidAmount: 20000, askAmount: 19000 },
+        'BONK': { basePrice: 0.000018, volatility: 0.02, bidAmount: 15000, askAmount: 14000 },
+        'XAI': { basePrice: 0.5, volatility: 0.014, bidAmount: 5000, askAmount: 4800 },
+        'FET': { basePrice: 0.7, volatility: 0.013, bidAmount: 6000, askAmount: 5800 },
+        'AGIX': { basePrice: 0.85, volatility: 0.014, bidAmount: 5500, askAmount: 5300 },
+        'ROSE': { basePrice: 0.12, volatility: 0.015, bidAmount: 4000, askAmount: 3900 },
+        'KAVA': { basePrice: 0.95, volatility: 0.012, bidAmount: 3500, askAmount: 3400 },
+        'CELR': { basePrice: 0.022, volatility: 0.018, bidAmount: 3000, askAmount: 2900 },
+        'FTT': { basePrice: 3.8, volatility: 0.011, bidAmount: 2000, askAmount: 1900 },
+        'OKB': { basePrice: 45, volatility: 0.008, bidAmount: 1500, askAmount: 1400 },
+        'HT': { basePrice: 2.8, volatility: 0.009, bidAmount: 1000, askAmount: 950 },
+        'BNB': { basePrice: 350, volatility: 0.005, bidAmount: 50000, askAmount: 48000 },
+        'CRO': { basePrice: 0.085, volatility: 0.014, bidAmount: 8000, askAmount: 7800 },
+        'LEO': { basePrice: 5.2, volatility: 0.007, bidAmount: 500, askAmount: 480 },
+        'LUNC': { basePrice: 0.00012, volatility: 0.02, bidAmount: 10000, askAmount: 9500 },
+        'USTC': { basePrice: 0.032, volatility: 0.015, bidAmount: 5000, askAmount: 4800 },
+        'NEAR': { basePrice: 4.5, volatility: 0.012, bidAmount: 12000, askAmount: 11500 },
+        'FLOW': { basePrice: 0.82, volatility: 0.013, bidAmount: 4000, askAmount: 3900 },
+        'HBAR': { basePrice: 0.065, volatility: 0.014, bidAmount: 7000, askAmount: 6800 },
+        'XMR': { basePrice: 145, volatility: 0.007, bidAmount: 3000, askAmount: 2900 },
+        'ZEC': { basePrice: 28, volatility: 0.009, bidAmount: 2000, askAmount: 1900 },
+        'DASH': { basePrice: 42, volatility: 0.008, bidAmount: 1500, askAmount: 1400 },
+        'RVN': { basePrice: 0.028, volatility: 0.016, bidAmount: 2500, askAmount: 2400 },
+        'KSM': { basePrice: 22, volatility: 0.011, bidAmount: 1000, askAmount: 950 },
+        'TFUEL': { basePrice: 0.018, volatility: 0.017, bidAmount: 3000, askAmount: 2900 },
+        'THETA': { basePrice: 1.2, volatility: 0.012, bidAmount: 4500, askAmount: 4300 },
+        'ENJ': { basePrice: 0.28, volatility: 0.013, bidAmount: 3500, askAmount: 3400 },
+        'CHZ': { basePrice: 0.11, volatility: 0.015, bidAmount: 6000, askAmount: 5800 },
+        'ZIL': { basePrice: 0.022, volatility: 0.017, bidAmount: 4000, askAmount: 3900 },
+        'ONE': { basePrice: 0.015, volatility: 0.018, bidAmount: 3500, askAmount: 3400 },
+        'IOST': { basePrice: 0.0085, volatility: 0.02, bidAmount: 3000, askAmount: 2900 },
+        'NEO': { basePrice: 15, volatility: 0.009, bidAmount: 2500, askAmount: 2400 },
+        'ONT': { basePrice: 0.9, volatility: 0.012, bidAmount: 1500, askAmount: 1400 },
+        'QTUM': { basePrice: 3.2, volatility: 0.01, bidAmount: 1200, askAmount: 1150 },
+        'BTG': { basePrice: 45, volatility: 0.011, bidAmount: 800, askAmount: 780 },
+        'BCD': { basePrice: 0.85, volatility: 0.014, bidAmount: 500, askAmount: 480 },
+        'ZRX': { basePrice: 0.38, volatility: 0.013, bidAmount: 2000, askAmount: 1900 },
+        'BAT': { basePrice: 0.22, volatility: 0.014, bidAmount: 1800, askAmount: 1750 },
+        'REP': { basePrice: 8.5, volatility: 0.011, bidAmount: 600, askAmount: 580 },
+        'MAID': { basePrice: 0.25, volatility: 0.015, bidAmount: 300, askAmount: 290 },
+        'STEEM': { basePrice: 0.18, volatility: 0.016, bidAmount: 400, askAmount: 390 },
+        'GXS': { basePrice: 0.55, volatility: 0.014, bidAmount: 250, askAmount: 240 }
+    };
+    
+    // 生成五个交易所的价格
+    coinList.forEach(coin => {
+        const data = baseData[coin];
+        const trend = priceTrends[coin];
+        
+        // 更新价格趋势
+        if (Math.random() < 0.1) { // 10% 概率改变趋势
+            trend.direction *= -1;
+        }
+        
+        // 计算当前价格，加入趋势和随机波动
+        const priceChange = trend.direction * trend.strength * data.volatility * data.basePrice;
+        const randomChange = (Math.random() - 0.5) * 2 * data.volatility * data.basePrice;
+        const currentPrice = data.basePrice + priceChange + randomChange;
+        
+        // 确保价格为正
+        const basePrice = Math.max(0.0000001, currentPrice);
+        
+        // 随机调整挂单量，模拟市场深度变化
+        const bidAmount = data.bidAmount * (0.8 + Math.random() * 0.4);
+        const askAmount = data.askAmount * (0.8 + Math.random() * 0.4);
+        
+        coinBaseData[coin] = { bidAmount: bidAmount, askAmount: askAmount }; // 保存挂单量数据
+        
+        // 币安现货价格
+        const binanceSpread = basePrice * 0.001 * (0.8 + Math.random() * 0.4); // 买卖价差
+        const binanceSpotAsk = basePrice + binanceSpread;
+        const binanceSpotBid = basePrice - binanceSpread;
+        priceData.binance.spot[coin] = {
+            ask: binanceSpotAsk,
+            bid: binanceSpotBid,
+            askAmount: askAmount,
+            bidAmount: bidAmount,
+            last: basePrice
+        };
+        
+        // 币安合约价格 (比现货略高/低)
+        const contango = (Math.random() - 0.5) * 0.005; // 期货升贴水
+        const binanceContractAsk = (basePrice * (1 + contango)) + binanceSpread;
+        const binanceContractBid = (basePrice * (1 + contango)) - binanceSpread;
+        priceData.binance.contract[coin] = {
+            ask: binanceContractAsk,
+            bid: binanceContractBid,
+            askAmount: askAmount * 0.8,
+            bidAmount: bidAmount * 0.8,
+            last: basePrice * (1 + contango)
+        };
+        
+        // Bithumb 现货价格 (韩元)
+        const bithumbPremium = 0.01 + (Math.random() - 0.3) * 0.02; // 韩币溢价
+        const bithumbBase = basePrice * config.krwUsdRate * (1 + bithumbPremium);
+        const bithumbSpread = bithumbBase * 0.0015; // 韩币交易所价差更大
+        const bithumbAsk = bithumbBase + bithumbSpread;
+        const bithumbBid = bithumbBase - bithumbSpread;
+        priceData.bithumb.spot[coin] = {
+            ask: bithumbAsk,
+            bid: bithumbBid,
+            askAmount: askAmount * 0.7 / config.krwUsdRate,
+            bidAmount: bidAmount * 0.7 / config.krwUsdRate,
+            last: bithumbBase
+        };
+        
+        // Upbit 现货价格 (韩元)
+        const upbitPremium = 0.005 + (Math.random() - 0.35) * 0.02; // Upbit溢价
+        const upbitBase = basePrice * config.krwUsdRate * (1 + upbitPremium);
+        const upbitSpread = upbitBase * 0.0012;
+        const upbitAsk = upbitBase + upbitSpread;
+        const upbitBid = upbitBase - upbitSpread;
+        priceData.upbit.spot[coin] = {
+            ask: upbitAsk,
+            bid: upbitBid,
+            askAmount: askAmount * 0.75 / config.krwUsdRate,
+            bidAmount: bidAmount * 0.75 / config.krwUsdRate,
+            last: upbitBase
+        };
+        
+        // 火币现货价格
+        const huobiSpread = basePrice * 0.0011;
+        const huobiBase = basePrice * (1 + (Math.random() - 0.5) * 0.015);
+        const huobiSpotAsk = huobiBase + huobiSpread;
+        const huobiSpotBid = huobiBase - huobiSpread;
+        priceData.huobi.spot[coin] = {
+            ask: huobiSpotAsk,
+            bid: huobiSpotBid,
+            askAmount: askAmount * 0.7,
+            bidAmount: bidAmount * 0.7,
+            last: huobiBase
+        };
+        
+        // 火币合约价格
+        const huobiContango = (Math.random() - 0.5) * 0.006;
+        const huobiContractAsk = (basePrice * (1 + huobiContango)) + huobiSpread;
+        const huobiContractBid = (basePrice * (1 + huobiContango)) - huobiSpread;
+        priceData.huobi.contract[coin] = {
+            ask: huobiContractAsk,
+            bid: huobiContractBid,
+            askAmount: askAmount * 0.6,
+            bidAmount: bidAmount * 0.6,
+            last: basePrice * (1 + huobiContango)
+        };
+        
+        // OKX现货价格
+        const okxSpread = basePrice * 0.001;
+        const okxBase = basePrice * (1 + (Math.random() - 0.5) * 0.012);
+        const okxSpotAsk = okxBase + okxSpread;
+        const okxSpotBid = okxBase - okxSpread;
+        priceData.okx.spot[coin] = {
+            ask: okxSpotAsk,
+            bid: okxSpotBid,
+            askAmount: askAmount * 0.75,
+            bidAmount: bidAmount * 0.75,
+            last: okxBase
+        };
+        
+        // OKX合约价格
+        const okxContango = (Math.random() - 0.5) * 0.004;
+        const okxContractAsk = (basePrice * (1 + okxContango)) + okxSpread;
+        const okxContractBid = (basePrice * (1 + okxContango)) - okxSpread;
+        priceData.okx.contract[coin] = {
+            ask: okxContractAsk,
+            bid: okxContractBid,
+            askAmount: askAmount * 0.65,
+            bidAmount: bidAmount * 0.65,
+            last: basePrice * (1 + okxContango)
+        };
+    });
+    
+    // 模拟汇率波动（更真实的汇率变化）
+    const rateChange = (Math.random() - 0.5) * 5;
+    config.krwUsdRate = Math.max(1300, Math.min(1360, config.krwUsdRate + rateChange));
+}
+
+// 计算套利机会
+
+
+
+
+
+
+
+
+
+    // 收集所有可用的币种
+    const allCoins = new Set();
+    
+    // 从所有交易所收集币种
+    Object.keys(priceData.binance.spot).forEach(coin => allCoins.add(coin));
+    Object.keys(priceData.bithumb.spot).forEach(coin => allCoins.add(coin));
+    Object.keys(priceData.upbit.spot).forEach(coin => allCoins.add(coin));
+    Object.keys(priceData.huobi.spot).forEach(coin => allCoins.add(coin));
+    Object.keys(priceData.okx.spot).forEach(coin => allCoins.add(coin));
+    
+    // 转换为数组
+    const availableCoins = Array.from(allCoins);
+    
+    markets.forEach(market => {
+        availableCoins.forEach(coin => {
+            const binance = priceData.binance[market][coin];
+            const bithumb = priceData.bithumb.spot[coin];
+            const upbit = priceData.upbit.spot[coin];
+            const huobi = priceData.huobi[market][coin];
+            const okx = priceData.okx[market][coin];
+            
+            // 当使用真实API时，只处理有真实数据的币种
+            if (config.useRealAPI && !binance) return;
+            
+            // 当不使用真实API时，确保有模拟数据
+            if (!config.useRealAPI && !binance) return;
+            
+            // 过滤掉买1/卖1挂单量低于阈值的币种 (USDT价值)
+            if (binance && (binance.bidAmount < config.minOrderAmount || binance.askAmount < config.minOrderAmount)) return;
+            
+            // ------------------------------
+            // 1. 币安 ↔ Bithumb 套利 (仅现货)
+            // ------------------------------
+            if (market === 'spot' && bithumb) {
+
+
+
+
+                // 币安 → Bithumb
+                const bithumbBidUsdt = bithumb.bid / config.krwUsdRate;
+                const spread1 = ((bithumbBidUsdt - binance.ask) / binance.ask) * 100;
+                const profit1 = spread1 - config.feeRate;
+                
+                if (profit1 > config.profitThreshold && spread1 < 50) {
+                    allOpportunities.push({
+                        symbol: coin,
+                        type: 'binance-bithumb',
+                        market: market,
+                        buyExchange: '币安',
+                        buyPrice: binance.ask,
+                        buyPriceUnit: 'USDT',
+                        sellExchange: 'Bithumb',
+                        sellPrice: bithumb.bid,
+                        sellPriceUnit: 'KRW',
+                        sellPriceUsdt: bithumbBidUsdt,
+                        spread: spread1,
+                        profit: profit1,
+                        direction: '📥 币安→Bithumb'
+                    });
+                }
+
+
+
+                }
+                
+                // Bithumb → 币安
+                const bithumbAskUsdt = bithumb.ask / config.krwUsdRate;
+                const spread2 = ((binance.bid - bithumbAskUsdt) / bithumbAskUsdt) * 100;
+                const profit2 = spread2 - config.feeRate;
+                
+                if (profit2 > config.profitThreshold && spread2 < 50) {
+                    allOpportunities.push({
+                        symbol: coin,
+                        type: 'binance-bithumb',
+                        market: market,
+                        buyExchange: 'Bithumb',
+                        buyPrice: bithumb.ask, // 卖一价=152
+                        buyPriceUnit: 'KRW',
+                        sellExchange: '币安',
+                        sellPrice: binance.bid, // 买一价
+                        sellPriceUnit: 'USDT',
+                        sellPriceUsdt: binance.bid,
+                        spread: spread2,
+                        profit: profit2,
+                        direction: 'Bithumb→币安'
+                    });
+                }
+            }
+            
+            // ------------------------------
+            // 2. 币安 ? Upbit 套利 (现货)
+            // ------------------------------
+                // 币安 → Upbit
+                const upbitBidUsdt = upbit.bid / config.krwUsdRate;
+                const spread3 = ((upbitBidUsdt - binance.ask) / binance.ask) * 100;
+                const profit3 = spread3 - config.feeRate;
+                
+                if (profit3 > config.profitThreshold && spread3 < 50) {
+                    allOpportunities.push({
+                        symbol: coin,
+                        type: 'binance-upbit',
+                        market: market,
+                        buyExchange: '币安',
+                        buyPrice: binance.ask,
+                        buyPriceUnit: 'USDT',
+                        sellExchange: 'Upbit',
+                        sellPrice: upbit.bid,
+                        sellPriceUnit: 'KRW',
+                        sellPriceUsdt: upbitBidUsdt,
+                        spread: spread3,
+                        profit: profit3,
+                        direction: '📥 币安→Upbit'
+                    });
+                }
+                
+                // Upbit → 币安
+                const upbitAskUsdt = upbit.ask / config.krwUsdRate;
+                const spread4 = ((binance.bid - upbitAskUsdt) / upbitAskUsdt) * 100;
+                const profit4 = spread4 - config.feeRate;
+                
+                if (profit4 > config.profitThreshold && spread4 < 50) {
+                    allOpportunities.push({
+                        symbol: coin,
+                        type: 'binance-upbit',
+                        market: market,
+                        buyExchange: 'Upbit',
+                        buyPrice: upbit.ask,
+                        buyPriceUnit: 'KRW',
+                        sellExchange: '币安',
+                        sellPrice: binance.bid,
+                        sellPriceUnit: 'USDT',
+                        sellPriceUsdt: binance.bid,
+                        spread: spread4,
+                        profit: profit4,
+                        direction: '📤 Upbit→币安'
+                    });
+                }
+            }
+            
+            // ------------------------------
+            // 3. 币安 ↔ 火币 套利 (现货/合约)
+            // ------------------------------
+            if (huobi) {
+                // 币安 → 火币
+                const spread5 = ((huobi.bid - binance.ask) / binance.ask) * 100;
+                const profit5 = spread5 - config.feeRate;
+                
+                if (profit5 > config.profitThreshold && spread5 < 50) {
+                    allOpportunities.push({
+                        symbol: coin,
+                        type: 'binance-huobi',
+                        market: market,
+                        buyExchange: '币安',
+                        buyPrice: binance.ask,
+                        buyPriceUnit: 'USDT',
+                        sellExchange: '火币',
+                        sellPrice: huobi.bid,
+                        sellPriceUnit: 'USDT',
+                        sellPriceUsdt: huobi.bid,
+                        spread: spread5,
+                        profit: profit5,
+                        direction: '📥 币安→火币'
+                    });
+                }
+                
+                // 火币 → 币安
+                const spread6 = ((binance.bid - huobi.ask) / huobi.ask) * 100;
+                const profit6 = spread6 - config.feeRate;
+                
+                if (profit6 > config.profitThreshold && spread6 < 50) {
+                    allOpportunities.push({
+                        symbol: coin,
+                        type: 'binance-huobi',
+                        market: market,
+                        buyExchange: '火币',
+                        buyPrice: huobi.ask,
+                        buyPriceUnit: 'USDT',
+                        sellExchange: '币安',
+                        sellPrice: binance.bid,
+                        sellPriceUnit: 'USDT',
+                        sellPriceUsdt: binance.bid,
+                        spread: spread6,
+                        profit: profit6,
+                        direction: '📤 火币→币安'
+                    });
+                }
+            }
+            
+            // ------------------------------
+            // 4. 币安 ↔ OKX 套利 (现货/合约)
+            // ------------------------------
+            if (okx) {
+                // 币安 → OKX
+                const spread7 = ((okx.bid - binance.ask) / binance.ask) * 100;
+                const profit7 = spread7 - config.feeRate;
+                
+                if (profit7 > config.profitThreshold && spread7 < 50) {
+                    allOpportunities.push({
+                        symbol: coin,
+                        type: 'binance-okx',
+                        market: market,
+                        buyExchange: '币安',
+                        buyPrice: binance.ask,
+                        buyPriceUnit: 'USDT',
+                        sellExchange: 'OKX',
+                        sellPrice: okx.bid,
+                        sellPriceUnit: 'USDT',
+                        sellPriceUsdt: okx.bid,
+                        spread: spread7,
+                        profit: profit7,
+                        direction: '📥 币安→OKX'
+                    });
+                }
+                
+                // OKX → 币安
+                const spread8 = ((binance.bid - okx.ask) / okx.ask) * 100;
+                const profit8 = spread8 - config.feeRate;
+                
+                if (profit8 > config.profitThreshold && spread8 < 50) {
+                    allOpportunities.push({
+                        symbol: coin,
+                        type: 'binance-okx',
+                        market: market,
+                        buyExchange: 'OKX',
+                        buyPrice: okx.ask,
+                        buyPriceUnit: 'USDT',
+                        sellExchange: '币安',
+                        sellPrice: binance.bid,
+                        sellPriceUnit: 'USDT',
+                        sellPriceUsdt: binance.bid,
+                        spread: spread8,
+                        profit: profit8,
+                        direction: '📤 OKX→币安'
+                    });
+                }
+            }
+        });
+    });
+    
+    // 按利润排序
+    allOpportunities.sort((a, b) => b.profit - a.profit);
+}
+
+// 渲染表格
+function renderTable() {
+    const tableBody = document.getElementById('dataTable');
+    const searchText = document.getElementById('searchInput').value.toLowerCase();
+    
+    // 过滤数据
+    let filtered = allOpportunities;
+    
+    // 过滤掉差价大于50%的套利机会
+    filtered = filtered.filter(item => item.spread < 50);
+    
+    if (config.currentTab !== 'all') {
+        filtered = filtered.filter(item => item.type === config.currentTab);
+    }
+    
+    if (searchText) {
+        filtered = filtered.filter(item => 
+            item.symbol.toLowerCase().includes(searchText) ||
+            item.buyExchange.toLowerCase().includes(searchText) ||
+            item.sellExchange.toLowerCase().includes(searchText)
+        );
+    }
+    
+    // 更新统计
+    // 收集所有可用的币种
+    const allCoins = new Set();
+    Object.keys(priceData.binance.spot).forEach(coin => allCoins.add(coin));
+    Object.keys(priceData.bithumb.spot).forEach(coin => allCoins.add(coin));
+    Object.keys(priceData.upbit.spot).forEach(coin => allCoins.add(coin));
+    Object.keys(priceData.huobi.spot).forEach(coin => allCoins.add(coin));
+    Object.keys(priceData.okx.spot).forEach(coin => allCoins.add(coin));
+    
+    // 计算当前符合挂单量要求的币种数量
+    const validCoins = Array.from(allCoins).filter(coin => {
+        const binanceData = priceData.binance.spot[coin];
+        return binanceData && binanceData.bidAmount >= config.minOrderAmount && binanceData.askAmount >= config.minOrderAmount;
+    }).length;
+    
+    document.getElementById('coinCount').textContent = validCoins;
+    document.getElementById('opportunityCount').textContent = filtered.length;
+    document.getElementById('krwRate').textContent = formatNumber(config.krwUsdRate, 2);
+    document.getElementById('orderThreshold').textContent = `${config.minOrderAmount}U`;
+    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+    
+    if (filtered.length === 0) {
+        tableBody.innerHTML = `<tr><td colspan="10" style="text-align:center; color:#5a6f8f; padding:40px;">暂无符合条件的套利机会</td></tr>`;
+        return;
+    }
+    
+
+    filtered.forEach(item => {
+
+
+        }
+    });
+    
+    // 渲染表格
+    tableBody.innerHTML = filtered.map(item => {
+        const profitClass = item.profit > 2 ? 'high-profit' : 'profit';
+        const exchangeTagBuy = item.buyExchange === '币安' ? 'binance' : (item.buyExchange === 'Bithumb' ? 'bithumb' : (item.buyExchange === 'Upbit' ? 'upbit' : (item.buyExchange === '火币' ? 'huobi' : 'okx')));
+        const exchangeTagSell = item.sellExchange === '币安' ? 'binance' : (item.sellExchange === 'Bithumb' ? 'bithumb' : (item.sellExchange === 'Upbit' ? 'upbit' : (item.sellExchange === '火币' ? 'huobi' : 'okx')));
+        const marketBadge = item.market === 'spot' ? '<span style="background:#2a3f5f; padding:2px 6px; border-radius:3px; font-size:11px;">现货</span>' : '<span style="background:#ff9800; padding:2px 6px; border-radius:3px; font-size:11px;">合约</span>';
+        
+        return `
+            <tr class="opportunity">
+                <td><strong>${item.symbol}</strong></td>
+                <td>${marketBadge}</td>
+                <td>
+                    <span class="exchange-tag ${exchangeTagBuy}">${item.buyExchange}</span>
+                    →
+                    <span class="exchange-tag ${exchangeTagSell}">${item.sellExchange}</span>
+                </td>
+                <td>${formatPrice(item.buyPrice)} ${item.buyPriceUnit}</td>
+                <td>${formatPrice(item.sellPrice)} ${item.sellPriceUnit}</td>
+                <td>${formatPrice(item.sellPriceUsdt)} USDT</td>
+                <td>${item.spread > 0 ? '+' : ''}${formatNumber(item.spread, 2)}%</td>
+                <td class="${profitClass}">+${formatNumber(item.profit, 2)}%</td>
+                <td>${item.direction}</td>
+                <td><span class="profit">🔥 可套利</span></td>
+            </tr>
+        `;
+    }).join('');
+    
+    addLog(`✅ 刷新完成，发现 ${filtered.length} 个套利机会`, 'success');
+    
+    // 有套利机会时推送飞书通知
+    if (filtered.length > 0) {
+
+    }
+}
+
+// 获取真实API数据
+async function fetchRealAPI() {
+    try {
+        addLog('🔄 正在从四大交易所获取实盘数据...', 'info');
+        
+        // 重置价格数据
+        coinBaseData = {}; // 清空旧的模拟数据
+        priceData = {
+            binance: { spot: {}, contract: {} },
+            bithumb: { spot: {} },
+            upbit: { spot: {} },
+            huobi: { spot: {}, contract: {} },
+            okx: { spot: {}, contract: {} }
+        };
+
+        
+        // 1. 获取Upbit所有USDT交易对数据
+        try {
+            // 先获取所有市场信息
+            const upbitMarketsResponse = await fetch('https://api.upbit.com/v1/market/all');
+            const upbitMarketsData = await upbitMarketsResponse.json();
+            
+            // 过滤出USDT交易对
+            const usdtMarkets = upbitMarketsData
+                .filter(market => market.market.startsWith('USDT-'))
+                .map(market => market.market)
+                .slice(0, 100); // 限制数量以避免API请求过大
+            
+            if (usdtMarkets.length > 0) {
+                const upbitMarkets = usdtMarkets.join(',');
+                const upbitResponse = await fetch(`https://api.upbit.com/v1/orderbook?markets=${upbitMarkets}&limit=1`);
+                const upbitData = await upbitResponse.json();
+                
+                upbitData.forEach(item => {
+                    if (item.market.startsWith('USDT-')) {
+                        const coin = item.market.replace('USDT-', '');
+                        if (item.orderbook_units && item.orderbook_units.length > 0) {
+                            const unit = item.orderbook_units[0];
+                            priceData.upbit.spot[coin] = {
+                                ask: parseFloat(unit.ask_price),
+                                bid: parseFloat(unit.bid_price),
+                                askAmount: parseFloat(unit.ask_size) * parseFloat(unit.ask_price),
+                                bidAmount: parseFloat(unit.bid_size) * parseFloat(unit.bid_price),
+                                last: parseFloat(unit.ask_price)
+                            };
+                        }
+                    }
+                });
+                addLog(`✅ Upbit数据获取成功，获取了 ${usdtMarkets.length} 个USDT交易对`, 'success');
+            } else {
+                addLog('⚠️ Upbit没有找到USDT交易对', 'warning');
+            }
+        } catch (error) {
+            addLog(`⚠️ Upbit数据获取失败: ${error.message}`, 'warning');
+        }
+        
+        // 2. 获取Bithumb所有KRW交易对数据
+        try {
+            // 先获取所有市场信息
+            const bithumbMarketsResponse = await fetch('https://api.bithumb.com/public/ticker/ALL_KRW');
+            const bithumbMarketsData = await bithumbMarketsResponse.json();
+            
+            if (bithumbMarketsData.status === '0000' && bithumbMarketsData.data) {
+                const markets = Object.keys(bithumbMarketsData.data).filter(key => key !== 'date');
+                const bithumbCoins = markets.map(market => market.replace('_KRW', '')).slice(0, 50); // 限制数量以避免API请求过多
+                
+                let successCount = 0;
+                for (const coin of bithumbCoins) {
+                    try {
+                        const bithumbResponse = await fetch(`https://api.bithumb.com/public/orderbook/${coin}_KRW`);
+                        const bithumbData = await bithumbResponse.json();
+                        
+                        if (bithumbData.status === '0000' && bithumbData.data) {
+                            const data = bithumbData.data;
+                            // 确保asks和bids数组存在且有数据
+                            if (data.asks && data.asks.length > 0 && data.bids && data.bids.length > 0) {
+                                const askPrice = parseFloat(data.asks[0].price);
+                                const bidPrice = parseFloat(data.bids[0].price);
+
+                // 调试信息
+
+                                }
+                                priceData.bithumb.spot[coin] = {
+                                    ask: askPrice, // 卖1价
+                                    bid: bidPrice, // 买1价
+                                    askAmount: parseFloat(data.asks[0].quantity) * askPrice / config.krwUsdRate,
+                                    bidAmount: parseFloat(data.bids[0].quantity) * bidPrice / config.krwUsdRate,
+                                    last: askPrice
+                                };
+
+                                    addLog([API] Bithumb  ask: bid:, 'info');
+                                }
+                                successCount++;
+                        }
+                    } catch (coinError) {
+                        // 单个币种失败不影响整体
+                        continue;
+                    }
+                }
+                addLog(`✅ Bithumb数据获取成功，获取了 ${successCount} 个KRW交易对`, 'success');
+            } else {
+                addLog('⚠️ Bithumb没有找到KRW交易对', 'warning');
+            }
+        } catch (error) {
+            addLog(`⚠️ Bithumb数据获取失败: ${error.message}`, 'warning');
+        }
+        
+        // 3. 获取Binance所有USDT交易对数据
+        try {
+            // 先获取所有市场信息
+            const binanceExchangeInfoResponse = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+            const binanceExchangeInfo = await binanceExchangeInfoResponse.json();
+            
+            // 过滤出USDT交易对
+            const usdtSymbols = binanceExchangeInfo.symbols
+                .filter(symbol => symbol.quoteAsset === 'USDT' && symbol.status === 'TRADING')
+                .map(symbol => symbol.symbol)
+                .slice(0, 100); // 限制数量以避免API请求过多
+            
+            let successCount = 0;
+            for (const symbol of usdtSymbols) {
+                try {
+                    const coin = symbol.replace('USDT', '');
+                    const binanceResponse = await fetch(`https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=5`);
+                    const binanceData = await binanceResponse.json();
+                    
+                    if (binanceData.asks && binanceData.asks.length > 0 && binanceData.bids && binanceData.bids.length > 0) {
+                        priceData.binance.spot[coin] = {
+                            ask: parseFloat(binanceData.asks[0][0]),
+                            bid: parseFloat(binanceData.bids[0][0]),
+                            askAmount: parseFloat(binanceData.asks[0][1]) * parseFloat(binanceData.asks[0][0]),
+                            bidAmount: parseFloat(binanceData.bids[0][1]) * parseFloat(binanceData.bids[0][0]),
+                            last: parseFloat(binanceData.asks[0][0])
+                        };
+                        if (coin === "BTC") {
+                            addLog(`[API原始] Binance ${coin} - ask[0]: ${binanceData.asks[0][0]}, bid[0]: ${binanceData.bids[0][0]}`, "info");
+                        }
+                        successCount++;
+                } catch (coinError) {
+                    // 单个币种失败不影响整体
+                    continue;
+                }
+            }
+            addLog(`✅ Binance现货数据获取成功，获取了 ${successCount} 个USDT交易对`, 'success');
+        } catch (error) {
+            addLog(`⚠️ Binance现货数据获取失败: ${error.message}`, 'warning');
+        }
+        
+        // 4. 获取OKX所有USDT交易对数据
+        try {
+            // 先获取所有市场信息
+            const okxInstrumentsResponse = await fetch('https://www.okx.com/api/v5/public/instruments?instType=SPOT');
+            const okxInstrumentsData = await okxInstrumentsResponse.json();
+            
+            if (okxInstrumentsData.code === '0' && okxInstrumentsData.data) {
+                const usdtInstruments = okxInstrumentsData.data
+                    .filter(inst => inst.quoteCcy === 'USDT' && inst.state === 'live')
+                    .map(inst => inst.instId)
+                    .slice(0, 100); // 限制数量以避免API请求过多
+                
+                let successCount = 0;
+                for (const instId of usdtInstruments) {
+                    try {
+                        const coin = instId.replace('-USDT', '');
+                        const okxResponse = await fetch(`https://www.okx.com/api/v5/market/books?instId=${instId}&sz=10`);
+                        const okxData = await okxResponse.json();
+                        
+                        if (okxData.code === '0' && okxData.data && okxData.data.length > 0) {
+                            const data = okxData.data[0];
+                            priceData.okx.spot[coin] = {
+                                ask: parseFloat(data.asks[0][0]),
+                                bid: parseFloat(data.bids[0][0]),
+                                askAmount: parseFloat(data.asks[0][1]) * parseFloat(data.asks[0][0]),
+                                bidAmount: parseFloat(data.bids[0][1]) * parseFloat(data.bids[0][0]),
+                                last: parseFloat(data.asks[0][0])
+                            };
+                            successCount++;
+                        }
+                    } catch (coinError) {
+                        // 单个币种失败不影响整体
+                        continue;
+                    }
+                }
+                addLog(`✅ OKX现货数据获取成功，获取了 ${successCount} 个USDT交易对`, 'success');
+            } else {
+                addLog('⚠️ OKX没有找到USDT交易对', 'warning');
+            }
+        } catch (error) {
+            addLog(`⚠️ OKX现货数据获取失败: ${error.message}`, 'warning');
+        }
+        
+        // 5. 获取火币所有USDT交易对数据
+        try {
+            // 先获取所有市场信息
+            const huobiSymbolsResponse = await fetch('https://api.huobi.pro/v1/common/symbols');
+            const huobiSymbolsData = await huobiSymbolsResponse.json();
+            
+            if (huobiSymbolsData.status === 'ok' && huobiSymbolsData.data) {
+                const usdtSymbols = huobiSymbolsData.data
+                    .filter(symbol => symbol.quoteCurrency === 'usdt' && symbol.state === 'online')
+                    .map(symbol => symbol.baseCurrency)
+                    .slice(0, 100); // 限制数量以避免API请求过多
+                
+                let successCount = 0;
+                for (const coin of usdtSymbols) {
+                    try {
+                        const symbol = `${coin}usdt`;
+                        const huobiResponse = await fetch(`https://api.huobi.pro/market/depth?symbol=${symbol}&type=step1`);
+                        const huobiData = await huobiResponse.json();
+                        
+                        if (huobiData.status === 'ok' && huobiData.tick) {
+                            const tick = huobiData.tick;
+                            priceData.huobi.spot[coin.toUpperCase()] = {
+                                ask: parseFloat(tick.asks[0][0]),
+                                bid: parseFloat(tick.bids[0][0]),
+                                askAmount: parseFloat(tick.asks[0][1]) * parseFloat(tick.asks[0][0]),
+                                bidAmount: parseFloat(tick.bids[0][1]) * parseFloat(tick.bids[0][0]),
+                                last: parseFloat(tick.asks[0][0])
+                            };
+                            successCount++;
+                        }
+                    } catch (coinError) {
+                        // 单个币种失败不影响整体
+                        continue;
+                    }
+                }
+                addLog(`✅ 火币现货数据获取成功，获取了 ${successCount} 个USDT交易对`, 'success');
+            } else {
+                addLog('⚠️ 火币没有找到USDT交易对', 'warning');
+            }
+        } catch (error) {
+            addLog(`⚠️ 火币现货数据获取失败: ${error.message}`, 'warning');
+        }
+        
+        // 更新汇率 - 优先从 Bithumb 获取 USDT/KRW 实时价格
+        try {
+            addLog("正在获取 Bithumb USDT/KRW 汇率...", "info");
+            // 1. 先尝试从 Bithumb 获取 USDT 实时价格
+            const usdtResponse = await fetch("https://api.bithumb.com/public/orderbook/USDT_KRW");
+            addLog(`USDT API 响应状态: ${usdtResponse.status}`, "info");
+            const usdtData = await usdtResponse.json();
+            addLog(`USDT API 数据状态: ${usdtData.status}`, "info");
+            
+            if (usdtData.status === "0000" && usdtData.data) {
+                const data = usdtData.data;
+                addLog(`USDT 订单簿数据: asks=${data.asks?.length}, bids=${data.bids?.length}`, "info");
+                if (data.asks && data.asks.length > 0 && data.bids && data.bids.length > 0) {
+                    // 取买一卖一的中间价作为汇率
+                    const askPrice = parseFloat(data.asks[0].price);
+                    const bidPrice = parseFloat(data.bids[0].price);
+                    const midPrice = (askPrice + bidPrice) / 2;
+                    config.krwUsdRate = midPrice;
+                    
+                    // 更新页面显示
+                    document.getElementById("krwRate").textContent = Math.round(config.krwUsdRate);
+                    addLog(`汇率更新 (Bithumb USDT): 1 USD = ${config.krwUsdRate.toFixed(2)} KRW (买${bidPrice.toFixed(2)}/卖${askPrice.toFixed(2)})`, "success");
+                } else {
+                    throw new Error("Bithumb USDT 订单簿数据不完整");
+                }
+            } else {
+                throw new Error(`Bithumb USDT 数据返回异常: status=${usdtData.status}`);
+            }
+        } catch (bithumbError) {
+            addLog(`Bithumb USDT 获取失败: ${bithumbError.message}，尝试备用源...`, "warning");
+            // 2. Bithumb 失败，尝试 dunamu 外汇汇率作为备用
+            try {
+                const krwResponse = await fetch("https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD");
+                const krwData = await krwResponse.json();
+                if (krwData && krwData[0]) {
+                    config.krwUsdRate = parseFloat(krwData[0].basePrice);
+                    document.getElementById("krwRate").textContent = Math.round(config.krwUsdRate);
+                    addLog(`汇率更新 (dunamu 外汇): 1 USD = ${config.krwUsdRate} KRW`, "success");
+                }
+            } catch (error) {
+                addLog(`汇率获取失败，使用默认值: ${config.krwUsdRate}`, "warning");
+            }
+        }
+        
+        // 汇率更新后立即刷新页面显示（双重保险）
+        document.getElementById("krwRate").textContent = Math.round(config.krwUsdRate);
+        addLog(`汇率最终值: ${config.krwUsdRate}`, "info");
+        
+        // 调试：显示 USDT 的买一卖一具体价格
+        try {
+
+
+
+
+
+
+            }
+        } catch(e) {}
+    } catch (error) {
+        addLog(`API数据获取失败: ${error.message}`, "error");
+        addLog("系统将继续显示最近一次的数据", "warning");
+    }
+}
+async function refreshData() {
+    if (config.useRealAPI) {
+        await fetchRealAPI();
+    } else {
+        generateMockPrices();
+    }
+
+    renderTable();
+}
+
+// 切换自动刷新
+function toggleAutoRefresh() {
+    config.autoRefresh = !config.autoRefresh;
+    const checkbox = document.getElementById('autoRefresh');
+    checkbox.checked = config.autoRefresh;
+    
+    if (config.autoRefresh) {
+        const interval = parseInt(document.getElementById('refreshInterval').value);
+        if (refreshTimer) clearInterval(refreshTimer);
+        refreshTimer = setInterval(refreshData, interval);
+        document.getElementById('refreshRate').textContent = `${interval / 1000}秒`;
+        addLog(`✅ 自动刷新已开启，每${interval / 1000}秒刷新一次`, 'success');
+    } else {
+        if (refreshTimer) {
+            clearInterval(refreshTimer);
+            refreshTimer = null;
+        }
+        document.getElementById('refreshRate').textContent = '手动';
+        addLog('⏹️ 自动刷新已停止', 'warning');
+    }
+    saveConfig();
+}
+
+// 切换真实API数据
+function toggleRealAPI() {
+    config.useRealAPI = !config.useRealAPI;
+    const checkbox = document.getElementById('useRealAPI');
+    checkbox.checked = config.useRealAPI;
+    
+    if (config.useRealAPI) {
+        addLog('✅ 已启用真实API数据，将从交易所获取实时价格', 'success');
+    } else {
+        addLog('⏹️ 已切换到模拟数据模式', 'warning');
+    }
+    saveConfig();
+    refreshData();
+}
+
+// 设置阈值
+function setThreshold() {
+    const value = parseFloat(document.getElementById('profitThreshold').value);
+    const fee = parseFloat(document.getElementById('feeRate').value);
+    
+    if (!isNaN(value) && value >= 0.1 && value <= 10) {
+        config.profitThreshold = value;
+        config.feeRate = fee;
+        addLog(`✅ 阈值设置: 利润>${value}%，手续费=${fee}%`, 'success');
+        saveConfig();
+        refreshData();
+    } else {
+        addLog('❌ 请输入有效的数值', 'error');
+    }
+}
+
+// 设置挂单量阈值
+function setOrderAmountThreshold() {
+    const value = parseFloat(document.getElementById('minOrderAmount').value);
+    
+    if (!isNaN(value) && value >= 0 && value <= 10000) {
+        config.minOrderAmount = value;
+        addLog(`✅ 挂单量阈值设置: 过滤买1/卖1挂单量低于${value} USDT的币种`, 'success');
+        saveConfig();
+        refreshData();
+    } else {
+        addLog('❌ 请输入有效的挂单量数值', 'error');
+    }
+}
+
+// 切换飞书Webhook
+function toggleWebhook() {
+    config.webhookEnabled = !config.webhookEnabled;
+    const checkbox = document.getElementById('webhookEnabled');
+    checkbox.checked = config.webhookEnabled;
+    
+    if (config.webhookEnabled) {
+        config.feishuWebhook = document.getElementById('feishuWebhook').value.trim();
+        config.notificationThreshold = parseFloat(document.getElementById('notificationThreshold').value);
+        config.notificationCooldown = parseInt(document.getElementById('notificationCooldown').value) * 1000;
+        config.lastNotificationTime = 0; // 重置冷却时间，让接下来的机会可以立即推送
+        
+        if (!config.feishuWebhook) {
+            addLog('❌ 请先输入飞书Webhook地址', 'error');
+            config.webhookEnabled = false;
+            checkbox.checked = false;
+            return;
+        }
+        addLog(`✅ 飞书Webhook已开启`, 'success');
+        addLog(`   • 推送阈值: 利润≥${config.notificationThreshold}%`, 'success');
+        addLog(`   • 冷却时间: ${config.notificationCooldown / 1000}秒`, 'success');
+    } else {
+        addLog('⏹️ 飞书Webhook已关闭', 'warning');
+    }
+    saveConfig();
+}
+
+// 设置通知阈值
+function setNotificationThreshold() {
+    const value = parseFloat(document.getElementById('notificationThreshold').value);
+    
+    if (!isNaN(value) && value >= 0.1 && value <= 10) {
+        config.notificationThreshold = value;
+        addLog(`✅ 通知阈值设置: 仅推送利润≥${value}%的套利机会`, 'success');
+        saveConfig();
+    } else {
+        addLog('❌ 请输入有效的通知阈值（0.1-10%）', 'error');
+    }
+}
+
+// 设置通知冷却时间
+function setNotificationCooldown() {
+    const value = parseInt(document.getElementById('notificationCooldown').value);
+    
+    if (!isNaN(value) && value >= 5 && value <= 300) {
+        config.notificationCooldown = value * 1000; // 转换为毫秒
+        addLog(`✅ 通知冷却时间设置: ${value}秒`, 'success');
+        saveConfig();
+    } else {
+        addLog('❌ 请输入有效的冷却时间（5-300秒）', 'error');
+    }
+}
+
+// 测试飞书Webhook
+async function testWebhook() {
+    const webhook = document.getElementById('feishuWebhook').value.trim();
+    if (!webhook) {
+        addLog('❌ 请先输入飞书Webhook地址', 'error');
+        return;
+    }
+    
+    addLog('🔄 正在发送测试消息...', 'info');
+    
+    try {
+        const testMessage = {
+            msg_type: "interactive",
+            card: {
+                header: {
+                    title: {
+                        tag: "plain_text",
+                        content: "📊 DC套利监控系统测试通知"
+                    },
+                    template: "green"
+                },
+                elements: [
+                    {
+                        tag: "div",
+                        text: {
+                            tag: "lark_md",
+                            content: "✅ Webhook连接测试成功！\n有新的套利机会时会自动推送通知。"
+                        }
+                    },
+                    {
+                        tag: "hr"
+                    },
+                    {
+                        tag: "note",
+                        elements: [
+                            {
+                                tag: "plain_text",
+                                content: `测试时间: ${new Date().toLocaleString()}`
+                            }
+                        ]
+                    }
+                ]
+            }
+        };
+        
+        // 方案1：尝试使用no-cors模式（虽然无法获取响应，但可以发送请求）
+        const response = await fetch(webhook, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(testMessage),
+            mode: 'no-cors'
+        });
+        
+        addLog('✅ 测试消息已发送，请检查飞书是否收到', 'success');
+        addLog('💡 如果没收到，可能是跨域限制，请使用以下解决方案：', 'warning');
+        addLog('   1. 将文件放到本地web服务器（Nginx/Apache）运行', 'warning');
+        addLog('   2. 使用Chrome启动参数：--disable-web-security --user-data-dir="C:\\temp"', 'warning');
+        addLog('   3. 安装浏览器扩展：Allow CORS: Access-Control-Allow-Origin', 'warning');
+        
+    } catch (error) {
+        addLog(`❌ 发送失败: ${error.message}`, 'error');
+        addLog('💡 这是浏览器跨域限制导致的，属于正常现象', 'warning');
+        addLog('💡 实际部署到服务器上就可以正常工作', 'warning');
+    }
+}
+
+// 发送套利机会通知
+
+    addLog(`🔍 检查推送条件: webhookEnabled=${config.webhookEnabled}, hasWebhook=${!!config.feishuWebhook}, opportunities=${opportunities.length}`, 'info');
+    
+    if (!config.webhookEnabled || !config.feishuWebhook || opportunities.length === 0) return;
+    
+    // 过滤出利润≥通知阈值的机会
+    const highProfitOpportunities = opportunities.filter(item => {
+        const isMatch = item.profit >= config.notificationThreshold;
+        addLog(`  币种${item.symbol}: 利润${item.profit.toFixed(2)}% >= ${config.notificationThreshold}% ? ${isMatch}`, 'info');
+        return isMatch;
+    });
+    
+    if (highProfitOpportunities.length === 0) {
+        addLog(`ℹ️ 发现${opportunities.length}个机会，但都低于通知阈值${config.notificationThreshold}%，不推送`, 'info');
+        return;
+    }
+    
+    // 冷却时间控制，避免频繁发送
+    const now = Date.now();
+    const timeLeft = Math.ceil((config.notificationCooldown - (now - config.lastNotificationTime)) / 1000);
+    if (now - config.lastNotificationTime < config.notificationCooldown) {
+        addLog(`ℹ️ 发现${highProfitOpportunities.length}个高利润机会，但处于冷却时间，剩余${timeLeft}秒`, 'info');
+        return;
+    }
+    config.lastNotificationTime = now;
+    
+    addLog(`✅ 满足推送条件，共${highProfitOpportunities.length}个高利润机会`, 'success');
+    addLog(`🔄 正在推送到飞书: ${config.feishuWebhook}`, 'info');
+    
+    // 只取前5个利润最高的机会
+    const topOpportunities = highProfitOpportunities.slice(0, 5);
+    
+    try {
+        const content = topOpportunities.map((item, index) => 
+            `**${index + 1}. ${item.symbol} ${item.market === 'spot' ? '现货' : '合约'}**\n` +
+            `💹 利润: +${item.profit.toFixed(2)}%\n` +
+            `🔄 方向: ${item.direction}\n` +
+            `💰 买入价: ${item.buyPrice.toFixed(4)} ${item.buyPriceUnit}\n` +
+            `💴 卖出价: ${item.sellPrice.toFixed(4)} ${item.sellPriceUnit}`
+        ).join('\n\n');
+        
+        const notification = {
+            msg_type: "interactive",
+            card: {
+                header: {
+                    title: {
+                        tag: "plain_text",
+                        content: `🔥 发现${highProfitOpportunities.length}个高利润套利机会(≥${config.notificationThreshold}%)！`
+                    },
+                    template: "red"
+                },
+                elements: [
+                    {
+                        tag: "div",
+                        text: {
+                            tag: "lark_md",
+                            content: content
+                        }
+                    },
+                    {
+                        tag: "hr"
+                    },
+                    {
+                        tag: "note",
+                        elements: [
+                            {
+                                tag: "plain_text",
+                                content: `更新时间: ${new Date().toLocaleString()}`
+                            }
+                        ]
+                    }
+                ]
+            }
+        };
+        
+        // 使用no-cors模式发送，绕过浏览器跨域限制
+        await fetch(config.feishuWebhook, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(notification),
+            mode: 'no-cors'
+        });
+        
+        addLog(`📤 已推送${highProfitOpportunities.length}个高利润套利机会到飞书`, 'success');
+        addLog(`💡 消息内容: ${JSON.stringify(notification)}`, 'info');
+    } catch (error) {
+        addLog(`❌ 推送失败: ${error.message}`, 'error');
+        addLog('💡 这是浏览器跨域限制导致的，部署到服务器后会自动正常工作', 'warning');
+    }
+}
+
+// 切换标签页
+function switchTab(tab) {
+    config.currentTab = tab;
+    document.querySelectorAll('.tabs:first-child .tab').forEach(t => t.classList.remove('active'));
+    event.target.classList.add('active');
+    renderTable();
+}
+
+// 切换市场类型
+function switchMarket(market) {
+    config.currentMarket = market;
+    document.querySelectorAll('.tabs:last-child .tab').forEach(t => t.classList.remove('active'));
+    event.target.classList.add('active');
+    refreshData();
+}
+
+// 搜索过滤
+function filterTable() {
+    renderTable();
+}
+
+// 初始化
+function init() {
+    // 监听刷新间隔变化
+    document.getElementById('refreshInterval').addEventListener('change', function() {
+        if (config.autoRefresh && refreshTimer) {
+            clearInterval(refreshTimer);
+            const newInterval = parseInt(this.value);
+            config.refreshInterval = newInterval;
+            refreshTimer = setInterval(refreshData, newInterval);
+            document.getElementById('refreshRate').textContent = `${newInterval / 1000}秒`;
+            addLog(`🔄 刷新间隔改为${newInterval / 1000}秒`, 'info');
+            saveConfig();
+        }
+    });
+    
+    // 加载保存的配置
+    loadConfig();
+    
+    // 初始化数据
+    generateMockPrices();
+
+    renderTable();
+    
+    addLog('🚀 套利监控系统初始化完成', 'success');
+    addLog('📌 支持交易所: 币安/OKX/Bithumb/Upbit', 'info');
+    addLog('💡 已支持市场: 现货/合约', 'info');
+    addLog(`💡 当前过滤规则: 买1/卖1挂单量 ≥ ${config.minOrderAmount} USDT`, 'info');
+    addLog(`💡 已支持飞书Webhook提醒: 利润≥${config.notificationThreshold}%时自动推送通知`, 'info');
+    addLog('💡 配置已自动保存，刷新页面不会丢失', 'info');
+    addLog('💡 提示: 系统使用模拟数据，实际使用时需要连接交易所API', 'warning');
+}
+
+// 页面加载完成
+window.onload = init;
+</script>
+</body>
+</html>
+

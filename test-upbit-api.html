@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upbit API测试</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .result { margin: 20px 0; padding: 10px; border: 1px solid #ccc; }
+        .error { background-color: #ffe6e6; border-color: #ff9999; }
+        .success { background-color: #e6ffe6; border-color: #99ff99; }
+    </style>
+</head>
+<body>
+    <h1>Upbit API测试</h1>
+    <button onclick="testUpbitAPI()">测试Upbit API</button>
+    <div id="result" class="result"></div>
+
+    <script>
+        async function testUpbitAPI() {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML = '<p>正在测试Upbit API...</p>';
+            
+            try {
+                // 测试Upbit API
+                const response = await fetch('https://api.upbit.com/v1/ticker?markets=USDT-BTC,USDT-ETH,USDT-SOL,USDT-BNB,USDT-XRP,USDT-ADA,USDT-DOGE,USDT-MATIC,USDT-LTC,USDT-BCH');
+                const data = await response.json();
+                
+                console.log('Upbit API响应:', data);
+                
+                if (Array.isArray(data)) {
+                    let html = '<h3>Upbit USDT交易对价格:</h3><ul>';
+                    data.forEach(item => {
+                        if (item.market.startsWith('USDT-')) {
+                            const symbol = item.market.replace('USDT-', '');
+                            html += `<li>${symbol}: ${item.trade_price} USDT</li>`;
+                        }
+                    });
+                    html += '</ul>';
+                    resultDiv.innerHTML = html;
+                    resultDiv.className = 'result success';
+                } else {
+                    resultDiv.innerHTML = '<p>API返回格式错误</p>';
+                    resultDiv.className = 'result error';
+                }
+            } catch (error) {
+                console.error('Upbit API错误:', error);
+                resultDiv.innerHTML = `<p>API调用失败: ${error.message}</p>`;
+                resultDiv.className = 'result error';
+            }
+        }
+    </script>
+</body>
+</html>
