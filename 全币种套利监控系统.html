@@ -1143,7 +1143,10 @@ async function fetchRealAPI() {
                 const bithumbCoins = markets.map(market => market.replace('_KRW', '')).slice(0, 50); // 限制数量以避免API请求过多
                 
                 let successCount = 0;
-                for (const coin of bithumbCoins) {
+                for (let i = 0; i < bithumbCoins.length; i++) {
+                    const coin = bithumbCoins[i];
+                    // 添加延迟避免 429 错误
+                    await new Promise(resolve => setTimeout(resolve, i * 100));
                     try {
                         const bithumbResponse = await corsFetch(`https://api.bithumb.com/public/orderbook/${coin}_KRW`);
                         const bithumbData = await bithumbResponse.json();
@@ -1724,6 +1727,7 @@ window.onload = init;
 </script>
 </body>
 </html>
+
 
 
 
