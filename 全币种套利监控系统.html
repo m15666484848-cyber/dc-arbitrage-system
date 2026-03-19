@@ -1042,7 +1042,7 @@ function renderTable() {
 // CORS 代理包装函数
 async function corsFetch(url, options = {}) { console.log('[corsFetch] URL:', url);
     // 如果在 GitHub Pages 上，使用 CORS 代理
-    if (config.useCORSProxy && location.hostname.includes('github.io')) {
+    if (location.hostname.includes('github.io') || location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
         // 使用多个 CORS 代理备选
         const proxies = [
             https://api.allorigins.win/get?url=,
@@ -1727,6 +1727,7 @@ window.onload = init;
 </script>
 </body>
 </html>
+
 
 
 
