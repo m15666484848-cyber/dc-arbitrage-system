@@ -277,7 +277,7 @@
 async function corsFetch(url, options = {}) {
     const proxyUrl = https://api.codetabs.com/v1/proxy?quest=;
     try {
-        return await corsFetch(proxyUrl, options);
+        return await fetch(proxyUrl, options);
     } catch (e) {
         console.error('CORS proxy failed:', e);
         throw e;
@@ -1688,4 +1688,5 @@ window.onload = init;
 </script>
 </body>
 </html>
+
 
