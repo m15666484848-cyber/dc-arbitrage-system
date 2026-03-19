@@ -1040,7 +1040,7 @@ function renderTable() {
 
 
 // CORS 代理包装函数
-async function corsFetch(url, options = {}) {
+async function corsFetch(url, options = {}) { console.log('[corsFetch] URL:', url);
     // 如果在 GitHub Pages 上，使用 CORS 代理
     if (config.useCORSProxy && location.hostname.includes('github.io')) {
         // 使用多个 CORS 代理备选
@@ -1724,6 +1724,7 @@ window.onload = init;
 </script>
 </body>
 </html>
+
 
 
 
