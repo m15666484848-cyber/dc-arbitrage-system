@@ -1052,7 +1052,9 @@ async function corsFetch(url, options = {}) { console.log('[corsFetch] URL:', ur
         
         for (const proxyUrl of proxies) {
             try {
-                const response = await corsFetch(proxyUrl, options);
+                const fullProxyUrl = proxyUrl + encodeURIComponent(url);
+                console.log('[corsFetch] Trying:', fullProxyUrl);
+                const response = await fetch(fullProxyUrl, options);
                 if (response.ok) {
                     // 某些代理返回的数据格式不同，需要处理
                     if (proxyUrl.includes('allorigins.win')) {
@@ -1727,6 +1729,7 @@ window.onload = init;
 </script>
 </body>
 </html>
+
 
 
 
