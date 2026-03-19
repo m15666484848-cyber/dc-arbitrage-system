@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
@@ -307,6 +307,7 @@ const config = {
     lastNotificationTime: 0,
     notificationCooldown: 30000, // 通知冷却时间（毫秒），避免重复提醒
     useRealAPI: true, // 是否使用真实API
+    useCORSProxy: true, // 是否使用 CORS 代理（GitHub Pages 需要）
     apiTimeout: 5000 // API请求超时时间
 };
 
@@ -1037,6 +1038,44 @@ function renderTable() {
     }
 }
 
+
+// CORS 代理包装函数
+async function corsFetch(url, options = {}) {
+    // 如果在 GitHub Pages 上，使用 CORS 代理
+    if (config.useCORSProxy && location.hostname.includes('github.io')) {
+        // 使用多个 CORS 代理备选
+        const proxies = [
+            https://api.allorigins.win/get?url=,
+            https://corsproxy.io/?,
+            https://api.codetabs.com/v1/proxy?quest=
+        ];
+        
+        for (const proxyUrl of proxies) {
+            try {
+                const response = await corsFetch(proxyUrl, options);
+                if (response.ok) {
+                    // 某些代理返回的数据格式不同，需要处理
+                    if (proxyUrl.includes('allorigins.win')) {
+                        const data = await response.json();
+                        return new Response(data.contents, {
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: response.headers
+                        });
+                    }
+                    return response;
+                }
+            } catch (e) {
+                console.log(Proxy failed: , e);
+                continue;
+            }
+        }
+        throw new Error('All CORS proxies failed');
+    }
+    // 本地开发或已禁用代理，直接使用原始请求
+    return fetch(url, options);
+}
+
 // 获取真实API数据
 async function fetchRealAPI() {
     try {
@@ -1056,7 +1095,7 @@ async function fetchRealAPI() {
         // 1. 获取Upbit所有USDT交易对数据
         try {
             // 先获取所有市场信息
-            const upbitMarketsResponse = await fetch('https://api.upbit.com/v1/market/all');
+            const upbitMarketsResponse = await corsFetch('https://api.upbit.com/v1/market/all');
             const upbitMarketsData = await upbitMarketsResponse.json();
             
             // 过滤出USDT交易对
@@ -1067,7 +1106,7 @@ async function fetchRealAPI() {
             
             if (usdtMarkets.length > 0) {
                 const upbitMarkets = usdtMarkets.join(',');
-                const upbitResponse = await fetch(`https://api.upbit.com/v1/orderbook?markets=${upbitMarkets}&limit=1`);
+                const upbitResponse = await corsFetch(`https://api.upbit.com/v1/orderbook?markets=${upbitMarkets}&limit=1`);
                 const upbitData = await upbitResponse.json();
                 
                 upbitData.forEach(item => {
@@ -1096,7 +1135,7 @@ async function fetchRealAPI() {
         // 2. 获取Bithumb所有KRW交易对数据
         try {
             // 先获取所有市场信息
-            const bithumbMarketsResponse = await fetch('https://api.bithumb.com/public/ticker/ALL_KRW');
+            const bithumbMarketsResponse = await corsFetch('https://api.bithumb.com/public/ticker/ALL_KRW');
             const bithumbMarketsData = await bithumbMarketsResponse.json();
             
             if (bithumbMarketsData.status === '0000' && bithumbMarketsData.data) {
@@ -1106,7 +1145,7 @@ async function fetchRealAPI() {
                 let successCount = 0;
                 for (const coin of bithumbCoins) {
                     try {
-                        const bithumbResponse = await fetch(`https://api.bithumb.com/public/orderbook/${coin}_KRW`);
+                        const bithumbResponse = await corsFetch(`https://api.bithumb.com/public/orderbook/${coin}_KRW`);
                         const bithumbData = await bithumbResponse.json();
                         
                         if (bithumbData.status === '0000' && bithumbData.data) {
@@ -1147,7 +1186,7 @@ async function fetchRealAPI() {
         // 3. 获取Binance所有USDT交易对数据
         try {
             // 先获取所有市场信息
-            const binanceExchangeInfoResponse = await fetch('https://api.binance.com/api/v3/exchangeInfo');
+            const binanceExchangeInfoResponse = await corsFetch('https://api.binance.com/api/v3/exchangeInfo');
             const binanceExchangeInfo = await binanceExchangeInfoResponse.json();
             
             // 过滤出USDT交易对
@@ -1160,7 +1199,7 @@ async function fetchRealAPI() {
             for (const symbol of usdtSymbols) {
                 try {
                     const coin = symbol.replace('USDT', '');
-                    const binanceResponse = await fetch(`https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=5`);
+                    const binanceResponse = await corsFetch(`https://api.binance.com/api/v3/depth?symbol=${symbol}&limit=5`);
                     const binanceData = await binanceResponse.json();
                     
                     if (binanceData.asks && binanceData.asks.length > 0 && binanceData.bids && binanceData.bids.length > 0) {
@@ -1188,7 +1227,7 @@ async function fetchRealAPI() {
         // 4. 获取OKX所有USDT交易对数据
         try {
             // 先获取所有市场信息
-            const okxInstrumentsResponse = await fetch('https://www.okx.com/api/v5/public/instruments?instType=SPOT');
+            const okxInstrumentsResponse = await corsFetch('https://www.okx.com/api/v5/public/instruments?instType=SPOT');
             const okxInstrumentsData = await okxInstrumentsResponse.json();
             
             if (okxInstrumentsData.code === '0' && okxInstrumentsData.data) {
@@ -1201,7 +1240,7 @@ async function fetchRealAPI() {
                 for (const instId of usdtInstruments) {
                     try {
                         const coin = instId.replace('-USDT', '');
-                        const okxResponse = await fetch(`https://www.okx.com/api/v5/market/books?instId=${instId}&sz=10`);
+                        const okxResponse = await corsFetch(`https://www.okx.com/api/v5/market/books?instId=${instId}&sz=10`);
                         const okxData = await okxResponse.json();
                         
                         if (okxData.code === '0' && okxData.data && okxData.data.length > 0) {
@@ -1231,7 +1270,7 @@ async function fetchRealAPI() {
         // 5. 获取火币所有USDT交易对数据
         try {
             // 先获取所有市场信息
-            const huobiSymbolsResponse = await fetch('https://api.huobi.pro/v1/common/symbols');
+            const huobiSymbolsResponse = await corsFetch('https://api.huobi.pro/v1/common/symbols');
             const huobiSymbolsData = await huobiSymbolsResponse.json();
             
             if (huobiSymbolsData.status === 'ok' && huobiSymbolsData.data) {
@@ -1244,7 +1283,7 @@ async function fetchRealAPI() {
                 for (const coin of usdtSymbols) {
                     try {
                         const symbol = `${coin}usdt`;
-                        const huobiResponse = await fetch(`https://api.huobi.pro/market/depth?symbol=${symbol}&type=step1`);
+                        const huobiResponse = await corsFetch(`https://api.huobi.pro/market/depth?symbol=${symbol}&type=step1`);
                         const huobiData = await huobiResponse.json();
                         
                         if (huobiData.status === 'ok' && huobiData.tick) {
@@ -1275,7 +1314,7 @@ async function fetchRealAPI() {
         try {
             addLog("正在获取 Bithumb USDT/KRW 汇率...", "info");
             // 1. 先尝试从 Bithumb 获取 USDT 实时价格
-            const usdtResponse = await fetch("https://api.bithumb.com/public/orderbook/USDT_KRW");
+            const usdtResponse = await corsFetch("https://api.bithumb.com/public/orderbook/USDT_KRW");
             addLog(`USDT API 响应状态: ${usdtResponse.status}`, "info");
             const usdtData = await usdtResponse.json();
             addLog(`USDT API 数据状态: ${usdtData.status}`, "info");
@@ -1303,7 +1342,7 @@ async function fetchRealAPI() {
             addLog(`Bithumb USDT 获取失败: ${bithumbError.message}，尝试备用源...`, "warning");
             // 2. Bithumb 失败，尝试 dunamu 外汇汇率作为备用
             try {
-                const krwResponse = await fetch("https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD");
+                const krwResponse = await corsFetch("https://quotation-api-cdn.dunamu.com/v1/forex/recent?codes=FRX.KRWUSD");
                 const krwData = await krwResponse.json();
                 if (krwData && krwData[0]) {
                     config.krwUsdRate = parseFloat(krwData[0].basePrice);
@@ -1511,7 +1550,7 @@ async function testWebhook() {
         };
         
         // 方案1：尝试使用no-cors模式（虽然无法获取响应，但可以发送请求）
-        const response = await fetch(webhook, {
+        const response = await corsFetch(webhook, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1610,7 +1649,7 @@ async function testWebhook() {
         };
         
         // 使用no-cors模式发送，绕过浏览器跨域限制
-        await fetch(config.feishuWebhook, {
+        await corsFetch(config.feishuWebhook, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -1685,4 +1724,6 @@ window.onload = init;
 </script>
 </body>
 </html>
+
+
 
