@@ -152,3 +152,34 @@ def test_timeout_profitable_with_sl_should_alert_only_condition():
     pnl, _ = position_manager.compute_pnl(pos, 120)
     assert pnl > 0
     assert pos.sl > 0
+
+
+
+@pytest.mark.asyncio
+async def test_partial_check_only_triggers_stop_loss(monkeypatch):
+    calls = {"tp": 0, "close": 0}
+    pos = Position(
+        id=9,
+        customer_id=1,
+        symbol="BTC/USDT",
+        side="long",
+        qty=1,
+        entry_price=100,
+        sl=90,
+        tp_levels=[{"level": 1, "price": 110, "status": "pending"}],
+        status="open",
+    )
+
+    async def fake_tp(*args, **kwargs):
+        calls["tp"] += 1
+
+    async def fake_close(*args, **kwargs):
+        calls["close"] += 1
+        return {"ok": True}
+
+    monkeypatch.setattr(position_manager.order_manager, "close_at_tp_level", fake_tp)
+    monkeypatch.setattr(position_manager.order_manager, "close_position", fake_close)
+    await position_manager._check_one_position_with_price(FakeDb(), pos, 120, full_check=False)
+
+    assert calls["tp"] == 0
+    assert calls["close"] == 0

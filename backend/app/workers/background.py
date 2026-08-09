@@ -32,8 +32,6 @@ _LOOP_FACTORIES: dict[str, callable] = {
     "position_monitor": position_manager.monitor_loop,
 
     "pending_monitor": pending_order_manager.monitor_loop,
-
-    "stop_loss_monitor": position_manager.stop_loss_monitor_loop,
 }
 
 WATCHDOG_INTERVAL = 60  # 看门狗检查间隔(秒)
@@ -373,7 +371,7 @@ async def start_background_tasks() -> None:
 
     _watchdog_task = asyncio.create_task(_watchdog(), name="watchdog")
 
-    logger.info("后台任务已启动(Discord 监听 / 持仓监控 / 待触发单监控 / 止损监控(1秒级) / 净值快照 / 日风控快照 / 授权预警 / 超时平仓 / KOL风控 / 交易所对账(10分钟) / 看门狗)")
+    logger.info("后台任务已启动(Discord 监听 / 统一持仓监控(1秒SL/5秒TP) / 待触发单监控 / 净值快照 / 日风控快照 / 授权预警 / 超时平仓 / KOL风控 / 交易所对账(10分钟) / 看门狗)")
 
 
 
