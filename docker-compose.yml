@@ -56,8 +56,10 @@ services:
       redis:
         condition: service_healthy
     volumes:
-      # bind mount 应用代码,修改宿主文件后 restart 即可生效,无需重新构建镜像
+      # bind mount 应用代码和迁移文件,修改宿主文件后 recreate/restart 即可生效
       - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+      - ./backend/alembic.ini:/app/alembic.ini
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:

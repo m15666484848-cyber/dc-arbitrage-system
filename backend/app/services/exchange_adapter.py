@@ -617,13 +617,48 @@ async def place_native_stop_loss_order(
 ) -> dict:
     """提交交易所原生止损单。
 
-    该函数只在 settings.native_stop_loss_enabled=True 时由上层调用。
-    当前系统仍保留 1 秒轮询作为兜底,避免交易所条件单异常导致裸奔。
+    当前实际启用 OKX 原生 algo conditional 止损单。其他交易所先显式拒绝,
+    避免条件单参数差异导致小仓验证时误触发。
     """
+    ex_name = (exchange or getattr(ex, "id", "") or "").lower()
+    if ex_name != "okx":
+        raise ValueError(f"原生止损小仓验证当前仅启用 OKX,当前交易所={exchange}")
+    if stop_price <= 0:
+        raise ValueError("止损价格必须大于 0")
+
+    norm_symbol = _normalize_symbol("okx", symbol)
+    market = ex.market(norm_symbol)
+    inst_id = market.get("id") or norm_symbol.replace("/", "-").replace(":USDT", "-SWAP")
+    contract_size = float(market.get("contractSize") or 1.0)
+    sz = amount / contract_size if contract_size > 0 else amount
+    if hasattr(ex, "amount_to_precision"):
+        sz = ex.amount_to_precision(norm_symbol, sz)
+    else:
+        sz = str(sz)
+    trigger_px = ex.price_to_precision(norm_symbol, stop_price) if hasattr(ex, "price_to_precision") else str(stop_price)
     close_side = "sell" if side == "long" else "buy"
-    params = build_native_stop_loss_params(exchange, side, stop_price)
-    norm_symbol = _normalize_symbol(exchange, symbol)
-    return await ex.create_order(norm_symbol, "market", close_side, amount, None, params)
+
+    payload = {
+        "instId": inst_id,
+        "tdMode": "cross",
+        "side": close_side,
+        "posSide": side,
+        "ordType": "conditional",
+        "sz": str(sz),
+        "slTriggerPx": str(trigger_px),
+        "slOrdPx": "-1",
+        "reduceOnly": "true",
+    }
+    try:
+        return await ex.privatePostTradeOrderAlgo(payload)
+    except Exception as e:
+        msg = str(e)
+        if "posSide" in msg or "51000" in msg:
+            fallback = dict(payload)
+            fallback["posSide"] = "net"
+            logger.warning(f"OKX 原生止损 posSide={side} 被拒,改用 net 重试: {inst_id}")
+            return await ex.privatePostTradeOrderAlgo(fallback)
+        raise
 
 
 async def close_position_market(ex, symbol: str, side: str, amount: float) -> dict:

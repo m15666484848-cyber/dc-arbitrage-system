@@ -198,3 +198,15 @@ def test_native_stop_loss_params_binance():
     params = exchange_adapter.build_native_stop_loss_params("binance", "short", 105.0)
     assert params["reduceOnly"] is True
     assert params["stopPrice"] == 105.0
+
+
+
+@pytest.mark.asyncio
+async def test_native_stop_loss_rejects_non_okx_for_live_submit():
+    class FakeEx:
+        id = "binance"
+
+    with pytest.raises(ValueError):
+        await exchange_adapter.place_native_stop_loss_order(
+            FakeEx(), "binance", "BTC/USDT", "long", 0.01, 95.0
+        )

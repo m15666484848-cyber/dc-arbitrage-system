@@ -37,6 +37,7 @@ from sqlalchemy import select, func, text
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.redis import get_redis
 
 from app.models.kol import Kol, KolFollow
@@ -2807,6 +2808,61 @@ async def _verify_order_filled(ex, ex_order: dict, symbol: str) -> tuple[float, 
 
     return filled, filled_price
 
+async def _try_place_native_stop_loss(
+    db: AsyncSession,
+    ex,
+    *,
+    customer_id: int,
+    kol_id: int,
+    signal_id: int,
+    exchange_account_id: int,
+    exchange: str,
+    position_id: int,
+    symbol: str,
+    side: str,
+    qty: float,
+    sl: float | None,
+    leverage: int,
+) -> None:
+    """灰度提交交易所原生止损单,失败不影响系统内 1 秒止损兜底。"""
+    if not settings.native_stop_loss_enabled or not sl or sl <= 0 or qty <= 0:
+        return
+    try:
+        native_order = await exchange_adapter.place_native_stop_loss_order(
+            ex, exchange, symbol, side, qty, sl
+        )
+        data = native_order.get("data") if isinstance(native_order, dict) else None
+        first = data[0] if isinstance(data, list) and data else {}
+        algo_id = (
+            str(first.get("algoId") or first.get("ordId") or native_order.get("id") or "")
+            if isinstance(native_order, dict) else ""
+        )
+        db.add(Order(
+            customer_id=customer_id,
+            kol_id=kol_id,
+            signal_id=signal_id,
+            position_id=position_id,
+            exchange_account_id=exchange_account_id,
+            exchange=exchange,
+            symbol=symbol,
+            side="sell" if side == "long" else "buy",
+            type="stop_market",
+            order_role="stop_loss",
+            qty=qty,
+            price=sl,
+            leverage=leverage,
+            status="pending",
+            exchange_order_id=algo_id,
+            created_at=_utcnow(),
+        ))
+        logger.info(f"原生止损单已提交 pos={position_id} symbol={symbol} sl={sl} algo_id={algo_id}")
+    except Exception as e:
+        logger.warning(
+            f"原生止损单提交失败,保留系统内1秒止损兜底: "
+            f"pos={position_id} symbol={symbol} sl={sl} err={e}"
+        )
+
+
 async def _place_entry(
 
     db: AsyncSession,
@@ -3112,6 +3168,22 @@ async def _place_entry(
             )
 
             db.add(trade)
+
+            await _try_place_native_stop_loss(
+                db,
+                ex,
+                customer_id=customer_id,
+                kol_id=kol_id,
+                signal_id=signal_id,
+                exchange_account_id=exchange_account_id,
+                exchange=exchange,
+                position_id=sub_position.id,
+                symbol=parsed.symbol,
+                side=parsed.side,
+                qty=order.filled_qty,
+                sl=sl,
+                leverage=parsed.leverage,
+            )
 
             try:
 
