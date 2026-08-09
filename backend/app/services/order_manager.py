@@ -3133,6 +3133,9 @@ async def _place_entry(
 
             db.add(sub_position)
 
+            # 确保子仓位 id 已生成，供原生止损订单记录正确关联。
+            await db.flush()
+
             trade = Trade(
 
                 customer_id=customer_id,
