@@ -1518,16 +1518,9 @@ async def process_signal(
 
     defaults = strategy_engine.get_strategy_defaults(decision.params or {})
 
-    # 统一止损配置:优先使用客户 RiskConfig.auto_stop_loss_pct。
-    # 该值同时作为缺失 SL 的默认补充比例,以及 KOL 过宽 SL 的最大亏损上限。
-    risk_cfg = await risk_manager.get_risk_config(db, customer_id, exchange)
-    max_sl_pct = None
-    if risk_cfg and risk_cfg.auto_stop_loss_pct and risk_cfg.auto_stop_loss_pct > 0:
-        max_sl_pct = float(risk_cfg.auto_stop_loss_pct) / 100.0
-        defaults["default_sl_pct"] = -max_sl_pct
-
     # 2. 交易所账号
-
+    # 必须先选出交易所账号,再读取 RiskConfig。否则仅更新止盈止损/持仓过夜类信号
+    # 在没有进入下单分支前会访问未初始化的 exchange 变量。
     ex_acc = await _pick_exchange_account(db, customer_id)
 
     if not ex_acc:
@@ -1557,6 +1550,14 @@ async def process_signal(
 
     exchange_account_id = ex_acc.id
 
+    # 统一止损配置:优先使用客户 RiskConfig.auto_stop_loss_pct。
+    # 该值同时作为缺失 SL 的默认补充比例,以及 KOL 过宽 SL 的最大亏损上限。
+    risk_cfg = await risk_manager.get_risk_config(db, customer_id, exchange)
+    max_sl_pct = None
+    if risk_cfg and risk_cfg.auto_stop_loss_pct and risk_cfg.auto_stop_loss_pct > 0:
+        max_sl_pct = float(risk_cfg.auto_stop_loss_pct) / 100.0
+        defaults["default_sl_pct"] = -max_sl_pct
+
     # 多 API 独立策略:单个 API 指定 strategy_id 时,优先使用 API 级策略覆盖 KOL 跟随策略。
     if getattr(ex_acc, "strategy_id", None):
         api_strategy = (
@@ -1573,6 +1574,8 @@ async def process_signal(
             notional_override = None
             decision = strategy_engine.compute_decision(strategy)
             defaults = strategy_engine.get_strategy_defaults(decision.params or {})
+            if max_sl_pct:
+                defaults["default_sl_pct"] = -max_sl_pct
             logger.info(
                 f"API级策略生效: customer={customer_id} account={exchange_account_id} "
                 f"strategy={strategy.id} notional={decision.notional_usdt}"

@@ -210,3 +210,15 @@ async def test_native_stop_loss_rejects_non_okx_for_live_submit():
         await exchange_adapter.place_native_stop_loss_order(
             FakeEx(), "binance", "BTC/USDT", "long", 0.01, 95.0
         )
+
+
+
+def test_process_signal_risk_config_after_exchange_account_selection():
+    # RiskConfig 读取必须发生在 exchange 赋值之后,避免更新类信号触发 UnboundLocalError。
+    from pathlib import Path
+
+    src = Path("app/services/order_manager.py").read_text(encoding="utf-8")
+    defaults_idx = src.index("defaults = strategy_engine.get_strategy_defaults(decision.params or {})")
+    exchange_idx = src.index("exchange = ex_acc.exchange", defaults_idx)
+    risk_idx = src.index("risk_cfg = await risk_manager.get_risk_config(db, customer_id, exchange)", defaults_idx)
+    assert exchange_idx < risk_idx
