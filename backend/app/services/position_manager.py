@@ -251,6 +251,7 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
             position.sl = new_sl
             try:
                 await db.flush()
+                await db.commit()
             except Exception as e:
                 logger.warning(f"追踪止损提交失败 pos={position.id}: {e}")
                 await db.rollback()
@@ -260,6 +261,7 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
             position.sl = new_sl
             try:
                 await db.flush()
+                await db.commit()
             except Exception as e:
                 logger.warning(f"追踪止损提交失败 pos={position.id}: {e}")
                 await db.rollback()
@@ -477,24 +479,28 @@ async def stop_loss_monitor_loop() -> None:
                     await asyncio.sleep(1)
                     continue
 
-                # 按 exchange+symbol 分组,批量获取价格
+                # 按 exchange+symbol 分组,优先读缓存,未命中时批量获取价格。
                 price_cache: dict[tuple[str, str], float] = {}
+                missing_symbols: dict[str, set[str]] = {}
                 for pos in positions:
                     key = (pos.exchange, pos.symbol)
-                    if key not in price_cache:
-                        # 优先读 Redis 缓存
-                        cached = await _get_cached_price(pos.exchange, pos.symbol)
-                        if cached and cached > 0:
-                            price_cache[key] = cached
-                        else:
-                            # 从交易所获取
-                            try:
-                                price = await exchange_adapter.fetch_market_price(pos.exchange, pos.symbol)
-                                if price and price > 0:
-                                    price_cache[key] = price
-                                    await _set_cached_price(pos.exchange, pos.symbol, price)
-                            except Exception as e:
-                                logger.debug(f"获取价格失败 {pos.exchange}:{pos.symbol}: {e}")
+                    if key in price_cache:
+                        continue
+                    cached = await _get_cached_price(pos.exchange, pos.symbol)
+                    if cached and cached > 0:
+                        price_cache[key] = cached
+                    else:
+                        missing_symbols.setdefault(pos.exchange, set()).add(pos.symbol)
+
+                for exh, syms in missing_symbols.items():
+                    try:
+                        prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
+                        for sym, price in prices.items():
+                            if price and price > 0:
+                                price_cache[(exh, sym)] = price
+                                await _set_cached_price(exh, sym, price)
+                    except Exception as e:
+                        logger.debug(f"批量获取止损价格失败 {exh}:{sorted(syms)}: {e}")
 
                 # 检查每个持仓的止损
                 for pos in positions:

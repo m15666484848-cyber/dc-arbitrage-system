@@ -522,16 +522,28 @@ async def fetch_positions(ex) -> list[dict]:
 
 async def fetch_balance(ex) -> dict:
     balance = await ex.fetch_balance()
-    info = balance.get("info", {})
+    info = balance.get("info", {}) or {}
+    available = 0.0
+    for key in ("availEq", "availableEq", "availableMargin", "free", "availBal"):
+        if info.get(key):
+            try:
+                available = float(info[key])
+                break
+            except (ValueError, TypeError):
+                pass
+    usdt = balance.get("USDT", {}) or {}
+    if not available:
+        available = float(usdt.get("free", 0) or balance.get("free", {}).get("USDT", 0) or 0)
     for key in ("totalEq", "totalWalletBalance", "totalMarginBalance"):
         if key in info and info[key]:
             try:
-                return {"equity": float(info[key]), "balance": float(info.get("totalWalletBalance", info[key]))}
+                equity = float(info[key])
+                wallet = float(info.get("totalWalletBalance", info[key]) or 0)
+                return {"equity": equity, "balance": wallet, "available_margin": available or wallet}
             except (ValueError, TypeError):
                 continue
-    usdt = balance.get("USDT", {})
-    total = usdt.get("total", 0) or 0
-    return {"equity": total, "balance": total}
+    total = float(usdt.get("total", 0) or 0)
+    return {"equity": total, "balance": total, "available_margin": available or total}
 
 
 async def close_position_market(ex, symbol: str, side: str, amount: float) -> dict:
@@ -681,12 +693,20 @@ async def okx_native_balance(api_key: str, api_secret: str, passphrase: str, tes
                     account = balances[0]
                     total_eq = float(account.get("totalEq") or 0)
                     total_wb = float(account.get("totalWalletBalance") or 0)
-                    return {"equity": total_eq or total_wb, "balance": total_wb}
+                    available = float(account.get("availEq") or account.get("availableEq") or 0)
+                    details = account.get("details") or []
+                    if not available and details:
+                        for item in details:
+                            ccy = (item.get("ccy") or "").upper()
+                            if ccy in ("USDT", "USDC", "USD"):
+                                available = float(item.get("availBal") or item.get("availEq") or 0)
+                                break
+                    return {"equity": total_eq or total_wb, "balance": total_wb, "available_margin": available or total_wb}
             logger.warning(f"OKX 原生余额查询失败: {data.get('msg', 'unknown')}")
-            return {"equity": 0.0, "balance": 0.0}
+            return {"equity": 0.0, "balance": 0.0, "available_margin": 0.0}
     except Exception as e:
         logger.warning(f"OKX 原生余额查询异常: {e}")
-        return {"equity": 0.0, "balance": 0.0}
+        return {"equity": 0.0, "balance": 0.0, "available_margin": 0.0}
 
 
 async def fetch_balance_fast(
@@ -720,7 +740,7 @@ async def fetch_balance_fast(
             )
         acc = (await db.execute(stmt)).scalars().first()
         if not acc:
-            return {"equity": 0.0, "balance": 0.0}
+            return {"equity": 0.0, "balance": 0.0, "available_margin": 0.0}
         api_key = decrypt_secret(acc.api_key_enc)
         api_secret = decrypt_secret(acc.api_secret_enc)
         passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""

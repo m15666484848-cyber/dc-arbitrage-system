@@ -218,7 +218,12 @@ def apply_defaults(
                 parsed.stop_loss = round(ref * (1 - default_sl_pct), 8)
             logs.append(f"缺失止损,按默认 {default_sl_pct} 生成 {parsed.stop_loss}")
     if not parsed.stop_loss and no_stop_loss:
-        logs.append("无止损模式(高危),未设置止损")
+        hard_sl_pct = 0.20
+        if parsed.side == "long":
+            parsed.stop_loss = round(ref * (1 - hard_sl_pct), 8)
+        else:
+            parsed.stop_loss = round(ref * (1 + hard_sl_pct), 8)
+        logs.append(f"无止损模式:设置 {hard_sl_pct * 100:.0f}% 硬止损兜底 {parsed.stop_loss}")
     return "; ".join(logs)
 
 

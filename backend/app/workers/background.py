@@ -361,7 +361,7 @@ async def start_background_tasks() -> None:
 
     _scheduler.add_job(_auth_expire_job, "interval", hours=6, id="auth_expire")
 
-    _scheduler.add_job(_timeout_position_job, "interval", hours=1, id="timeout_position")
+    _scheduler.add_job(_timeout_position_job, "interval", minutes=15, id="timeout_position")
 
     _scheduler.add_job(_kol_risk_check_job, "interval", minutes=10, id="kol_risk_check")
     _scheduler.add_job(_reconciliation_job, "interval", minutes=10, id="reconciliation")

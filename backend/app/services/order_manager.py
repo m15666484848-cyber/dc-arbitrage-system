@@ -1743,11 +1743,21 @@ async def process_signal(
             exchange_account_id=exchange_account_id,
         )
 
-        available_balance = bal_result.get("equity", 0) or bal_result.get("balance", 0)
+        leverage = max(float(parsed.leverage or 1), 1.0)
+        required_margin = float(decision.notional_usdt or 0) / leverage
+        available_margin = (
+            bal_result.get("available_margin", 0)
+            or bal_result.get("free", 0)
+            or bal_result.get("balance", 0)
+            or bal_result.get("equity", 0)
+        )
 
-        if available_balance > 0 and decision.notional_usdt > available_balance * 0.99:
+        if available_margin > 0 and required_margin > available_margin * 0.99:
 
-            reason = f"余额不足: 下单{decision.notional_usdt} USDT > 可用余额{available_balance:.2f} USDT的99%"
+            reason = (
+                f"余额不足: 下单名义价值{decision.notional_usdt} USDT / {leverage:g}x "
+                f"需保证金{required_margin:.2f} USDT > 可用保证金{available_margin:.2f} USDT的99%"
+            )
 
             logger.warning(f"信号被拒(余额不足): customer={customer_id} signal={signal.id} {reason}")
 

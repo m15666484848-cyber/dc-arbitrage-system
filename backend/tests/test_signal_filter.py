@@ -80,8 +80,8 @@ def test_apply_defaults_no_stop_loss_mode():
     p = _parsed(take_profits=[], stop_loss=None)
     log = apply_defaults(p, market_price=150.0, default_tp_pct=[0.10],
                          default_sl_pct=-0.05, no_stop_loss=True)
-    assert p.stop_loss is None
-    assert "无止损模式" in log
+    assert p.stop_loss == 120.0
+    assert "硬止损兜底" in log
 
 
 # ---------- 去重 ----------
