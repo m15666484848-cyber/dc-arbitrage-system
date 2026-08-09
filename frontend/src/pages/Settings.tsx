@@ -460,6 +460,7 @@ function ExchangeTab() {
     api_secret: "",
     passphrase: "",
     testnet: false,
+    account_type: "" as string,
     follow_enabled: false,
     follow_weight: 1,
     max_order_usdt: 0,
@@ -492,7 +493,7 @@ function ExchangeTab() {
   const exchangeOptions = [
     { value: "okx", label: "OKX", desc: "推荐，合约跟单常用" },
     { value: "binance", label: "Binance", desc: "币安合约账号" },
-    { value: "bybit", label: "Bybit", desc: "Bybit 合约账号" },
+    { value: "bybit", label: "Bybit", desc: "Bybit 合约(统一/普通均支持)" },
   ];
   const exchangeOverview = Object.values(
     list.reduce((acc: Record<string, any>, item: any) => {
@@ -545,7 +546,7 @@ function ExchangeTab() {
       await API.addExchangeAccount(f);
       push("success", "交易所账号已添加(密钥已加密存储)");
       setModal(false);
-      setF({ exchange: "okx", label: "", api_key: "", api_secret: "", passphrase: "", testnet: false, follow_enabled: false, follow_weight: 1, max_order_usdt: 0, strategy_id: null });
+      setF({ exchange: "okx", label: "", api_key: "", api_secret: "", passphrase: "", testnet: false, account_type: "", follow_enabled: false, follow_weight: 1, max_order_usdt: 0, strategy_id: null });
       reload();
     } catch (e: any) {
       push("error", e?.response?.data?.message || "添加失败");
@@ -961,14 +962,27 @@ function ExchangeTab() {
               <Input type="password" autoComplete="new-password" value={f.api_secret} onChange={(e) => setF({ ...f, api_secret: e.target.value })} />
             </Field>
           </div>
-          {f.exchange === "okx" && (
-            <Field label="Passphrase(OKX 专用)">
+          {(f.exchange === "okx" || f.exchange === "bybit") && (
+            <Field label={f.exchange === "okx" ? "Passphrase(OKX 必填)" : "Passphrase(Bybit 选填,创建 API 时未设则留空)"}>
               <Input type="password" autoComplete="new-password" value={f.passphrase} onChange={(e) => setF({ ...f, passphrase: e.target.value })} />
+            </Field>
+          )}
+          {f.exchange === "bybit" && (
+            <Field label="账户类型">
+              <select
+                className="w-full rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-slate-200 outline-none focus:border-gold/40"
+                value={f.account_type}
+                onChange={(e) => setF({ ...f, account_type: e.target.value })}
+              >
+                <option value="">自动检测(推荐)</option>
+                <option value="unified">统一账户(UNIFIED)</option>
+                <option value="classic">普通合约(CONTRACT)</option>
+              </select>
             </Field>
           )}
           <label className="flex items-center gap-3 text-sm text-slate-300 rounded-xl border border-white/10 bg-white/[0.03] p-3 cursor-pointer">
             <input type="checkbox" className="accent-accent w-4 h-4" checked={f.testnet} onChange={(e) => setF({ ...f, testnet: e.target.checked })} />
-            <span>测试网(OKX 测试网推荐先用此验证)</span>
+            <span>测试网(OKX / Bybit 测试网均可先在此验证连接)</span>
           </label>
           <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
             <div className="mb-3 flex items-center justify-between gap-3">

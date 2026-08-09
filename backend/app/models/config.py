@@ -30,6 +30,7 @@ class ExchangeAccount(Base, TimestampMixin):
     # 不加 DB 唯一约束(避免旧数据空值冲突),业务层校验唯一性
     api_key_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
     testnet: Mapped[bool] = mapped_column(Boolean, default=False)
+    account_type: Mapped[str] = mapped_column(String(16), default="")  # Bybit: ""(auto) / "unified" / "classic"
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     last_error: Mapped[str] = mapped_column(Text, default="")

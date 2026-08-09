@@ -113,7 +113,7 @@ async def _retry_with_backoff(func, *args, retries=MAX_RETRIES, **kwargs):
     raise last_error
 
 
-def _create_exchange(exchange: str, api_key: str, api_secret: str, passphrase: str, testnet: bool):
+def _create_exchange(exchange: str, api_key: str, api_secret: str, passphrase: str, testnet: bool, account_type: str = ""):
     ex_cls = {
         "okx": ccxt.okx,
         "binance": ccxt.binance,
@@ -133,9 +133,13 @@ def _create_exchange(exchange: str, api_key: str, api_secret: str, passphrase: s
             "fetchOpenOrders": {"warnWithoutSymbol": False},
         }
     elif exchange == "bybit":
-        kwargs["options"] = {"defaultType": "swap"}
-    if exchange == "okx" and passphrase:
-        kwargs["password"] = passphrase
+        # Bybit: unified(UNIFIED) vs classic(CONTRACT)
+        if account_type == "unified":
+            kwargs["options"] = {"defaultType": "unified"}
+        else:
+            kwargs["options"] = {"defaultType": "swap"}
+    if passphrase and exchange in ("okx", "bybit"):
+        kwargs["password"] = passphrase  # OKX/Bybit 用 password 字段
     ex = ex_cls(kwargs)
     if testnet:
         ex.set_sandbox_mode(True)
@@ -197,24 +201,47 @@ async def load_exchange(
             api_key = decrypt_secret(acc.api_key_enc)
             api_secret = decrypt_secret(acc.api_secret_enc)
             passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-            ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet)
+            account_type = getattr(acc, "account_type", "") or ""
+            # Bybit 测试网在有 API Key 时,即使是公开行情接口也会发送 Key 头,
+            # Bybit 会校验 Key 有效性,无效则返回 10003 错误,导致 load_markets 失败。
+            # 解决方案:先不带 Key 创建实例加载市场数据(公开接口),再设置 Key 用于私有接口。
+            ex = _create_exchange(acc.exchange, "", "", "", acc.testnet, account_type)
             try:
                 await ex.load_markets()
             except Exception as e:
                 await ex.close()
-                raise ValueError(f"加载 {exchange} 市场数据失败: {e}") from e
+                ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, account_type)
+                try:
+                    await ex.load_markets()
+                except Exception as e2:
+                    await ex.close()
+                    raise ValueError(f"加载 {exchange} 市场数据失败: {e2}") from e2
+            ex.apiKey = api_key
+            ex.secret = api_secret
+            if passphrase:
+                ex.password = passphrase
             setattr(ex, "_dcq_cached_private", True)
             _private_exchange_cache[acc.id] = (ex, time.monotonic() + PRIVATE_EXCHANGE_CACHE_TTL)
             return ex, acc
     api_key = decrypt_secret(acc.api_key_enc)
     api_secret = decrypt_secret(acc.api_secret_enc)
     passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-    ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet)
+    account_type = getattr(acc, "account_type", "") or ""
+    ex = _create_exchange(acc.exchange, "", "", "", acc.testnet, account_type)
     try:
         await ex.load_markets()
     except Exception as e:
         await ex.close()
-        raise ValueError(f"加载 {exchange} 市场数据失败: {e}") from e
+        ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, account_type)
+        try:
+            await ex.load_markets()
+        except Exception as e2:
+            await ex.close()
+            raise ValueError(f"加载 {exchange} 市场数据失败: {e2}") from e2
+    ex.apiKey = api_key
+    ex.secret = api_secret
+    if passphrase:
+        ex.password = passphrase
     return ex, acc
 
 
@@ -387,7 +414,11 @@ async def validate_symbol(exchange: str, symbol: str) -> bool:
     elif exchange == "binance":
         kwargs["options"] = {"defaultType": "future", "adjustForTimeDifference": True}
     elif exchange == "bybit":
-        kwargs["options"] = {"defaultType": "swap"}
+        # Bybit: unified(UNIFIED) vs classic(CONTRACT)
+        if account_type == "unified":
+            kwargs["options"] = {"defaultType": "unified"}
+        else:
+            kwargs["options"] = {"defaultType": "swap"}
     ex = ex_cls(kwargs)
     try:
         await ex.load_markets()

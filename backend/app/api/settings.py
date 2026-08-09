@@ -160,6 +160,7 @@ async def add_exchange_account(
         # 多 API 场景下,"默认下单 API" 是客户级唯一入口。
         # 新增账号不会抢占已有默认账号；只有客户没有任何默认账号时才自动设为默认。
         is_default=not has_default,
+        account_type=body.account_type if hasattr(body, "account_type") else "",
     )
     db.add(acc)
     _audit(db, "exchange_account_create", f"exchange_account:{current.id}:{body.exchange}", f"customer_id={current.id}, exchange={body.exchange}, testnet={body.testnet}")
@@ -351,9 +352,32 @@ async def test_exchange_account(aid: int, current=Depends(require_customer), db:
         api_key = decrypt_secret(acc.api_key_enc)
         api_secret = decrypt_secret(acc.api_secret_enc)
         passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-        ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet)
-        await ex.load_markets()
+        account_type = getattr(acc, "account_type", "") or ""
+        ex = exchange_adapter._create_exchange(acc.exchange, "", "", "", acc.testnet, account_type)
+        try:
+            await ex.load_markets()
+        except Exception:
+            await ex.close()
+            ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, account_type)
+            await ex.load_markets()
+        ex.apiKey = api_key
+        ex.secret = api_secret
+        if passphrase:
+            ex.password = passphrase
         bal = await exchange_adapter.fetch_balance(ex)
+        if acc.exchange == "bybit" and not account_type and hasattr(ex, "fetch_accounts"):
+            try:
+                accounts = await ex.fetch_accounts()
+                for a in accounts:
+                    a_type = (a.get("type") or "").lower()
+                    if a_type == "unified":
+                        acc.account_type = "unified"
+                        break
+                    elif a_type in ("contract", "swap"):
+                        acc.account_type = "classic"
+                        break
+            except Exception:
+                pass
         acc.last_error = ""
         acc.last_verified_at = datetime.now(timezone.utc)
         _audit(db, "exchange_account_test_success", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, equity={bal.get('equity', 0)}")
@@ -391,8 +415,18 @@ async def get_exchange_account_balance(aid: int, current=Depends(require_custome
         api_key = decrypt_secret(acc.api_key_enc)
         api_secret = decrypt_secret(acc.api_secret_enc)
         passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-        ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet)
-        await ex.load_markets()
+        account_type = getattr(acc, "account_type", "") or ""
+        ex = exchange_adapter._create_exchange(acc.exchange, "", "", "", acc.testnet, account_type)
+        try:
+            await ex.load_markets()
+        except Exception:
+            await ex.close()
+            ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, account_type)
+            await ex.load_markets()
+        ex.apiKey = api_key
+        ex.secret = api_secret
+        if passphrase:
+            ex.password = passphrase
         bal = await exchange_adapter.fetch_balance(ex)
         acc.last_error = ""
         acc.last_verified_at = datetime.now(timezone.utc)
@@ -457,7 +491,7 @@ async def get_exchange_balance_summary(current=Depends(require_customer), db: As
             api_key = decrypt_secret(acc.api_key_enc)
             api_secret = decrypt_secret(acc.api_secret_enc)
             passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-            ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet)
+            ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_type", "") or "")
             await ex.load_markets()
             bal = await exchange_adapter.fetch_balance(ex)
             equity = float(bal.get("equity", 0) or 0)

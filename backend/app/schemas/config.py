@@ -31,8 +31,9 @@ class ExchangeAccountCreate(BaseModel):
     label: str = ""
     api_key: str
     api_secret: str
-    passphrase: str = ""  # OKX
+    passphrase: str = ""  # OKX / Bybit (Bybit V5 API Key 可选设置 passphrase)
     testnet: bool = False
+    account_type: str = ""  # Bybit: ""(自动) / "unified" / "classic"
     follow_enabled: bool = False
     follow_weight: float = 1.0
     max_order_usdt: float = 0.0
