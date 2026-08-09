@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+*.local
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# DB
+*.sqlite
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tesseract traineddata (downloaded at runtime)
+*.traineddata
+
+# Logs
+*.log
+logs/
+# 本地环境与密钥
+
+
+# Node / frontend
+build/
+.next/
+
+# 日志与运行时产物
+tmp/
+temp/
+
+# 临时备份文件
+*.bak
+*.bak.*
+*.bak_*
+backups/
+# 历史归档和临时修复产物
+*.tgz
+*.tar.gz
+*_backup/
+backend/app_backup/
+backup_*/
+frontend/dcquant-ui-update/
+frontend/html/
+signal_parser_before_*.py
+*_report.json
+backend/tmp_*.py
+backend/test_llm.py
+backend/demo_*.py
+backend/reset_pwd.py
+backend/init_admin.py
+*.tsbuildinfo

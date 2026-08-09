@@ -1,0 +1,51 @@
+# ============================================================
+# DC Quant - 外部数据库模式
+# 用于已经有独立的 PostgreSQL 和 Redis 的场景
+# 用法: docker compose -f docker-compose.external-db.yml up -d
+# 重要: 需要在 backend/.env 中配置外部数据库连接
+# ============================================================
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: dcquant-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # 重要: 确保使用外部数据库
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+    # 如果你使用外部服务部署在同一台机器上，取消注释下面两行
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - dcquant-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: dcquant-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    networks:
+      - dcquant-net
+    environment:
+      - BACKEND_URL=http://backend:8000
+
+networks:
+  dcquant-net:
+    driver: bridge

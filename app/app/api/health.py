@@ -1,0 +1,9 @@
+"""健康检查。"""
+from fastapi import APIRouter
+
+router = APIRouter()
+
+
+@router.get("/health")
+async def health():
+    return {"status": "ok", "service": "dc-quant"}
