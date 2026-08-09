@@ -27,15 +27,17 @@ def _parsed(**kw):
 # ---------- 价格纠错 ----------
 def test_correct_price_within_tolerance():
     p = _parsed(entry_price=150.0, entry_prices=[150.0])
-    changed, log = correct_price(p, market_price=152.0)
-    assert not changed  # 偏离 1.3% < 15%
+    changed, log, rejected = correct_price(p, market_price=152.0)
+    assert not changed
+    assert not rejected  # 偏离 1.3% < 15%
 
 
 def test_correct_price_minor_typo_auto_fix():
     p = _parsed(entry_price=150.0, entry_prices=[150.0])
     # 偏离 20% > 15% → 自动改市价
-    changed, log = correct_price(p, market_price=125.0)
+    changed, log, rejected = correct_price(p, market_price=125.0)
     assert changed
+    assert not rejected
     assert p.entry_price == 125.0
     assert "自动改为市价" in log
 
@@ -43,7 +45,9 @@ def test_correct_price_minor_typo_auto_fix():
 def test_correct_price_severe_rejected():
     p = _parsed(entry_price=150.0, entry_prices=[150.0])
     # 偏离 40% > 30% → 拒绝信号(由调用方判断)
-    changed, log = correct_price(p, market_price=250.0)
+    changed, log, rejected = correct_price(p, market_price=250.0)
+    assert not changed
+    assert rejected
     assert "超过30%" in log
 
 
@@ -110,15 +114,15 @@ async def test_is_duplicate_second_time_true():
 # ---------- 静默时段 ----------
 def test_is_in_silent_period_cross_midnight():
     ranges = [{"start": "23:00", "end": "07:00"}]
-    assert is_in_silent_period(ranges, datetime(2026, 1, 1, 2, 0, tzinfo=timezone.utc))  # 凌晨2点
-    assert is_in_silent_period(ranges, datetime(2026, 1, 1, 23, 30, tzinfo=timezone.utc))  # 23:30
-    assert not is_in_silent_period(ranges, datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc))  # 中午
+    assert is_in_silent_period(ranges, datetime(2025, 12, 31, 18, 0, tzinfo=timezone.utc))  # 北京时间凌晨2点
+    assert is_in_silent_period(ranges, datetime(2026, 1, 1, 15, 30, tzinfo=timezone.utc))  # 北京时间23:30
+    assert not is_in_silent_period(ranges, datetime(2026, 1, 1, 4, 0, tzinfo=timezone.utc))  # 北京时间中午
 
 
 def test_is_in_silent_period_normal_range():
     ranges = [{"start": "12:00", "end": "13:00"}]
-    assert is_in_silent_period(ranges, datetime(2026, 1, 1, 12, 30, tzinfo=timezone.utc))
-    assert not is_in_silent_period(ranges, datetime(2026, 1, 1, 14, 0, tzinfo=timezone.utc))
+    assert is_in_silent_period(ranges, datetime(2026, 1, 1, 4, 30, tzinfo=timezone.utc))
+    assert not is_in_silent_period(ranges, datetime(2026, 1, 1, 6, 0, tzinfo=timezone.utc))
 
 
 # ---------- 端到端过滤 ----------

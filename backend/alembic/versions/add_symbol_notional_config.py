@@ -24,16 +24,16 @@ def upgrade() -> None:
         sa.Column('symbols', sa.String(length=500), nullable=False, server_default=''),
         sa.Column('multiplier', sa.Float(), nullable=False, server_default='1.0'),
         sa.Column('enabled', sa.Boolean(), nullable=False, server_default=sa.text('true')),
-        sa.Column('note', sa.String(length=200), nullable=True), server_default=''),
+        sa.Column('note', sa.String(length=200), nullable=True, server_default=''),
         sa.Column('created_at', sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.Column('updated_at', sa.DateTime(), server_default=sa.func.now(), onupdate=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('name'),
     )
 
-    op.create_index(op.fix('ix_symbol_notional_configs_id'), 'symbol_notional_configs', ['id'])
+    op.create_index(op.f('ix_symbol_notional_configs_id'), 'symbol_notional_configs', ['id'])
 
 
 def downgrade() -> None:
-    op.drop_index(op.fix('ix_symbol_notional_configs_id'), table_name='symbol_notional_configs')
+    op.drop_index(op.f('ix_symbol_notional_configs_id'), table_name='symbol_notional_configs')
     op.drop_table('symbol_notional_configs')

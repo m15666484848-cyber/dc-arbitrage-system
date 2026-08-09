@@ -3615,7 +3615,11 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
         return {"ok": False, "reason": "持仓不存在或已平仓"}
 
-    close_qty = qty if qty and qty > 0 else position.qty
+    if qty is not None and qty <= 0:
+
+        return {"ok": False, "reason": "平仓数量必须大于 0"}
+
+    close_qty = qty if qty is not None else position.qty
 
     if close_qty <= 0:
 
