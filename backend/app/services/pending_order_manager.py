@@ -125,7 +125,8 @@ async def _get_signal_text(db, signal_id: int | None) -> str:
         from app.models.signal import Signal
         sig = (await db.execute(select(Signal).where(Signal.id == signal_id))).scalar_one_or_none()
         return sig.raw_text if sig else ""
-    except Exception:
+    except Exception as e:
+        logger.debug(f"查询待触发单原始信号失败 signal_id={signal_id}: {e}")
         return ""
 
 async def create_pending_order(
@@ -377,7 +378,8 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder) -> dict
             pending.cancel_reason = f"下单失败(余额不足): {err_msg}"
             try:
                 await db.commit()
-            except Exception:
+            except Exception as commit_err:
+                logger.error(f"待触发单 {pending.id} 标记取消提交失败: {commit_err}")
                 await db.rollback()
         kol_name = await _get_kol_name(db, pending.kol_id)
         tp_str, sl_str = _format_tp_sl(pending.tp_levels, pending.sl)

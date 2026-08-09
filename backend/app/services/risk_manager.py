@@ -291,8 +291,8 @@ async def check_kol_consecutive_losses(db: AsyncSession) -> None:
                 )).scalar_one_or_none()
                 if _recent_sig and _recent_sig.raw_text:
                     _risk_src = _recent_sig.raw_text
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"查询KOL最近信号失败 kol_id={kol.id if kol else None}: {e}")
             await notify(
                 "risk", "KOL 连亏暂停",
                 f"KOL {kol_name} 连续亏损 {streak} 次\n"

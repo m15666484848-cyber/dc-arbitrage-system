@@ -140,6 +140,32 @@ def get_source_status() -> dict:
 
 
 
+
+async def _mark_signal_ignored_if_still_pending(signal_id: int, reason: str) -> None:
+    '后台分发兜底:避免无客户或任务异常后信号长期停留在 received/processing。'
+    try:
+        async with AsyncSessionLocal() as db:
+            sig = (await db.execute(select(Signal).where(Signal.id == signal_id))).scalar_one_or_none()
+            if not sig or sig.status not in ("received", "processing"):
+                return
+            sig.status = "ignored"
+            sig.note = ((sig.note or "") + f"\n{reason}").strip()
+            await db.commit()
+            logger.warning(f"信号 {signal_id} 自动标记为 ignored: {reason}")
+    except Exception as e:
+        logger.exception(f"标记信号 {signal_id} 为 ignored 失败: {e}")
+
+
+async def _finalize_signal_when_customer_tasks_done(signal_id: int, tasks: list[asyncio.Task]) -> None:
+    '等待客户分发任务结束后,若没有任何客户更新终态,则自动收敛为 ignored。'
+    try:
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await _mark_signal_ignored_if_still_pending(signal_id, "所有客户分发任务结束但未产生订单/拒绝记录,自动收敛")
+    except Exception as e:
+        logger.exception(f"信号 {signal_id} 分发收敛任务失败: {e}")
+
+
 async def _get_gateway() -> str:
 
 
@@ -430,12 +456,24 @@ async def _handle_message(
                 select(KolFollow).where(KolFollow.kol_id == _kol_id, KolFollow.enabled.is_(True))
             )
         ).scalars().all()
+        if not follows:
+            signal.status = "ignored"
+            signal.note = "无启用关注客户,自动忽略"
+            await db.commit()
+            logger.info(f"信号 {signal.id} 无启用关注客户,已标记 ignored")
+            return
+
+        customer_tasks: list[asyncio.Task] = []
         for follow in follows:
             task = asyncio.create_task(
                 _process_for_customer_sem(signal.id, follow.customer_id)
             )
+            customer_tasks.append(task)
             _pending_tasks.add(task)
             task.add_done_callback(lambda t, cid=follow.customer_id: (_pending_tasks.discard(t), _log_task_done(t, f"customer_{cid}")))
+        finalizer = asyncio.create_task(_finalize_signal_when_customer_tasks_done(signal.id, customer_tasks))
+        _pending_tasks.add(finalizer)
+        finalizer.add_done_callback(lambda t, sid=signal.id: (_pending_tasks.discard(t), _log_task_done(t, f"signal_finalizer_{sid}")))
 
 
 async def _handle_message_with_sem(
@@ -580,10 +618,10 @@ async def _heartbeat_with_ack(ws, interval: int, seq: list[int], last_ack: list[
                     await ws.close()
 
 
-                except Exception:
+                except Exception as close_err:
 
 
-                    pass
+                    logger.debug(f"Discord 心跳超时关闭连接失败: {close_err}")
 
 
                 return
@@ -605,10 +643,10 @@ async def _heartbeat_with_ack(ws, interval: int, seq: list[int], last_ack: list[
                 await ws.close()
 
 
-            except Exception:
+            except Exception as close_err:
 
 
-                pass
+                logger.debug(f"Discord 心跳异常后关闭连接失败: {close_err}")
 
 
             return  # 退出心跳循环,触发外层重连
@@ -974,8 +1012,8 @@ async def _run_single_discord_account(account) -> None:
                         await watcher
                     except asyncio.CancelledError:
                         pass
-                    except Exception:
-                        pass
+                    except Exception as watcher_err:
+                        logger.debug(f"Discord watcher 结束异常: {watcher_err}")
                     if heartbeat_task and not heartbeat_task.done():
                         heartbeat_task.cancel()
                         try:
@@ -1049,10 +1087,10 @@ async def _run_single_discord_account(account) -> None:
                 is_default_account = current.is_default
                 account_label = current.label
                 logger.info(f"Discord Token 已更新,使用新 Token 重连: id={account_id} label={account_label}")
-        except Exception:
+        except Exception as refresh_err:
 
 
-            pass
+            logger.debug(f"刷新 Discord 账号配置失败,继续使用当前连接: {refresh_err}")
 
 
 def _discord_account_task_key(account) -> str:

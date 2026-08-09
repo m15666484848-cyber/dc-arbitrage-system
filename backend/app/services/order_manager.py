@@ -871,8 +871,9 @@ async def _notional_to_amount(ex, symbol: str, notional_usdt: float, price: floa
 
             market = ex.market(symbol)
 
-        except Exception:
+        except Exception as e:
 
+            logger.debug(f"加载市场信息失败 symbol={symbol}: {e}")
             market = None
 
     amount_eth = notional_usdt / price if price > 0 else 0
@@ -931,9 +932,9 @@ def _contracts_to_coin(ex, symbol: str, contracts: float) -> float:
 
             return contracts * cs
 
-    except Exception:
+    except Exception as e:
 
-        pass
+        logger.debug(f"合约数量转换失败 symbol={symbol} contracts={contracts}: {e}")
 
     return contracts
 
@@ -967,9 +968,9 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
             return float(cached)
 
-    except Exception:
+    except Exception as e:
 
-        pass
+        logger.debug(f"读取币种倍率缓存失败 customer={customer_id} symbol={symbol_upper}: {e}")
 
     # 1. 客户自定义币种覆盖 (custom_symbol 不为空)
 
@@ -993,7 +994,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
                 try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", str(cr.multiplier), ex=60)
 
-                except Exception: pass
+                except Exception as e: logger.debug(f"写入币种倍率缓存失败 customer={customer_id} symbol={symbol_upper}: {e}")
 
             return cr.multiplier
 
@@ -4170,8 +4171,8 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
         try:
             if position.exchange_account_id:
                 await exchange_adapter.invalidate_exchange_cache(position.exchange_account_id)
-        except Exception:
-            pass
+        except Exception as cache_err:
+            logger.debug(f"平仓失败后清理交易所缓存失败 pos={position_id}: {cache_err}")
 
         try:
 
@@ -4185,9 +4186,9 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             )
 
-        except Exception:
+        except Exception as notify_err:
 
-            pass
+            logger.warning(f"发送平仓失败通知失败 pos={position_id}: {notify_err}")
 
         await db.rollback()
 

@@ -372,8 +372,8 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
                             source_text=_timeout_src,
                             kol_name=_timeout_kol,
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"发送超时盈利保留通知失败 pos={pos.id}: {e}")
                     continue
 
                 logger.warning(
@@ -415,8 +415,8 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
                         f"超时时间: {timeout_hours}小时\n失败原因: {e}",
                         pos.customer_id,
                     )
-                except Exception:
-                    pass
+                except Exception as notify_err:
+                    logger.warning(f"发送超时平仓失败通知失败 pos={pos.id}: {notify_err}")
 
     if closed_count > 0:
         logger.info(f"超时平仓完成: {closed_count} 个持仓已自动关闭")
@@ -478,8 +478,8 @@ async def monitor_loop() -> None:
                     for _cid in _refresh_cids:
                         try:
                             await bus.publish_customer(_cid, "position", {"action": "refresh"})
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"推送客户持仓刷新失败 customer={_cid}: {e}")
         except Exception as e:
             logger.exception(f"统一持仓监控循环异常: {e}")
         await asyncio.sleep(1)
@@ -584,7 +584,8 @@ async def stop_loss_monitor_loop() -> None:
                                             .values(status="closed", qty=0, closed_at=datetime.now(timezone.utc))
                                         )
                                         await db.commit()
-                                    except Exception:
+                                    except Exception as e:
+                                        logger.exception(f"[1s止损] 强制关闭本地仓位失败 pos={pos.id}: {e}")
                                         await db.rollback()
                                 else:
                                     raise

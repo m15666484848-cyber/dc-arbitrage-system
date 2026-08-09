@@ -690,8 +690,8 @@ async def close_position_market(ex, symbol: str, side: str, amount: float) -> di
                         break
             except Exception as e:
                 logger.debug(f"探测 OKX 持仓模式失败,按方向 posSide 平仓: {e}")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"平仓数量/持仓模式探测失败 {symbol}: {e}")
     # OKX 双向持仓模式平仓必须传 posSide=持仓方向；净持仓模式使用 posSide=net。
     return await place_order(
         ex, symbol, close_side, "market", amount,
@@ -761,8 +761,8 @@ async def invalidate_exchange_cache(exchange_account_id: int | None = None) -> N
             continue
         try:
             await cached[0].close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"关闭交易所缓存实例失败 account_id={acc_id}: {e}")
 
 
 async def close_exchange(ex) -> None:
@@ -770,8 +770,8 @@ async def close_exchange(ex) -> None:
         if getattr(ex, "_dcq_cached_private", False):
             return
         await ex.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"关闭交易所实例失败: {e}")
 
 
 # OKX 模拟交易使用相同域名 + x-simulated-trading: 1 请求头区分
