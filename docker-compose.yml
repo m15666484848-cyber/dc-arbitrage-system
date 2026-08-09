@@ -11,7 +11,7 @@ services:
     image: postgres:16-alpine
     container_name: dcquant-postgres
     restart: unless-stopped
-    command: ["postgres", "-c", "shared_buffers=192MB", "-c", "work_mem=2MB", "-c", "random_page_cost=1.1"]
+    command: ["postgres", "-c", "shared_buffers=192MB", "-c", "work_mem=2MB", "-c", "random_page_cost=1.1", "-c", "statement_timeout=30000"]
     logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-dcquant}
