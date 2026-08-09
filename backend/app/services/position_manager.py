@@ -14,7 +14,7 @@ from app.core.redis import get_redis
 from app.core.config import settings as _cfg
 from app.models.config import RiskConfig
 from app.models.trading import Position
-from app.services import exchange_adapter, order_manager
+from app.services import exchange_adapter, order_manager, price_feed
 from app.services.event_bus import bus
 
 # 内存锁:记录正在平仓中的仓位ID,防止止损监控循环重复触发同一仓位
@@ -341,7 +341,7 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
             symbols_by_exchange.setdefault(pos.exchange, set()).add(pos.symbol)
         for exh, syms in symbols_by_exchange.items():
             try:
-                prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
+                prices = await price_feed.fetch_market_prices(exh, list(syms))
                 for sym, price in prices.items():
                     if price and price > 0:
                         price_cache[(exh, sym)] = price
@@ -455,7 +455,7 @@ async def monitor_loop() -> None:
                 price_cache: dict[tuple[str, str], float] = {}
                 for exh, syms in exchange_symbols.items():
                     try:
-                        prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
+                        prices = await price_feed.fetch_market_prices(exh, list(syms))
                         for sym, price in prices.items():
                             if price and price > 0:
                                 price_cache[(exh, sym)] = price
@@ -538,7 +538,7 @@ async def stop_loss_monitor_loop() -> None:
 
                 for exh, syms in missing_symbols.items():
                     try:
-                        prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
+                        prices = await price_feed.fetch_market_prices(exh, list(syms))
                         for sym, price in prices.items():
                             if price and price > 0:
                                 price_cache[(exh, sym)] = price

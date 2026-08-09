@@ -579,6 +579,53 @@ async def fetch_balance(ex) -> dict:
     return {"equity": total, "balance": total, "available_margin": available or total}
 
 
+def build_native_stop_loss_params(exchange: str, side: str, stop_price: float) -> dict:
+    """构建交易所原生止损参数。默认不自动启用,供灰度开关调用。"""
+    if stop_price <= 0:
+        raise ValueError("止损价格必须大于 0")
+    ex_name = (exchange or "").lower()
+    if ex_name == "okx":
+        return {
+            "tdMode": "cross",
+            "posSide": side,
+            "reduceOnly": True,
+            "slTriggerPx": str(stop_price),
+            "slOrdPx": "-1",
+        }
+    if ex_name == "binance":
+        return {
+            "reduceOnly": True,
+            "stopPrice": stop_price,
+            "workingType": "MARK_PRICE",
+        }
+    if ex_name == "bybit":
+        return {
+            "reduceOnly": True,
+            "triggerPrice": stop_price,
+            "triggerDirection": 2 if side == "long" else 1,
+        }
+    raise ValueError(f"不支持原生止损单的交易所: {exchange}")
+
+
+async def place_native_stop_loss_order(
+    ex,
+    exchange: str,
+    symbol: str,
+    side: str,
+    amount: float,
+    stop_price: float,
+) -> dict:
+    """提交交易所原生止损单。
+
+    该函数只在 settings.native_stop_loss_enabled=True 时由上层调用。
+    当前系统仍保留 1 秒轮询作为兜底,避免交易所条件单异常导致裸奔。
+    """
+    close_side = "sell" if side == "long" else "buy"
+    params = build_native_stop_loss_params(exchange, side, stop_price)
+    norm_symbol = _normalize_symbol(exchange, symbol)
+    return await ex.create_order(norm_symbol, "market", close_side, amount, None, params)
+
+
 async def close_position_market(ex, symbol: str, side: str, amount: float) -> dict:
     """市价平仓。
 

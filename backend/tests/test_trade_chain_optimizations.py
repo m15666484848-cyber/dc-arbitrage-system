@@ -1,7 +1,7 @@
 import pytest
 
 from app.schemas.signal import ParsedSignal
-from app.services import order_manager, position_manager, signal_filter
+from app.services import exchange_adapter, order_manager, position_manager, signal_filter
 from app.models.trading import Position
 
 
@@ -117,6 +117,7 @@ async def test_stop_loss_loop_uses_batch_price_fetch(monkeypatch):
     monkeypatch.setattr(position_manager, "AsyncSessionLocal", lambda: Session())
     monkeypatch.setattr(position_manager, "_get_cached_price", fake_cached)
     monkeypatch.setattr(position_manager, "_set_cached_price", fake_set_cached)
+    monkeypatch.setattr(position_manager.price_feed, "fetch_market_prices", fake_batch)
     monkeypatch.setattr(position_manager.exchange_adapter, "fetch_market_prices_batch", fake_batch)
     monkeypatch.setattr(position_manager.exchange_adapter, "fetch_market_price", fake_single)
     monkeypatch.setattr(position_manager, "_add_closing_position", fake_add_lock)
@@ -183,3 +184,17 @@ async def test_partial_check_only_triggers_stop_loss(monkeypatch):
 
     assert calls["tp"] == 0
     assert calls["close"] == 0
+
+
+
+def test_native_stop_loss_params_okx():
+    params = exchange_adapter.build_native_stop_loss_params("okx", "long", 95.0)
+    assert params["reduceOnly"] is True
+    assert params["posSide"] == "long"
+    assert params["slTriggerPx"] == "95.0"
+
+
+def test_native_stop_loss_params_binance():
+    params = exchange_adapter.build_native_stop_loss_params("binance", "short", 105.0)
+    assert params["reduceOnly"] is True
+    assert params["stopPrice"] == 105.0
