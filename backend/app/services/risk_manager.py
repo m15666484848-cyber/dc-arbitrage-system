@@ -435,12 +435,11 @@ async def ensure_position_has_stop_loss(db: AsyncSession) -> int:
             if sl_pct <= 0:
                 continue
 
-            if pos.side == "long":
-                new_sl = pos.entry_price * (1 - sl_pct)
-            else:
-                new_sl = pos.entry_price * (1 + sl_pct)
-            pos.sl = round(new_sl, 8)
-            pos.initial_sl = round(new_sl, 8)
+            from app.services.signal_filter import stop_loss_price_from_pct
+
+            new_sl = stop_loss_price_from_pct(pos.side, pos.entry_price, sl_pct)
+            pos.sl = new_sl
+            pos.initial_sl = new_sl
             updated += 1
             logger.info(
                 f"自动设置止损 pos={pos.id} symbol={pos.symbol} "

@@ -1,7 +1,7 @@
 import pytest
 
 from app.schemas.signal import ParsedSignal
-from app.services import order_manager, position_manager
+from app.services import order_manager, position_manager, signal_filter
 from app.models.trading import Position
 
 
@@ -130,3 +130,25 @@ async def test_stop_loss_loop_uses_batch_price_fetch(monkeypatch):
     assert calls["batch"] == 1
     assert calls["single"] == 0
     assert calls["closed"] == 2
+
+
+
+def test_stop_loss_clamp_too_wide_long():
+    p = ParsedSignal(symbol="BTC/USDT", side="long", entry_price=100.0, stop_loss=80.0)
+    log = signal_filter.clamp_stop_loss_to_max_loss(p, 100.0, 0.05)
+    assert p.stop_loss == 95.0
+    assert "止损过宽" in log
+
+
+def test_stop_loss_clamp_too_wide_short():
+    p = ParsedSignal(symbol="BTC/USDT", side="short", entry_price=100.0, stop_loss=130.0)
+    log = signal_filter.clamp_stop_loss_to_max_loss(p, 100.0, 0.05)
+    assert p.stop_loss == 105.0
+    assert "止损过宽" in log
+
+
+def test_timeout_profitable_with_sl_should_alert_only_condition():
+    pos = Position(id=1, symbol="BTC/USDT", side="long", qty=1, entry_price=100, sl=105, status="open")
+    pnl, _ = position_manager.compute_pnl(pos, 120)
+    assert pnl > 0
+    assert pos.sl > 0

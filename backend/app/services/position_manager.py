@@ -323,8 +323,47 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
             )
         ).scalars().all()
 
+        price_cache: dict[tuple[str, str], float] = {}
+        symbols_by_exchange: dict[str, set[str]] = {}
+        for pos in positions:
+            symbols_by_exchange.setdefault(pos.exchange, set()).add(pos.symbol)
+        for exh, syms in symbols_by_exchange.items():
+            try:
+                prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
+                for sym, price in prices.items():
+                    if price and price > 0:
+                        price_cache[(exh, sym)] = price
+            except Exception as e:
+                logger.warning(f"超时检查批量价格获取失败 {exh}:{sorted(syms)}: {e}")
+
         for pos in positions:
             try:
+                current_price = price_cache.get((pos.exchange, pos.symbol), 0)
+                pnl, pct = compute_pnl(pos, current_price) if current_price and current_price > 0 else (0.0, 0.0)
+                if pos.sl and pos.sl > 0 and current_price and current_price > 0 and pnl > 0:
+                    logger.warning(
+                        f"持仓超时但已有止损且当前盈利,仅告警不强平 pos={pos.id} symbol={pos.symbol} "
+                        f"opened={pos.opened_at} timeout={timeout_hours}h price={current_price} pnl={pnl:.2f}"
+                    )
+                    try:
+                        from app.services.notification import notify
+                        from app.services.order_manager import _get_position_source_text, _get_kol_name
+                        _timeout_src = await _get_position_source_text(db, pos.id, pos.kol_id, pos.symbol)
+                        _timeout_kol = await _get_kol_name(db, pos.kol_id)
+                        await notify(
+                            "risk", "持仓超时但保留盈利单",
+                            f"品种: {pos.symbol}\n方向: {pos.side}\n"
+                            f"持仓时间: 超过 {timeout_hours} 小时\n"
+                            f"当前价: {current_price}\n浮盈: {pnl:.2f} USDT({pct:.2f}%)\n"
+                            f"已有止损: {pos.sl}\n处理: 仅告警,不强制平仓",
+                            pos.customer_id,
+                            source_text=_timeout_src,
+                            kol_name=_timeout_kol,
+                        )
+                    except Exception:
+                        pass
+                    continue
+
                 logger.warning(
                     f"持仓超时自动平仓 pos={pos.id} symbol={pos.symbol} "
                     f"opened={pos.opened_at} timeout={timeout_hours}h"

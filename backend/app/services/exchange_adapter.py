@@ -53,6 +53,12 @@ _rate_locks: dict[str, "asyncio.Lock"] = defaultdict(asyncio.Lock)
 # 公开行情查询实例缓存(无 API Key,复用 HTTP 连接池)
 _public_exchanges: dict[str, Any] = {}
 
+# 私有交易实例短缓存:减少频繁平仓/撤单时重复创建 ccxt 实例和 load_markets。
+# key=exchange_account_id,value=(exchange_instance, expires_at)
+PRIVATE_EXCHANGE_CACHE_TTL = 60.0
+_private_exchange_cache: dict[int, tuple[Any, float]] = {}
+_private_exchange_locks: dict[int, "asyncio.Lock"] = defaultdict(asyncio.Lock)
+
 _EXCHANGE_SYMBOLS: dict[str, set[str]] = defaultdict(set)
 
 
@@ -142,6 +148,7 @@ async def load_exchange(
     exchange: str | None = None,
     testnet: bool | None = None,
     exchange_account_id: int | None = None,
+    use_cache: bool = True,
 ):
     if exchange_account_id is not None:
         stmt = select(ExchangeAccount).where(
@@ -173,6 +180,32 @@ async def load_exchange(
     acc = result.scalars().first()
     if not acc:
         raise ValueError(f"未配置 {exchange or exchange_account_id} 交易所账号")
+    if use_cache and acc.id:
+        cached = _private_exchange_cache.get(acc.id)
+        now = time.monotonic()
+        if cached and cached[1] > now:
+            ex = cached[0]
+            setattr(ex, "_dcq_cached_private", True)
+            return ex, acc
+        async with _private_exchange_locks[acc.id]:
+            cached = _private_exchange_cache.get(acc.id)
+            now = time.monotonic()
+            if cached and cached[1] > now:
+                ex = cached[0]
+                setattr(ex, "_dcq_cached_private", True)
+                return ex, acc
+            api_key = decrypt_secret(acc.api_key_enc)
+            api_secret = decrypt_secret(acc.api_secret_enc)
+            passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
+            ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet)
+            try:
+                await ex.load_markets()
+            except Exception as e:
+                await ex.close()
+                raise ValueError(f"加载 {exchange} 市场数据失败: {e}") from e
+            setattr(ex, "_dcq_cached_private", True)
+            _private_exchange_cache[acc.id] = (ex, time.monotonic() + PRIVATE_EXCHANGE_CACHE_TTL)
+            return ex, acc
     api_key = decrypt_secret(acc.api_key_enc)
     api_secret = decrypt_secret(acc.api_secret_enc)
     passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
@@ -637,8 +670,23 @@ def extract_fee_from_order(
         return filled_qty * filled_price * 0.001
 
 
+async def invalidate_exchange_cache(exchange_account_id: int | None = None) -> None:
+    # 剔除并关闭私有交易实例缓存。exchange_account_id=None 时清空全部。
+    ids = list(_private_exchange_cache.keys()) if exchange_account_id is None else [exchange_account_id]
+    for acc_id in ids:
+        cached = _private_exchange_cache.pop(acc_id, None)
+        if not cached:
+            continue
+        try:
+            await cached[0].close()
+        except Exception:
+            pass
+
+
 async def close_exchange(ex) -> None:
     try:
+        if getattr(ex, "_dcq_cached_private", False):
+            return
         await ex.close()
     except Exception:
         pass

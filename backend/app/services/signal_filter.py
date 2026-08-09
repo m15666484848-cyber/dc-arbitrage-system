@@ -40,6 +40,38 @@ DEDUP_WINDOW_SECONDS = 60  # 短期去重窗口
 DEDUP_LONG_TERM_WINDOW_SECONDS = 7 * 24 * 3600  # 全周期去重窗口 (7天)
 
 
+def stop_loss_price_from_pct(side: str, ref_price: float, loss_pct: float) -> float:
+    # 按方向和最大亏损比例计算止损价。loss_pct 使用正数,如 0.05。
+    pct = abs(float(loss_pct or 0))
+    if pct <= 0 or ref_price <= 0:
+        return 0.0
+    if side == "short":
+        return round(ref_price * (1 + pct), 8)
+    return round(ref_price * (1 - pct), 8)
+
+
+def clamp_stop_loss_to_max_loss(
+    parsed: ParsedSignal,
+    ref_price: float | None,
+    max_loss_pct: float | None,
+) -> str:
+    # 把 KOL 给出的过宽 SL 收紧到客户统一最大亏损比例内。
+    if not parsed.stop_loss or not ref_price or ref_price <= 0:
+        return ""
+    if not max_loss_pct or max_loss_pct <= 0:
+        return ""
+    max_pct = abs(float(max_loss_pct))
+    cap_sl = stop_loss_price_from_pct(parsed.side, ref_price, max_pct)
+    old_sl = parsed.stop_loss
+    if parsed.side == "long" and old_sl < cap_sl:
+        parsed.stop_loss = cap_sl
+    elif parsed.side == "short" and old_sl > cap_sl:
+        parsed.stop_loss = cap_sl
+    else:
+        return ""
+    return f"止损过宽,按最大亏损 {max_pct * 100:.2f}% 收紧: {old_sl}→{parsed.stop_loss}"
+
+
 def compute_dedup_hash(symbol: str, side: str, entry_price: float | None, kol_id: int | None = None) -> str:
     """符号 + 方向 + 入场价分桶(±0.5%) + KOL ID。
 
@@ -197,6 +229,7 @@ def apply_defaults(
     default_tp_pct: list[float],
     default_sl_pct: float,
     no_stop_loss: bool,
+    max_sl_pct: float | None = None,
 ) -> str:
     """缺失止盈止损兜底。返回说明。"""
     logs = []
@@ -217,12 +250,13 @@ def apply_defaults(
             else:
                 parsed.stop_loss = round(ref * (1 - default_sl_pct), 8)
             logs.append(f"缺失止损,按默认 {default_sl_pct} 生成 {parsed.stop_loss}")
+    if parsed.stop_loss and not no_stop_loss:
+        cap_log = clamp_stop_loss_to_max_loss(parsed, ref, max_sl_pct)
+        if cap_log:
+            logs.append(cap_log)
     if not parsed.stop_loss and no_stop_loss:
         hard_sl_pct = 0.20
-        if parsed.side == "long":
-            parsed.stop_loss = round(ref * (1 - hard_sl_pct), 8)
-        else:
-            parsed.stop_loss = round(ref * (1 + hard_sl_pct), 8)
+        parsed.stop_loss = stop_loss_price_from_pct(parsed.side, ref, hard_sl_pct)
         logs.append(f"无止损模式:设置 {hard_sl_pct * 100:.0f}% 硬止损兜底 {parsed.stop_loss}")
     return "; ".join(logs)
 
@@ -234,6 +268,7 @@ async def filter_signal(
     default_tp_pct: list[float] | None = None,
     default_sl_pct: float = -0.05,
     no_stop_loss: bool = False,
+    max_sl_pct: float | None = None,
     skip_duplicate: bool = True,
     kol_id: int | None = None,
     skip_intent_check: bool = False,
@@ -293,6 +328,7 @@ async def filter_signal(
         default_tp_pct or [0.10, 0.20],
         default_sl_pct,
         no_stop_loss,
+        max_sl_pct,
     )
     if default_log:
         logs.append(default_log)

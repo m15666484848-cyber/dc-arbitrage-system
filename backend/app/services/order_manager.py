@@ -1516,6 +1516,14 @@ async def process_signal(
 
     defaults = strategy_engine.get_strategy_defaults(decision.params or {})
 
+    # 统一止损配置:优先使用客户 RiskConfig.auto_stop_loss_pct。
+    # 该值同时作为缺失 SL 的默认补充比例,以及 KOL 过宽 SL 的最大亏损上限。
+    risk_cfg = await risk_manager.get_risk_config(db, customer_id, exchange)
+    max_sl_pct = None
+    if risk_cfg and risk_cfg.auto_stop_loss_pct and risk_cfg.auto_stop_loss_pct > 0:
+        max_sl_pct = float(risk_cfg.auto_stop_loss_pct) / 100.0
+        defaults["default_sl_pct"] = -max_sl_pct
+
     # 2. 交易所账号
 
     ex_acc = await _pick_exchange_account(db, customer_id)
@@ -1879,6 +1887,8 @@ async def process_signal(
         default_sl_pct=defaults["default_sl_pct"],
 
         no_stop_loss=defaults["no_stop_loss"],
+
+        max_sl_pct=max_sl_pct,
 
         kol_id=signal.kol_id,
 
@@ -4082,6 +4092,11 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
         # P1-13: 强制平仓(超时平仓)失败时,确保详细错误原因被记录
 
         logger.error(f"平仓失败 pos={position_id} qty={close_qty} symbol={position.symbol} side={position.side} customer={position.customer_id}: {e}", exc_info=True)
+        try:
+            if position.exchange_account_id:
+                await exchange_adapter.invalidate_exchange_cache(position.exchange_account_id)
+        except Exception:
+            pass
 
         try:
 
