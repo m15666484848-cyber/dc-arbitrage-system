@@ -11,6 +11,7 @@ services:
     image: postgres:16-alpine
     container_name: dcquant-postgres
     restart: unless-stopped
+    command: ["postgres", "-c", "shared_buffers=192MB", "-c", "work_mem=2MB", "-c", "random_page_cost=1.1"]
     logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-dcquant}
@@ -26,12 +27,14 @@ services:
       timeout: 5s
       retries: 5
 
+    mem_limit: 512m
+    memswap_limit: 512m
   redis:
     image: redis:7-alpine
     container_name: dcquant-redis
     restart: unless-stopped
     logging: *default-logging
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
     volumes:
       - redisdata:/data
     ports:
@@ -42,6 +45,8 @@ services:
       timeout: 5s
       retries: 5
 
+    mem_limit: 192m
+    memswap_limit: 192m
   backend:
     build:
       context: ./backend
@@ -69,6 +74,8 @@ services:
       retries: 5
       start_period: 30s
 
+    mem_limit: 768m
+    memswap_limit: 768m
   frontend:
     build:
       context: ./frontend
@@ -81,6 +88,8 @@ services:
     ports:
       - "127.0.0.1:${FRONTEND_PORT:-5173}:80"
 
+    mem_limit: 256m
+    memswap_limit: 256m
 volumes:
   pgdata:
   redisdata:

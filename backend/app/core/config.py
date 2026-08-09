@@ -43,6 +43,8 @@ class Settings(BaseSettings):
 
 
     database_url: str = "postgresql+asyncpg://dcquant:dcquant@localhost:5432/dcquant"
+    db_pool_size: int = 15
+    db_max_overflow: int = 25
 
 
 
@@ -54,7 +56,7 @@ class Settings(BaseSettings):
 
     discord_heartbeat_interval: int = 41
 
-    discord_signal_concurrency: int = 10
+    discord_signal_concurrency: int = 30
 
     discord_process_timeout: int = 120
 

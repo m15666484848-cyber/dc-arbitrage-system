@@ -64,6 +64,75 @@ async def _build_follow_status(db: AsyncSession, customer_id: int, follow: KolFo
     }
 
 
+async def _build_follow_statuses(
+    db: AsyncSession,
+    customer_id: int,
+    follows: list[KolFollow],
+) -> dict[int, dict]:
+    """批量构建仪表盘订阅 KOL 状态,避免每个 KOL 单独查询 Position。"""
+    now = datetime.now(timezone.utc)
+    if not follows:
+        return {}
+
+    cooldown_since_by_kol: dict[int, datetime] = {}
+    for follow in follows:
+        cooldown_since = now - timedelta(hours=1)
+        cooldown_reset_at = getattr(follow, "cooldown_reset_at", None)
+        if cooldown_reset_at and cooldown_reset_at > cooldown_since:
+            cooldown_since = cooldown_reset_at
+        cooldown_since_by_kol[follow.kol_id] = cooldown_since
+
+    min_cooldown_since = min(cooldown_since_by_kol.values())
+    kol_ids = list(cooldown_since_by_kol.keys())
+    rows = (
+        await db.execute(
+            select(Position)
+            .where(
+                Position.customer_id == customer_id,
+                Position.kol_id.in_(kol_ids),
+                Position.opened_at >= min_cooldown_since,
+            )
+            .order_by(Position.kol_id, Position.opened_at.desc())
+        )
+    ).scalars().all()
+
+    recent_by_kol: dict[int, Position] = {}
+    for pos in rows:
+        cooldown_since = cooldown_since_by_kol.get(pos.kol_id)
+        if not cooldown_since or pos.opened_at < cooldown_since:
+            continue
+        if pos.kol_id not in recent_by_kol:
+            recent_by_kol[pos.kol_id] = pos
+
+    statuses: dict[int, dict] = {}
+    for follow in follows:
+        paused_until = follow.paused_until
+        is_paused = bool(paused_until and paused_until > now)
+        recent_pos = recent_by_kol.get(follow.kol_id)
+        cooldown_until = (recent_pos.opened_at + timedelta(hours=1)) if recent_pos else None
+        is_cooldown = bool(cooldown_until and cooldown_until > now)
+
+        if is_paused:
+            status = "paused"
+            label = "已暂停"
+        elif is_cooldown:
+            status = "cooldown"
+            label = "冷却中"
+        else:
+            status = "active"
+            label = "正常"
+
+        statuses[follow.kol_id] = {
+            "status": status,
+            "label": label,
+            "paused_until": paused_until,
+            "cooldown_until": cooldown_until,
+            "cooldown_symbol": getattr(recent_pos, "symbol", "") if recent_pos else "",
+            "cooldown_side": getattr(recent_pos, "side", "") if recent_pos else "",
+            "can_resume": status in ("paused", "cooldown"),
+        }
+    return statuses
+
 @router.get("/dashboard")
 async def dashboard(current=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     cid = current.id if current.role == "customer" else None
@@ -90,8 +159,9 @@ async def dashboard(current=Depends(get_current_user), db: AsyncSession = Depend
         strats = (await db.execute(select(Strategy).where(Strategy.id.in_(strategy_ids)))).scalars().all()
         for s in strats:
             strategy_map[s.id] = (s.params or {}).get("base_qty", 100.0)
+    follow_status_map = await _build_follow_statuses(db, cid, [f for f, _ in followed])
     for f, k in followed:
-        follow_status = await _build_follow_status(db, cid, f)
+        follow_status = follow_status_map.get(f.kol_id) or await _build_follow_status(db, cid, f)
         if not f.enabled and follow_status["status"] != "paused":
             continue
         # 解析跟单金额: 自定义 > 策略 base_qty > 系统默认 100
