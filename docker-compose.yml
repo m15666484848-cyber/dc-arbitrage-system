@@ -55,6 +55,9 @@ services:
     restart: unless-stopped
     logging: *default-logging
     env_file: .env
+    environment:
+      - NATIVE_STOP_LOSS_ENABLED=${NATIVE_STOP_LOSS_ENABLED:-true}
+      - PRICE_FEED_MODE=${PRICE_FEED_MODE:-websocket}
     depends_on:
       postgres:
         condition: service_healthy

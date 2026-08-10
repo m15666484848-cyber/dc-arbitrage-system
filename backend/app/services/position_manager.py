@@ -538,7 +538,7 @@ async def stop_loss_monitor_loop() -> None:
 
                 for exh, syms in missing_symbols.items():
                     try:
-                        prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
+                        prices = await price_feed.fetch_market_prices(exh, list(syms))
                         for sym, price in prices.items():
                             if price and price > 0:
                                 price_cache[(exh, sym)] = price
