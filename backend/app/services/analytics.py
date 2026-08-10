@@ -101,20 +101,23 @@ async def take_equity_snapshot(
     customer_id: int,
     exchange: str,
     testnet: bool | None = None,
+    exchange_account_id: int | None = None,
 ) -> None:
     """记录一条净值快照(由定时任务调用)。"""
     from app.services import exchange_adapter
 
-    acc = None
     try:
-        ex, acc = await exchange_adapter.load_exchange(db, customer_id, exchange, testnet)
+        ex, _ = await exchange_adapter.load_exchange(
+            db,
+            customer_id,
+            exchange,
+            testnet,
+            exchange_account_id=exchange_account_id,
+        )
         try:
             bal = await exchange_adapter.fetch_balance(ex)
         finally:
             await exchange_adapter.close_exchange(ex)
-        if acc.last_error:
-            acc.last_error = ""
-        acc.last_verified_at = datetime.now(timezone.utc)
         snapshot = EquitySnapshot(
             customer_id=customer_id,
             exchange=exchange,
@@ -128,20 +131,8 @@ async def take_equity_snapshot(
     except Exception as e:
         from loguru import logger
 
-        msg = str(e)
-        lower_msg = msg.lower()
-        if acc is not None and (
-            "invalid api-key" in lower_msg
-            or ("api-key" in lower_msg and "permission" in lower_msg)
-            or ("ip" in lower_msg and "permission" in lower_msg)
-            or "authentication" in lower_msg
-            or "unauthorized" in lower_msg
-        ):
-            acc.last_error = msg[:500]
-            await db.commit()
-        else:
-            await db.rollback()
         logger.warning(f"净值快照失败 customer={customer_id} exchange={exchange} testnet={testnet}: {e}")
+        await db.rollback()
 
 
 async def equity_curve(

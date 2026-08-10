@@ -37,7 +37,6 @@ from sqlalchemy import select, func, text
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.redis import get_redis
 
 from app.models.kol import Kol, KolFollow
@@ -627,7 +626,7 @@ async def _process_update_signal(
 
     strategy, _ = await _get_cached_strategy_for_follow(db, customer_id, signal.kol_id)
 
-    decision = strategy_engine.compute_decision(strategy, kol_id=signal.kol_id, symbol=parsed.symbol)
+    decision = strategy_engine.compute_decision(strategy)
 
     defaults = strategy_engine.get_strategy_defaults(decision.params or {})
 
@@ -871,9 +870,8 @@ async def _notional_to_amount(ex, symbol: str, notional_usdt: float, price: floa
 
             market = ex.market(symbol)
 
-        except Exception as e:
+        except Exception:
 
-            logger.debug(f"加载市场信息失败 symbol={symbol}: {e}")
             market = None
 
     amount_eth = notional_usdt / price if price > 0 else 0
@@ -932,9 +930,9 @@ def _contracts_to_coin(ex, symbol: str, contracts: float) -> float:
 
             return contracts * cs
 
-    except Exception as e:
+    except Exception:
 
-        logger.debug(f"合约数量转换失败 symbol={symbol} contracts={contracts}: {e}")
+        pass
 
     return contracts
 
@@ -968,9 +966,9 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
             return float(cached)
 
-    except Exception as e:
+    except Exception:
 
-        logger.debug(f"读取币种倍率缓存失败 customer={customer_id} symbol={symbol_upper}: {e}")
+        pass
 
     # 1. 客户自定义币种覆盖 (custom_symbol 不为空)
 
@@ -994,7 +992,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
                 try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", str(cr.multiplier), ex=60)
 
-                except Exception as e: logger.debug(f"写入币种倍率缓存失败 customer={customer_id} symbol={symbol_upper}: {e}")
+                except Exception: pass
 
             return cr.multiplier
 
@@ -1062,7 +1060,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
                         try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", str(cr.multiplier), ex=60)
 
-                        except Exception as e: logger.debug(f"Redis cache write failed: {e}")
+                        except Exception: pass
 
                     return cr.multiplier
 
@@ -1104,7 +1102,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
             try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", "1.0", ex=60)
 
-            except Exception as e: logger.debug(f"Redis cache write failed: {e}")
+            except Exception: pass
 
         return 1.0
 
@@ -1126,7 +1124,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
         try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", str(result), ex=60)
 
-        except Exception as e: logger.debug(f"Redis cache write failed: {e}")
+        except Exception: pass
 
     return result
 
@@ -1519,8 +1517,7 @@ async def process_signal(
     defaults = strategy_engine.get_strategy_defaults(decision.params or {})
 
     # 2. 交易所账号
-    # 必须先选出交易所账号,再读取 RiskConfig。否则仅更新止盈止损/持仓过夜类信号
-    # 在没有进入下单分支前会访问未初始化的 exchange 变量。
+
     ex_acc = await _pick_exchange_account(db, customer_id)
 
     if not ex_acc:
@@ -1550,14 +1547,6 @@ async def process_signal(
 
     exchange_account_id = ex_acc.id
 
-    # 统一止损配置:优先使用客户 RiskConfig.auto_stop_loss_pct。
-    # 该值同时作为缺失 SL 的默认补充比例,以及 KOL 过宽 SL 的最大亏损上限。
-    risk_cfg = await risk_manager.get_risk_config(db, customer_id, exchange)
-    max_sl_pct = None
-    if risk_cfg and risk_cfg.auto_stop_loss_pct and risk_cfg.auto_stop_loss_pct > 0:
-        max_sl_pct = float(risk_cfg.auto_stop_loss_pct) / 100.0
-        defaults["default_sl_pct"] = -max_sl_pct
-
     # 多 API 独立策略:单个 API 指定 strategy_id 时,优先使用 API 级策略覆盖 KOL 跟随策略。
     if getattr(ex_acc, "strategy_id", None):
         api_strategy = (
@@ -1574,8 +1563,6 @@ async def process_signal(
             notional_override = None
             decision = strategy_engine.compute_decision(strategy, kol_id=signal.kol_id, symbol=parsed.symbol)
             defaults = strategy_engine.get_strategy_defaults(decision.params or {})
-            if max_sl_pct:
-                defaults["default_sl_pct"] = -max_sl_pct
             logger.info(
                 f"API级策略生效: customer={customer_id} account={exchange_account_id} "
                 f"strategy={strategy.id} notional={decision.notional_usdt}"
@@ -1756,21 +1743,11 @@ async def process_signal(
             exchange_account_id=exchange_account_id,
         )
 
-        leverage = max(float(parsed.leverage or 1), 1.0)
-        required_margin = float(decision.notional_usdt or 0) / leverage
-        available_margin = (
-            bal_result.get("available_margin", 0)
-            or bal_result.get("free", 0)
-            or bal_result.get("balance", 0)
-            or bal_result.get("equity", 0)
-        )
+        available_balance = bal_result.get("equity", 0) or bal_result.get("balance", 0)
 
-        if available_margin > 0 and required_margin > available_margin * 0.99:
+        if available_balance > 0 and decision.notional_usdt > available_balance * 0.99:
 
-            reason = (
-                f"余额不足: 下单名义价值{decision.notional_usdt} USDT / {leverage:g}x "
-                f"需保证金{required_margin:.2f} USDT > 可用保证金{available_margin:.2f} USDT的99%"
-            )
+            reason = f"余额不足: 下单{decision.notional_usdt} USDT > 可用余额{available_balance:.2f} USDT的99%"
 
             logger.warning(f"信号被拒(余额不足): customer={customer_id} signal={signal.id} {reason}")
 
@@ -1892,8 +1869,6 @@ async def process_signal(
         default_sl_pct=defaults["default_sl_pct"],
 
         no_stop_loss=defaults["no_stop_loss"],
-
-        max_sl_pct=max_sl_pct,
 
         kol_id=signal.kol_id,
 
@@ -2812,61 +2787,6 @@ async def _verify_order_filled(ex, ex_order: dict, symbol: str) -> tuple[float, 
 
     return filled, filled_price
 
-async def _try_place_native_stop_loss(
-    db: AsyncSession,
-    ex,
-    *,
-    customer_id: int,
-    kol_id: int,
-    signal_id: int,
-    exchange_account_id: int,
-    exchange: str,
-    position_id: int,
-    symbol: str,
-    side: str,
-    qty: float,
-    sl: float | None,
-    leverage: int,
-) -> None:
-    """灰度提交交易所原生止损单,失败不影响系统内 1 秒止损兜底。"""
-    if not settings.native_stop_loss_enabled or not sl or sl <= 0 or qty <= 0:
-        return
-    try:
-        native_order = await exchange_adapter.place_native_stop_loss_order(
-            ex, exchange, symbol, side, qty, sl
-        )
-        data = native_order.get("data") if isinstance(native_order, dict) else None
-        first = data[0] if isinstance(data, list) and data else {}
-        algo_id = (
-            str(first.get("algoId") or first.get("ordId") or native_order.get("id") or "")
-            if isinstance(native_order, dict) else ""
-        )
-        db.add(Order(
-            customer_id=customer_id,
-            kol_id=kol_id,
-            signal_id=signal_id,
-            position_id=position_id,
-            exchange_account_id=exchange_account_id,
-            exchange=exchange,
-            symbol=symbol,
-            side="sell" if side == "long" else "buy",
-            type="stop_market",
-            order_role="stop_loss",
-            qty=qty,
-            price=sl,
-            leverage=leverage,
-            status="pending",
-            exchange_order_id=algo_id,
-            created_at=_utcnow(),
-        ))
-        logger.info(f"原生止损单已提交 pos={position_id} symbol={symbol} sl={sl} algo_id={algo_id}")
-    except Exception as e:
-        logger.warning(
-            f"原生止损单提交失败,保留系统内1秒止损兜底: "
-            f"pos={position_id} symbol={symbol} sl={sl} err={e}"
-        )
-
-
 async def _place_entry(
 
     db: AsyncSession,
@@ -3003,8 +2923,6 @@ async def _place_entry(
 
                 type=order_type,
 
-                order_role="entry",
-
                 qty=amount,
 
                 price=entry_price,
@@ -3137,9 +3055,6 @@ async def _place_entry(
 
             db.add(sub_position)
 
-            # 确保子仓位 id 已生成，供原生止损订单记录正确关联。
-            await db.flush()
-
             trade = Trade(
 
                 customer_id=customer_id,
@@ -3175,22 +3090,6 @@ async def _place_entry(
             )
 
             db.add(trade)
-
-            await _try_place_native_stop_loss(
-                db,
-                ex,
-                customer_id=customer_id,
-                kol_id=kol_id,
-                signal_id=signal_id,
-                exchange_account_id=exchange_account_id,
-                exchange=exchange,
-                position_id=sub_position.id,
-                symbol=parsed.symbol,
-                side=parsed.side,
-                qty=order.filled_qty,
-                sl=sl,
-                leverage=parsed.leverage,
-            )
 
             try:
 
@@ -3289,8 +3188,6 @@ async def _place_entry(
                 side=order_side,
 
                 type="market",
-
-                order_role="entry",
 
                 qty=amount,
 
@@ -3714,11 +3611,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
         return {"ok": False, "reason": "持仓不存在或已平仓"}
 
-    if qty is not None and qty <= 0:
-
-        return {"ok": False, "reason": "平仓数量必须大于 0"}
-
-    close_qty = qty if qty is not None else position.qty
+    close_qty = qty if qty and qty > 0 else position.qty
 
     if close_qty <= 0:
 
@@ -3814,8 +3707,6 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
             side="sell" if position.side == "long" else "buy",
 
             type="market",
-
-            order_role="close",
 
             qty=filled,
 
@@ -3921,7 +3812,15 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
                         notional = (position.entry_price or 0) * (position.initial_qty or 0)
 
-                        await strategy_engine.record_trade_result(db, strat.id, won=position.realized_pnl > 0, notional_usdt=notional, break_even=abs(position.realized_pnl) < 0.01, kol_id=position.kol_id, symbol=position.symbol)
+                        await strategy_engine.record_trade_result(
+                            db,
+                            strat.id,
+                            won=position.realized_pnl > 0,
+                            notional_usdt=notional,
+                            break_even=abs(position.realized_pnl) < 0.01,
+                            kol_id=position.kol_id,
+                            symbol=position.symbol,
+                        )
 
                         _invalidate_strategy_cache(position.customer_id, position.kol_id)
 
@@ -4040,7 +3939,15 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
                                 child_notional = (child.entry_price or 0) * (child.initial_qty or 0)
 
-                                await strategy_engine.record_trade_result(db, strat.id, won=child.realized_pnl > 0, notional_usdt=child_notional, break_even=abs(child.realized_pnl) < 0.01, kol_id=child.kol_id, symbol=child.symbol)
+                                await strategy_engine.record_trade_result(
+                                    db,
+                                    strat.id,
+                                    won=child.realized_pnl > 0,
+                                    notional_usdt=child_notional,
+                                    break_even=abs(child.realized_pnl) < 0.01,
+                                    kol_id=child.kol_id,
+                                    symbol=child.symbol,
+                                )
 
                                 _invalidate_strategy_cache(child.customer_id, child.kol_id)
 
@@ -4057,8 +3964,6 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                         position_id=child.id,
 
                         order_id=order.id,
-
-                        exchange_account_id=child.exchange_account_id,
 
                         exchange=child.exchange,
 
@@ -4171,11 +4076,6 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
         # P1-13: 强制平仓(超时平仓)失败时,确保详细错误原因被记录
 
         logger.error(f"平仓失败 pos={position_id} qty={close_qty} symbol={position.symbol} side={position.side} customer={position.customer_id}: {e}", exc_info=True)
-        try:
-            if position.exchange_account_id:
-                await exchange_adapter.invalidate_exchange_cache(position.exchange_account_id)
-        except Exception as cache_err:
-            logger.debug(f"平仓失败后清理交易所缓存失败 pos={position_id}: {cache_err}")
 
         try:
 
@@ -4189,9 +4089,9 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             )
 
-        except Exception as notify_err:
+        except Exception:
 
-            logger.warning(f"发送平仓失败通知失败 pos={position_id}: {notify_err}")
+            pass
 
         await db.rollback()
 
@@ -4569,7 +4469,15 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
 
                                 sib_notional = (sib.entry_price or 0) * (sib.initial_qty or 0)
 
-                                await strategy_engine.record_trade_result(db, strat.id, won=sib.realized_pnl > 0, notional_usdt=sib_notional, break_even=abs(sib.realized_pnl) < 0.01, kol_id=sib.kol_id, symbol=sib.symbol)
+                                await strategy_engine.record_trade_result(
+                                    db,
+                                    strat.id,
+                                    won=sib.realized_pnl > 0,
+                                    notional_usdt=sib_notional,
+                                    break_even=abs(sib.realized_pnl) < 0.01,
+                                    kol_id=sib.kol_id,
+                                    symbol=sib.symbol,
+                                )
 
                                 _invalidate_strategy_cache(sib.customer_id, sib.kol_id)
 

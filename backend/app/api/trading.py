@@ -338,6 +338,7 @@ async def list_orders(
     for o in orders:
         d = {
             "id": o.id, "kol_id": o.kol_id, "kol_name": kols.get(o.kol_id, ""),
+            "exchange_account_id": o.exchange_account_id,
             "exchange": o.exchange, "symbol": o.symbol, "side": o.side, "type": o.type,
             "qty": o.qty, "price": o.price, "status": o.status, "filled_qty": o.filled_qty,
             "filled_price": o.filled_price, "tp_level": o.tp_level, "created_at": o.created_at,
@@ -384,13 +385,21 @@ async def manual_order(
     _rc = (await db.execute(
         _sel(RiskConfig).where(RiskConfig.customer_id == current.id, RiskConfig.enabled.is_(True))
     )).scalars().first()
-    # 手动下单没有绑定策略,使用策略引擎默认参数作为止盈止损/分批兜底。
-    # RiskConfig 只保存客户级风控字段,不能读取策略参数字段。
-    _defaults = strategy_engine.get_strategy_defaults({})
+    _defaults = {
+        "default_tp_pct": [0.10, 0.20], "default_sl_pct": -0.05, "no_stop_loss": False,
+        "cost_protection_buffer": 0.002, "tp_levels": [], "enable_trailing": False,
+        "trailing_callback": 0.01, "batch_entry_enabled": False, "batch_entry_window": 0,
+    }
     if _rc:
         _defaults.update({
-            "enable_trailing": bool(getattr(_rc, "enable_trailing_stop", False)),
-            "trailing_callback": (getattr(_rc, "trailing_callback_pct", 1.0) or 1.0) / 100.0,
+            "default_tp_pct": _rc.default_tp_pct or [0.10, 0.20],
+            "default_sl_pct": _rc.default_sl_pct if _rc.default_sl_pct is not None else -0.05,
+            "no_stop_loss": _rc.no_stop_loss,
+            "cost_protection_buffer": _rc.cost_protection_buffer or 0.002,
+            "enable_trailing": _rc.enable_trailing,
+            "trailing_callback": _rc.trailing_callback or 0.01,
+            "batch_entry_enabled": _rc.batch_entry_enabled,
+            "batch_entry_window": _rc.batch_entry_window or 0,
         })
     # ★ 检查急停状态
     if getattr(current, "emergency_stop", False):
@@ -416,12 +425,15 @@ async def manual_order(
     if _acc.last_error:
         raise HTTPException(400, "默认/候选交易所 API 最近验证失败,请先测试连接成功后再下单")
     from datetime import datetime, timezone
-    if _acc.auth_expires_at and _acc.auth_expires_at < datetime.now(timezone.utc):
+    auth_expires_at = getattr(_acc, "auth_expires_at", None)
+    if auth_expires_at and auth_expires_at < datetime.now(timezone.utc):
         raise HTTPException(403, "交易所授权已过期")
-    # ★ 金额上限检查: RiskConfig 中真实存在的是 max_position_usdt。
-    # 该字段为 0 时表示不限额。
-    if _rc and getattr(_rc, "max_position_usdt", 0) and body.qty > _rc.max_position_usdt:
-        raise HTTPException(400, f"下单金额超限: 最大 {_rc.max_position_usdt} USDT")
+    # ★ 金额上限检查
+    max_notional = getattr(_rc, "max_notional_per_order", None) if _rc else None
+    if max_notional is None and _rc:
+        max_notional = getattr(_rc, "max_position_usdt", 0)
+    if max_notional and body.qty > max_notional:
+        raise HTTPException(400, f"下单金额超限: 最大 {max_notional} USDT")
     decision = strategy_engine.StrategyDecision(allow=True, notional_usdt=body.qty, params={})
 
     # ★ P1 修复: 添加详细日志记录(下单前)
@@ -482,6 +494,7 @@ async def list_trades(
     for t in trades:
         out.append({
             "id": t.id, "kol_id": t.kol_id, "kol_name": kols.get(t.kol_id, ""),
+            "exchange_account_id": t.exchange_account_id,
             "exchange": t.exchange, "symbol": t.symbol, "side": t.side, "qty": t.qty,
             "price": t.price, "fee": t.fee, "realized_pnl": t.realized_pnl, "is_close": t.is_close,
             "tp_level": t.tp_level, "executed_at": t.executed_at,

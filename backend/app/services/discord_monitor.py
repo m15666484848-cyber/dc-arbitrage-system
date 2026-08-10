@@ -35,6 +35,7 @@ import asyncio
 
 
 import json
+import os
 
 
 from datetime import datetime, timezone
@@ -134,36 +135,67 @@ def get_source_status() -> dict:
     return out
 
 
-
-
-
-
-
-
-
-async def _mark_signal_ignored_if_still_pending(signal_id: int, reason: str) -> None:
-    '后台分发兜底:避免无客户或任务异常后信号长期停留在 received/processing。'
+def _write_parser_diff_log(
+    *,
+    kol_id: int | None,
+    kol_name: str,
+    channel_id: str,
+    message_id: str,
+    raw_text: str,
+    image_url: str,
+    signal_id: int | None,
+    parsed,
+    status: str,
+    reason: str,
+    extra: dict | None = None,
+) -> None:
+    """写入独立解析差异日志(JSONL),用于和朋友服务器执行结果做离线对比。"""
     try:
-        async with AsyncSessionLocal() as db:
-            sig = (await db.execute(select(Signal).where(Signal.id == signal_id))).scalar_one_or_none()
-            if not sig or sig.status not in ("received", "processing"):
-                return
-            sig.status = "ignored"
-            sig.note = ((sig.note or "") + f"\n{reason}").strip()
-            await db.commit()
-            logger.warning(f"信号 {signal_id} 自动标记为 ignored: {reason}")
+        log_path = os.getenv("PARSER_DIFF_LOG_PATH", "/app/app/logs/parser_diff.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        parsed_data = parsed.model_dump() if hasattr(parsed, "model_dump") else {}
+        row = {
+            "ts": _iso_now(),
+            "source": "dcquant",
+            "kol_id": kol_id,
+            "kol_name": kol_name,
+            "channel_id": channel_id,
+            "message_id": message_id,
+            "signal_id": signal_id,
+            "raw_text": raw_text,
+            "has_image": bool(image_url),
+            "status": status,
+            "reason": reason,
+            "actions": parsed_data.get("actions", []),
+            "action": parsed_data.get("action", ""),
+            "symbol": parsed_data.get("symbol", ""),
+            "side": parsed_data.get("side", ""),
+            "entry_price": parsed_data.get("entry_price"),
+            "entry_prices": parsed_data.get("entry_prices", []),
+            "take_profits": parsed_data.get("take_profits", []),
+            "stop_loss": parsed_data.get("stop_loss"),
+            "condition_price": parsed_data.get("condition_price"),
+            "confidence": parsed_data.get("confidence", 0.0),
+            "is_exit_signal": parsed_data.get("is_exit_signal", False),
+            "is_update_signal": parsed_data.get("is_update_signal", False),
+            "parser_reason": parsed_data.get("reason", "") or parsed_data.get("exit_reason", "") or parsed_data.get("update_reason", ""),
+            "extra": extra or {},
+        }
+        if os.path.exists(log_path) and os.path.getsize(log_path) > 50 * 1024 * 1024:
+            rotated_path = f"{log_path}.1"
+            if os.path.exists(rotated_path):
+                os.remove(rotated_path)
+            os.replace(log_path, rotated_path)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
     except Exception as e:
-        logger.exception(f"标记信号 {signal_id} 为 ignored 失败: {e}")
+        logger.warning(f"写入解析差异日志失败: {e}")
 
 
-async def _finalize_signal_when_customer_tasks_done(signal_id: int, tasks: list[asyncio.Task]) -> None:
-    '等待客户分发任务结束后,若没有任何客户更新终态,则自动收敛为 ignored。'
-    try:
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await _mark_signal_ignored_if_still_pending(signal_id, "所有客户分发任务结束但未产生订单/拒绝记录,自动收敛")
-    except Exception as e:
-        logger.exception(f"信号 {signal_id} 分发收敛任务失败: {e}")
+
+
+
+
 
 
 async def _get_gateway() -> str:
@@ -418,6 +450,18 @@ async def _handle_message(
         })
 
         if signal.status == "ignored":
+            _write_parser_diff_log(
+                kol_id=_kol_id,
+                kol_name=_kol_name,
+                channel_id=channel_id,
+                message_id=message_id,
+                raw_text=content,
+                image_url=image_url,
+                signal_id=signal.id,
+                parsed=parsed,
+                status=signal.status,
+                reason="initial_ignored_no_valid_action",
+            )
             return
 
         # ---- 第3层过滤: 置信度阈值拦截 ----
@@ -429,6 +473,19 @@ async def _handle_message(
             )
             signal.status = "ignored"
             await db.commit()
+            _write_parser_diff_log(
+                kol_id=_kol_id,
+                kol_name=_kol_name,
+                channel_id=channel_id,
+                message_id=message_id,
+                raw_text=content,
+                image_url=image_url,
+                signal_id=signal.id,
+                parsed=parsed,
+                status=signal.status,
+                reason="below_kol_min_confidence",
+                extra={"kol_min_confidence": _kol_min_confidence},
+            )
             return
 
         # ---- 第3层过滤: action 白名单 ----
@@ -448,6 +505,18 @@ async def _handle_message(
             )
             signal.status = "ignored"
             await db.commit()
+            _write_parser_diff_log(
+                kol_id=_kol_id,
+                kol_name=_kol_name,
+                channel_id=channel_id,
+                message_id=message_id,
+                raw_text=content,
+                image_url=image_url,
+                signal_id=signal.id,
+                parsed=parsed,
+                status=signal.status,
+                reason="invalid_action_after_parse",
+            )
             return
 
 
@@ -456,24 +525,25 @@ async def _handle_message(
                 select(KolFollow).where(KolFollow.kol_id == _kol_id, KolFollow.enabled.is_(True))
             )
         ).scalars().all()
-        if not follows:
-            signal.status = "ignored"
-            signal.note = "无启用关注客户,自动忽略"
-            await db.commit()
-            logger.info(f"信号 {signal.id} 无启用关注客户,已标记 ignored")
-            return
-
-        customer_tasks: list[asyncio.Task] = []
         for follow in follows:
             task = asyncio.create_task(
                 _process_for_customer_sem(signal.id, follow.customer_id)
             )
-            customer_tasks.append(task)
             _pending_tasks.add(task)
             task.add_done_callback(lambda t, cid=follow.customer_id: (_pending_tasks.discard(t), _log_task_done(t, f"customer_{cid}")))
-        finalizer = asyncio.create_task(_finalize_signal_when_customer_tasks_done(signal.id, customer_tasks))
-        _pending_tasks.add(finalizer)
-        finalizer.add_done_callback(lambda t, sid=signal.id: (_pending_tasks.discard(t), _log_task_done(t, f"signal_finalizer_{sid}")))
+        _write_parser_diff_log(
+            kol_id=_kol_id,
+            kol_name=_kol_name,
+            channel_id=channel_id,
+            message_id=message_id,
+            raw_text=content,
+            image_url=image_url,
+            signal_id=signal.id,
+            parsed=parsed,
+            status=signal.status,
+            reason="dispatched_to_followers",
+            extra={"follower_count": len(follows)},
+        )
 
 
 async def _handle_message_with_sem(
@@ -618,10 +688,10 @@ async def _heartbeat_with_ack(ws, interval: int, seq: list[int], last_ack: list[
                     await ws.close()
 
 
-                except Exception as close_err:
+                except Exception:
 
 
-                    logger.debug(f"Discord 心跳超时关闭连接失败: {close_err}")
+                    pass
 
 
                 return
@@ -643,10 +713,10 @@ async def _heartbeat_with_ack(ws, interval: int, seq: list[int], last_ack: list[
                 await ws.close()
 
 
-            except Exception as close_err:
+            except Exception:
 
 
-                logger.debug(f"Discord 心跳异常后关闭连接失败: {close_err}")
+                pass
 
 
             return  # 退出心跳循环,触发外层重连
@@ -1012,8 +1082,8 @@ async def _run_single_discord_account(account) -> None:
                         await watcher
                     except asyncio.CancelledError:
                         pass
-                    except Exception as watcher_err:
-                        logger.debug(f"Discord watcher 结束异常: {watcher_err}")
+                    except Exception:
+                        pass
                     if heartbeat_task and not heartbeat_task.done():
                         heartbeat_task.cancel()
                         try:
@@ -1087,10 +1157,10 @@ async def _run_single_discord_account(account) -> None:
                 is_default_account = current.is_default
                 account_label = current.label
                 logger.info(f"Discord Token 已更新,使用新 Token 重连: id={account_id} label={account_label}")
-        except Exception as refresh_err:
+        except Exception:
 
 
-            logger.debug(f"刷新 Discord 账号配置失败,继续使用当前连接: {refresh_err}")
+            pass
 
 
 def _discord_account_task_key(account) -> str:

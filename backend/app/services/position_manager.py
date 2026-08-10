@@ -14,7 +14,7 @@ from app.core.redis import get_redis
 from app.core.config import settings as _cfg
 from app.models.config import RiskConfig
 from app.models.trading import Position
-from app.services import exchange_adapter, order_manager, price_feed
+from app.services import exchange_adapter, order_manager
 from app.services.event_bus import bus
 
 # 内存锁:记录正在平仓中的仓位ID,防止止损监控循环重复触发同一仓位
@@ -132,6 +132,7 @@ async def enrich_position(position: Position, current_price: float, kol_name: st
         "kol_name": kol_name,
         "parent_id": position.parent_id,
         "batch_no": position.batch_no,
+        "exchange_account_id": position.exchange_account_id,
         "exchange": position.exchange,
         "symbol": position.symbol,
         "side": position.side,
@@ -201,17 +202,8 @@ async def _check_one_position(db: AsyncSession, position: Position) -> None:
     await _check_one_position_with_price(db, position, current_price)
 
 
-async def _check_one_position_with_price(
-    db: AsyncSession,
-    position: Position,
-    current_price: float,
-    full_check: bool = True,
-) -> None:
-    """检查单个持仓触发条件。
-
-    full_check=False 时只检查止损,用于统一 1 秒循环的快速路径。
-    full_check=True 时检查止盈/成本保护/追踪止损,默认保持兼容。
-    """
+async def _check_one_position_with_price(db: AsyncSession, position: Position, current_price: float) -> None:
+    """检查单个持仓的止盈止损/成本保护/追踪止损触发(使用已获取的价格)。"""
     if position.status != "open" or position.qty <= 0:
         return
     if not current_price or current_price <= 0:
@@ -227,9 +219,6 @@ async def _check_one_position_with_price(
             await order_manager.close_position(db, position.id, position.qty)
         finally:
             await _remove_closing_position(position.id)
-        return
-
-    if not full_check:
         return
 
     # 止盈触发 → 按比例平仓 + 成本保护
@@ -263,7 +252,6 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
             position.sl = new_sl
             try:
                 await db.flush()
-                await db.commit()
             except Exception as e:
                 logger.warning(f"追踪止损提交失败 pos={position.id}: {e}")
                 await db.rollback()
@@ -273,7 +261,6 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
             position.sl = new_sl
             try:
                 await db.flush()
-                await db.commit()
             except Exception as e:
                 logger.warning(f"追踪止损提交失败 pos={position.id}: {e}")
                 await db.rollback()
@@ -335,47 +322,8 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
             )
         ).scalars().all()
 
-        price_cache: dict[tuple[str, str], float] = {}
-        symbols_by_exchange: dict[str, set[str]] = {}
-        for pos in positions:
-            symbols_by_exchange.setdefault(pos.exchange, set()).add(pos.symbol)
-        for exh, syms in symbols_by_exchange.items():
-            try:
-                prices = await price_feed.fetch_market_prices(exh, list(syms))
-                for sym, price in prices.items():
-                    if price and price > 0:
-                        price_cache[(exh, sym)] = price
-            except Exception as e:
-                logger.warning(f"超时检查批量价格获取失败 {exh}:{sorted(syms)}: {e}")
-
         for pos in positions:
             try:
-                current_price = price_cache.get((pos.exchange, pos.symbol), 0)
-                pnl, pct = compute_pnl(pos, current_price) if current_price and current_price > 0 else (0.0, 0.0)
-                if pos.sl and pos.sl > 0 and current_price and current_price > 0 and pnl > 0:
-                    logger.warning(
-                        f"持仓超时但已有止损且当前盈利,仅告警不强平 pos={pos.id} symbol={pos.symbol} "
-                        f"opened={pos.opened_at} timeout={timeout_hours}h price={current_price} pnl={pnl:.2f}"
-                    )
-                    try:
-                        from app.services.notification import notify
-                        from app.services.order_manager import _get_position_source_text, _get_kol_name
-                        _timeout_src = await _get_position_source_text(db, pos.id, pos.kol_id, pos.symbol)
-                        _timeout_kol = await _get_kol_name(db, pos.kol_id)
-                        await notify(
-                            "risk", "持仓超时但保留盈利单",
-                            f"品种: {pos.symbol}\n方向: {pos.side}\n"
-                            f"持仓时间: 超过 {timeout_hours} 小时\n"
-                            f"当前价: {current_price}\n浮盈: {pnl:.2f} USDT({pct:.2f}%)\n"
-                            f"已有止损: {pos.sl}\n处理: 仅告警,不强制平仓",
-                            pos.customer_id,
-                            source_text=_timeout_src,
-                            kol_name=_timeout_kol,
-                        )
-                    except Exception as e:
-                        logger.warning(f"发送超时盈利保留通知失败 pos={pos.id}: {e}")
-                    continue
-
                 logger.warning(
                     f"持仓超时自动平仓 pos={pos.id} symbol={pos.symbol} "
                     f"opened={pos.opened_at} timeout={timeout_hours}h"
@@ -415,8 +363,8 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
                         f"超时时间: {timeout_hours}小时\n失败原因: {e}",
                         pos.customer_id,
                     )
-                except Exception as notify_err:
-                    logger.warning(f"发送超时平仓失败通知失败 pos={pos.id}: {notify_err}")
+                except Exception:
+                    pass
 
     if closed_count > 0:
         logger.info(f"超时平仓完成: {closed_count} 个持仓已自动关闭")
@@ -424,19 +372,25 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
 
 
 async def monitor_loop() -> None:
-    """统一持仓监控循环:1 秒检查 SL,每 5 秒检查 TP/成本保护/追踪止损。
+    """后台持仓监控循环:每 5 秒检查所有 open 子仓位。
 
     只检查子仓位(parent_id IS NOT NULL),不检查 master 仓位。
-    统一循环避免原 1 秒 SL 循环和 5 秒 TP 循环重复查询 DB、重复拉行情。
+    原因:master 和子仓位都有 tp_levels/sl 配置,如果同时检查会导致:
+      1. master 触发止盈时走简单逻辑,close_position 会关闭所有子仓位(而非按比例)
+      2. 子仓位触发止盈后 master 的 tp_levels 未更新,下次循环 master 会重复触发
+    子仓位的 close_at_tp_level 聚合逻辑会正确同步 master 状态。
+
+    优化:
+      1. 按 exchange 分组批量查询价格,减少 API 调用次数。
+      2. 批量价格写入 Redis 缓存,供 order_manager 信号处理复用。
+
+    注:止损的快速响应已由并行的 stop_loss_monitor_loop(1秒级)承担,
+    本循环仍会检查止损作为兜底,但主要职责是止盈/成本保护/追踪止损。
     """
-    logger.info("统一持仓监控循环已启动 (1秒SL / 5秒TP+成本保护+追踪止损)")
-    tick = 0
+    logger.info("持仓监控循环已启动 (5秒级: 止盈/成本保护/追踪止损)")
     while True:
         try:
-            tick += 1
-            full_check = (tick % 5 == 0)
             async with AsyncSessionLocal() as db:
-                await db.execute(text("SET LOCAL statement_timeout = '5s'"))
                 result = await db.execute(
                     select(Position).where(
                         Position.status == "open",
@@ -445,7 +399,7 @@ async def monitor_loop() -> None:
                 )
                 positions = result.scalars().all()
                 if not positions:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(5)
                     continue
 
                 exchange_symbols: dict[str, set[str]] = {}
@@ -454,35 +408,36 @@ async def monitor_loop() -> None:
 
                 price_cache: dict[tuple[str, str], float] = {}
                 for exh, syms in exchange_symbols.items():
-                    try:
-                        prices = await price_feed.fetch_market_prices(exh, list(syms))
-                        for sym, price in prices.items():
-                            if price and price > 0:
-                                price_cache[(exh, sym)] = price
-                                _task = asyncio.create_task(_set_cached_price(exh, sym, price))
-                    except Exception as e:
-                        logger.debug(f"统一监控批量获取价格失败 {exh}:{sorted(syms)}: {e}")
+                    prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
+                    for sym, price in prices.items():
+                        if price and price > 0:
+                            price_cache[(exh, sym)] = price
+                            # 异步写入缓存(不阻塞,失败已内部捕获)
+                            _task = asyncio.create_task(_set_cached_price(exh, sym, price))
 
                 for pos in positions:
                     try:
                         current_price = price_cache.get((pos.exchange, pos.symbol))
                         if not current_price or current_price <= 0:
                             continue
-                        await _check_one_position_with_price(db, pos, current_price, full_check=full_check)
+                        await _check_one_position_with_price(db, pos, current_price)
                     except Exception as e:
                         logger.exception(f"检查持仓 {pos.id} 失败: {e}")
+                        # 回滚会话,防止单笔异常(close_position 中途失败)污染后续持仓检查
                         await db.rollback()
-
-                if full_check:
-                    _refresh_cids = {p.customer_id for p in positions if p.status == "open"}
-                    for _cid in _refresh_cids:
-                        try:
-                            await bus.publish_customer(_cid, "position", {"action": "refresh"})
-                        except Exception as e:
-                            logger.debug(f"推送客户持仓刷新失败 customer={_cid}: {e}")
+                # 推送持仓更新事件,触发前端实时刷新(价格/盈亏/止损/成本保护/追踪止损)
+                _refresh_cids = set()
+                for _pos in positions:
+                    if _pos.status == "open":
+                        _refresh_cids.add(_pos.customer_id)
+                for _cid in _refresh_cids:
+                    try:
+                        await bus.publish_customer(_cid, "position", {"action": "refresh"})
+                    except Exception:
+                        pass
         except Exception as e:
-            logger.exception(f"统一持仓监控循环异常: {e}")
-        await asyncio.sleep(1)
+            logger.exception(f"持仓监控循环异常: {e}")
+        await asyncio.sleep(5)
 
 
 async def stop_loss_monitor_loop() -> None:
@@ -523,28 +478,24 @@ async def stop_loss_monitor_loop() -> None:
                     await asyncio.sleep(1)
                     continue
 
-                # 按 exchange+symbol 分组,优先读缓存,未命中时批量获取价格。
+                # 按 exchange+symbol 分组,批量获取价格
                 price_cache: dict[tuple[str, str], float] = {}
-                missing_symbols: dict[str, set[str]] = {}
                 for pos in positions:
                     key = (pos.exchange, pos.symbol)
-                    if key in price_cache:
-                        continue
-                    cached = await _get_cached_price(pos.exchange, pos.symbol)
-                    if cached and cached > 0:
-                        price_cache[key] = cached
-                    else:
-                        missing_symbols.setdefault(pos.exchange, set()).add(pos.symbol)
-
-                for exh, syms in missing_symbols.items():
-                    try:
-                        prices = await price_feed.fetch_market_prices(exh, list(syms))
-                        for sym, price in prices.items():
-                            if price and price > 0:
-                                price_cache[(exh, sym)] = price
-                                await _set_cached_price(exh, sym, price)
-                    except Exception as e:
-                        logger.debug(f"批量获取止损价格失败 {exh}:{sorted(syms)}: {e}")
+                    if key not in price_cache:
+                        # 优先读 Redis 缓存
+                        cached = await _get_cached_price(pos.exchange, pos.symbol)
+                        if cached and cached > 0:
+                            price_cache[key] = cached
+                        else:
+                            # 从交易所获取
+                            try:
+                                price = await exchange_adapter.fetch_market_price(pos.exchange, pos.symbol)
+                                if price and price > 0:
+                                    price_cache[key] = price
+                                    await _set_cached_price(pos.exchange, pos.symbol, price)
+                            except Exception as e:
+                                logger.debug(f"获取价格失败 {pos.exchange}:{pos.symbol}: {e}")
 
                 # 检查每个持仓的止损
                 for pos in positions:
@@ -584,8 +535,7 @@ async def stop_loss_monitor_loop() -> None:
                                             .values(status="closed", qty=0, closed_at=datetime.now(timezone.utc))
                                         )
                                         await db.commit()
-                                    except Exception as e:
-                                        logger.exception(f"[1s止损] 强制关闭本地仓位失败 pos={pos.id}: {e}")
+                                    except Exception:
                                         await db.rollback()
                                 else:
                                     raise

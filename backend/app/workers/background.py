@@ -32,6 +32,8 @@ _LOOP_FACTORIES: dict[str, callable] = {
     "position_monitor": position_manager.monitor_loop,
 
     "pending_monitor": pending_order_manager.monitor_loop,
+
+    "stop_loss_monitor": position_manager.stop_loss_monitor_loop,
 }
 
 WATCHDOG_INTERVAL = 60  # 看门狗检查间隔(秒)
@@ -62,7 +64,7 @@ async def _equity_snapshot_job() -> None:
 
     try:
 
-        # 预取 (customer_id, exchange, testnet) 元组,不持有 ORM 对象,避免循环中属性访问触发隐式 IO
+        # 预取具体交易所账号,避免 testnet 与 demo 或多 API 账号互相混用。
 
         async with AsyncSessionLocal() as db:
 
@@ -70,11 +72,14 @@ async def _equity_snapshot_job() -> None:
 
                 await db.execute(
 
-                    select(ExchangeAccount.customer_id, ExchangeAccount.exchange, ExchangeAccount.testnet)
+                    select(
+                        ExchangeAccount.id,
+                        ExchangeAccount.customer_id,
+                        ExchangeAccount.exchange,
+                        ExchangeAccount.testnet,
+                    )
 
                     .where(ExchangeAccount.is_active.is_(True))
-
-                    .where(ExchangeAccount.last_error == "")
 
                     .distinct()
 
@@ -82,23 +87,32 @@ async def _equity_snapshot_job() -> None:
 
             ).all()
 
-            pairs = [(r.customer_id, r.exchange, r.testnet) for r in rows]
+            accounts = [(r.id, r.customer_id, r.exchange, r.testnet) for r in rows]
 
 
 
         # 每个客户独立 session,失败隔离
 
-        for cid, ex, testnet in pairs:
+        for account_id, cid, ex, testnet in accounts:
 
             try:
 
                 async with AsyncSessionLocal() as db:
 
-                    await analytics.take_equity_snapshot(db, cid, ex, testnet)
+                    await analytics.take_equity_snapshot(
+                        db,
+                        cid,
+                        ex,
+                        testnet,
+                        exchange_account_id=account_id,
+                    )
 
             except Exception as e:
 
-                logger.warning(f"净值快照失败 customer={cid} exchange={ex} testnet={testnet}: {e}")
+                logger.warning(
+                    f"净值快照失败 customer={cid} exchange={ex} "
+                    f"account_id={account_id} testnet={testnet}: {e}"
+                )
 
     except Exception as e:
 
@@ -121,7 +135,6 @@ async def _daily_risk_snapshot_job() -> None:
                 await db.execute(
                     select(ExchangeAccount.customer_id, ExchangeAccount.exchange, ExchangeAccount.testnet)
                     .where(ExchangeAccount.is_active.is_(True))
-                    .where(ExchangeAccount.last_error == "")
                     .distinct()
                 )
             ).all()
@@ -326,16 +339,6 @@ async def start_background_tasks() -> None:
 
     global _scheduler, _watchdog_task
 
-    def _log_loop_exit(task: asyncio.Task, name: str) -> None:
-        if task.cancelled():
-            logger.info(f"后台循环 {name} 已取消退出")
-            return
-        exc = task.exception()
-        if exc is None:
-            logger.info(f"后台循环 {name} 正常退出")
-            return
-        logger.error(f"后台循环 {name} 异常退出: {exc}")
-
     # 后台循环(保留引用防止 GC,并供看门狗监控)
 
     for name, factory in _LOOP_FACTORIES.items():
@@ -344,7 +347,7 @@ async def start_background_tasks() -> None:
 
         _background_tasks[name].add_done_callback(
 
-            lambda t, n=name: _log_loop_exit(t, n)
+            lambda t, n=name: logger.error(f"后台循环 {n} 退出: cancelled={t.cancelled()} exc={t.exception() if not t.cancelled() else None}")
 
         )
 
@@ -359,7 +362,7 @@ async def start_background_tasks() -> None:
 
     _scheduler.add_job(_auth_expire_job, "interval", hours=6, id="auth_expire")
 
-    _scheduler.add_job(_timeout_position_job, "interval", minutes=15, id="timeout_position")
+    _scheduler.add_job(_timeout_position_job, "interval", hours=1, id="timeout_position")
 
     _scheduler.add_job(_kol_risk_check_job, "interval", minutes=10, id="kol_risk_check")
     _scheduler.add_job(_reconciliation_job, "interval", minutes=10, id="reconciliation")
@@ -371,7 +374,7 @@ async def start_background_tasks() -> None:
 
     _watchdog_task = asyncio.create_task(_watchdog(), name="watchdog")
 
-    logger.info("后台任务已启动(Discord 监听 / 统一持仓监控(1秒SL/5秒TP) / 待触发单监控 / 净值快照 / 日风控快照 / 授权预警 / 超时平仓 / KOL风控 / 交易所对账(10分钟) / 看门狗)")
+    logger.info("后台任务已启动(Discord 监听 / 持仓监控 / 待触发单监控 / 止损监控(1秒级) / 净值快照 / 日风控快照 / 授权预警 / 超时平仓 / KOL风控 / 交易所对账(10分钟) / 看门狗)")
 
 
 
@@ -464,3 +467,4 @@ def get_background_tasks_status() -> dict[str, dict]:
         status["watchdog"] = {"alive": True}
 
     return status
+

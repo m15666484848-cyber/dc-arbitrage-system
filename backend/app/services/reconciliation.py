@@ -47,6 +47,7 @@ class PositionDiscrepancy:
     type: str  # ghost_position | orphan_position | qty_mismatch
     customer_id: int
     exchange: str
+    exchange_account_id: int | None
     symbol: str
     side: str
     local_qty: float
@@ -61,6 +62,7 @@ class OrderDiscrepancy:
     type: str  # ghost_order | orphan_order
     customer_id: int
     exchange: str
+    exchange_account_id: int | None
     symbol: str
     order_id: int | None = None  # 本地 order.id
     exchange_order_id: str = ""
@@ -95,6 +97,7 @@ class ReconciliationReport:
                     "type": d.type,
                     "customer_id": d.customer_id,
                     "exchange": d.exchange,
+                    "exchange_account_id": d.exchange_account_id,
                     "symbol": d.symbol,
                     "side": d.side,
                     "local_qty": d.local_qty,
@@ -109,6 +112,7 @@ class ReconciliationReport:
                     "type": d.type,
                     "customer_id": d.customer_id,
                     "exchange": d.exchange,
+                    "exchange_account_id": d.exchange_account_id,
                     "symbol": d.symbol,
                     "order_id": d.order_id,
                     "exchange_order_id": d.exchange_order_id,
@@ -152,20 +156,6 @@ def _exchange_position_qty(pos: dict) -> float:
     return contracts
 
 
-def _is_known_auth_error(message: str | None) -> bool:
-    """识别需要人工重新配置 API Key/IP/权限的交易所认证错误。"""
-    if not message:
-        return False
-    msg = message.lower()
-    return (
-        "invalid api-key" in msg
-        or "api-key" in msg and "permission" in msg
-        or "ip" in msg and "permission" in msg
-        or "authentication" in msg
-        or "unauthorized" in msg
-    )
-
-
 async def reconcile_positions(
     db,
     customer_id: int,
@@ -188,7 +178,8 @@ async def reconcile_positions(
         msg = f"获取交易所持仓失败 customer={customer_id} exchange={exchange}: {e}"
         logger.warning(msg)
         report.errors.append(msg)
-        raise
+        report.total_accounts_failed += 1
+        return
 
     # 标准化交易所持仓: {(symbol, side): qty}
     ex_pos_map: dict[tuple[str, str], float] = {}
@@ -201,52 +192,52 @@ async def reconcile_positions(
             ex_pos_map[(sym, side)] = ex_pos_map.get((sym, side), 0) + qty
 
     # 2. 获取本地 open master 仓位
-    stmt = select(Position).where(
-        Position.customer_id == customer_id,
-        Position.exchange == exchange,
-        Position.status == "open",
-        Position.parent_id.is_(None),
-    )
-    if exchange_account_id is not None:
-        stmt = stmt.where(Position.exchange_account_id == exchange_account_id)
-    local_positions = (await db.execute(stmt)).scalars().all()
+    local_positions = (
+        await db.execute(
+            select(Position).where(
+                Position.customer_id == customer_id,
+                Position.exchange == exchange,
+                Position.exchange_account_id == exchange_account_id,
+                Position.status == "open",
+                Position.parent_id.is_(None),
+            )
+        )
+    ).scalars().all()
 
-    # 3. 构建本地持仓映射: {(symbol, side): [Position, ...]}
-    # 同一账号、同一 symbol+side 可能存在多个 KOL 主仓,交易所只有一个净持仓;
-    # 对账时必须用本地主仓合计数量与交易所数量比较,不能只取第一条。
-    local_pos_map: dict[tuple[str, str], list[Position]] = {}
+    # 3. 构建本地持仓映射: {(symbol, side): Position}
+    local_pos_map: dict[tuple[str, str], Position] = {}
     for pos in local_positions:
         key = (pos.symbol.upper(), pos.side.lower())
-        local_pos_map.setdefault(key, []).append(pos)
+        # 如果同一 symbol+side 有多个 master(不应该但防御性处理),取第一个
+        if key not in local_pos_map:
+            local_pos_map[key] = pos
 
     # 4. 检测幽灵持仓:本地有但交易所无
     matched_ex_keys: set[tuple[str, str]] = set()
-    for key, positions in local_pos_map.items():
+    for key, local_pos in local_pos_map.items():
         ex_qty = ex_pos_map.get(key, 0)
-        local_qty = sum(float(pos.qty or 0) for pos in positions)
-        first_pos = positions[0]
-        position_ids = ",".join(str(pos.id) for pos in positions)
         if ex_qty <= 0:
             # 幽灵持仓:交易所无此仓位
-            for local_pos in positions:
-                disc = PositionDiscrepancy(
-                    type="ghost_position",
-                    customer_id=customer_id,
-                    exchange=exchange,
-                    symbol=local_pos.symbol,
-                    side=local_pos.side,
-                    local_qty=local_pos.qty,
-                    exchange_qty=0,
-                    position_id=local_pos.id,
-                    detail=f"本地 master 仓位 #{local_pos.id} 仍为 open,但交易所账号 #{exchange_account_id} 无此持仓(可能被手动平仓/强平/到期)",
-                )
-                report.position_discrepancies.append(disc)
+            disc = PositionDiscrepancy(
+                type="ghost_position",
+                customer_id=customer_id,
+                exchange=exchange,
+                exchange_account_id=exchange_account_id,
+                symbol=local_pos.symbol,
+                side=local_pos.side,
+                local_qty=local_pos.qty,
+                exchange_qty=0,
+                position_id=local_pos.id,
+                detail=f"本地 master 仓位 #{local_pos.id} 仍为 open,但交易所无此持仓(可能被手动平仓/强平/到期)",
+            )
+            report.position_discrepancies.append(disc)
 
-                # 自动修复:标记 master 及所有子仓位为 closed(使用独立 session)
-                await _fix_ghost_position(local_pos.id, local_pos.symbol, local_pos.side, report)
+            # 自动修复:标记 master 及所有子仓位为 closed(使用独立 session)
+            await _fix_ghost_position(local_pos.id, local_pos.symbol, local_pos.side, report)
         else:
             matched_ex_keys.add(key)
             # 检测数量不一致(允许 1% 误差,考虑合约精度)
+            local_qty = local_pos.qty
             if local_qty > 0:
                 diff_ratio = abs(local_qty - ex_qty) / local_qty
                 if diff_ratio > 0.01:
@@ -254,12 +245,13 @@ async def reconcile_positions(
                         type="qty_mismatch",
                         customer_id=customer_id,
                         exchange=exchange,
-                        symbol=first_pos.symbol,
-                        side=first_pos.side,
+                        exchange_account_id=exchange_account_id,
+                        symbol=local_pos.symbol,
+                        side=local_pos.side,
                         local_qty=local_qty,
                         exchange_qty=ex_qty,
-                        position_id=first_pos.id,
-                        detail=f"主仓位 #{position_ids} 聚合数量不一致: 交易所账号 #{exchange_account_id} 本地合计={local_qty} 交易所={ex_qty} (差异 {diff_ratio*100:.1f}%)",
+                        position_id=local_pos.id,
+                        detail=f"仓位 #{local_pos.id} 数量不一致: 本地={local_qty} 交易所={ex_qty} (差异 {diff_ratio*100:.1f}%)",
                     )
                     report.position_discrepancies.append(disc)
 
@@ -271,11 +263,12 @@ async def reconcile_positions(
                 type="orphan_position",
                 customer_id=customer_id,
                 exchange=exchange,
+                exchange_account_id=exchange_account_id,
                 symbol=sym,
                 side=side,
                 local_qty=0,
                 exchange_qty=ex_qty,
-                detail=f"交易所账号 #{exchange_account_id} 有 {sym} {side} 持仓 {ex_qty},但本地无 master 仓位记录(可能通过其他渠道开仓)",
+                detail=f"交易所有 {sym} {side} 持仓 {ex_qty},但本地无 master 仓位记录(可能通过其他渠道开仓)",
             )
             report.position_discrepancies.append(disc)
 
@@ -354,23 +347,25 @@ async def reconcile_orders(
         msg = f"获取交易所挂单失败 customer={customer_id} exchange={exchange}: {e}"
         logger.warning(msg)
         report.errors.append(msg)
-        raise
+        return
 
     # 标准化交易所挂单 ID 集合
     ex_order_ids: set[str] = {str(o.get("id", "")) for o in ex_orders if o.get("id")}
     ex_order_map: dict[str, dict] = {str(o.get("id", "")): o for o in ex_orders if o.get("id")}
 
     # 2. 获取本地 pending 订单(有 exchange_order_id 的)
-    stmt = select(Order).where(
-        Order.customer_id == customer_id,
-        Order.exchange == exchange,
-        Order.status == "pending",
-        Order.exchange_order_id != "",
-        Order.deleted_at.is_(None),
-    )
-    if exchange_account_id is not None:
-        stmt = stmt.where(Order.exchange_account_id == exchange_account_id)
-    local_orders = (await db.execute(stmt)).scalars().all()
+    local_orders = (
+        await db.execute(
+            select(Order).where(
+                Order.customer_id == customer_id,
+                Order.exchange == exchange,
+                Order.exchange_account_id == exchange_account_id,
+                Order.status == "pending",
+                Order.exchange_order_id != "",
+                Order.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
 
     # 3. 检测幽灵挂单:本地有 pending 但交易所无
     for order in local_orders:
@@ -380,10 +375,11 @@ async def reconcile_orders(
                 type="ghost_order",
                 customer_id=customer_id,
                 exchange=exchange,
+                exchange_account_id=exchange_account_id,
                 symbol=order.symbol,
                 order_id=order.id,
                 exchange_order_id=oid,
-                detail=f"本地挂单 #{order.id} ({order.symbol}) 状态为 pending,但交易所账号 #{exchange_account_id} 无此挂单(可能已成交/撤单/过期)",
+                detail=f"本地挂单 #{order.id} ({order.symbol}) 状态为 pending,但交易所无此挂单(可能已成交/撤单/过期)",
             )
             report.order_discrepancies.append(disc)
             # 自动修复:标记为 cancelled(使用独立 session)
@@ -398,9 +394,10 @@ async def reconcile_orders(
                 type="orphan_order",
                 customer_id=customer_id,
                 exchange=exchange,
+                exchange_account_id=exchange_account_id,
                 symbol=sym,
                 exchange_order_id=oid,
-                detail=f"交易所账号 #{exchange_account_id} 有挂单 {oid} ({sym}),但本地无 pending 记录(可能通过其他渠道下单)",
+                detail=f"交易所有挂单 {oid} ({sym}),但本地无 pending 记录(可能通过其他渠道下单)",
             )
             report.order_discrepancies.append(disc)
 
@@ -446,7 +443,7 @@ async def _reconcile_one_account(
     exchange_account_id: int,
     customer_id: int,
     exchange: str,
-    testnet: bool,
+    account_mode: str,
     report: ReconciliationReport,
 ) -> None:
     """对账单个客户+交易所账号(独立 session,失败隔离)。"""
@@ -457,7 +454,6 @@ async def _reconcile_one_account(
                 db,
                 customer_id,
                 exchange,
-                testnet,
                 exchange_account_id=exchange_account_id,
             )
             report.total_accounts_checked += 1
@@ -469,18 +465,13 @@ async def _reconcile_one_account(
             await reconcile_orders(db, customer_id, exchange, exchange_account_id, ex, report)
 
         except Exception as e:
-            raw_error = str(e)
-            msg = f"对账失败 account={exchange_account_id} customer={customer_id} exchange={exchange}: {raw_error}"
+            msg = (
+                f"对账失败 customer={customer_id} exchange={exchange} "
+                f"account_id={exchange_account_id} mode={account_mode}: {e}"
+            )
             logger.warning(msg)
             report.errors.append(msg)
             report.total_accounts_failed += 1
-            if _is_known_auth_error(raw_error):
-                await db.execute(
-                    sa_update(ExchangeAccount)
-                    .where(ExchangeAccount.id == exchange_account_id)
-                    .values(last_error=raw_error[:500])
-                )
-                await db.commit()
         finally:
             if ex:
                 await exchange_adapter.close_exchange(ex)
@@ -496,8 +487,7 @@ async def run_reconciliation() -> ReconciliationReport:
     report = ReconciliationReport()
     logger.info("[对账] 开始执行交易所对账...")
 
-    # 预取所有活跃交易所账号。对账必须按 exchange_account_id 逐个账号执行,
-    # 否则多 API 账号会把本地仓位和交易所仓位混在一起,造成数量误报。
+    # 预取所有活跃交易所账号(不持有 ORM 对象,避免循环中属性访问触发隐式 IO)
     async with AsyncSessionLocal() as db:
         rows = (
             await db.execute(
@@ -505,17 +495,12 @@ async def run_reconciliation() -> ReconciliationReport:
                     ExchangeAccount.id,
                     ExchangeAccount.customer_id,
                     ExchangeAccount.exchange,
-                    ExchangeAccount.testnet,
-                    ExchangeAccount.last_error,
+                    ExchangeAccount.account_mode,
                 )
                 .where(ExchangeAccount.is_active.is_(True))
-                .order_by(ExchangeAccount.customer_id, ExchangeAccount.exchange, ExchangeAccount.id)
             )
         ).all()
-        accounts = [
-            (r.id, r.customer_id, r.exchange, r.testnet, r.last_error or "")
-            for r in rows
-        ]
+        accounts = [(r.id, r.customer_id, r.exchange, r.account_mode) for r in rows]
 
     if not accounts:
         logger.info("[对账] 无活跃交易所账号,跳过")
@@ -524,15 +509,8 @@ async def run_reconciliation() -> ReconciliationReport:
         return report
 
     # 逐个账号对账(串行,避免交易所 API 限流)
-    for exchange_account_id, customer_id, exchange, testnet, last_error in accounts:
-        if _is_known_auth_error(last_error):
-            msg = (
-                f"跳过对账 account={exchange_account_id} customer={customer_id} "
-                f"exchange={exchange}: API Key/IP/权限错误,需重新配置后再测试"
-            )
-            logger.info(msg)
-            continue
-        await _reconcile_one_account(exchange_account_id, customer_id, exchange, testnet, report)
+    for account_id, customer_id, exchange, account_mode in accounts:
+        await _reconcile_one_account(account_id, customer_id, exchange, account_mode, report)
 
     report.finished_at = datetime.now(timezone.utc)
 
