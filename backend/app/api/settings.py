@@ -54,6 +54,19 @@ def _api_status(acc: ExchangeAccount) -> str:
     return "unverified"
 
 
+def _account_mode(exchange: str, testnet: bool, account_mode: str | None = None) -> str:
+    """统一交易所环境标识,兼容旧 testnet 布尔字段。"""
+    exchange_name = (exchange or "").strip().lower()
+    mode = (account_mode or "").strip().lower()
+    if not mode:
+        return "testnet" if testnet else "live"
+    if mode not in {"live", "testnet", "demo"}:
+        raise HTTPException(400, "交易环境无效")
+    if mode == "demo" and exchange_name not in {"bybit", "binance"}:
+        raise HTTPException(400, "当前只有 Bybit/Binance 支持 Demo Trading")
+    return mode
+
+
 def _audit(db: AsyncSession, action: str, target: str, detail: str) -> None:
     """记录客户侧设置操作审计。AuditLog.user_id 关联管理员用户表,客户操作不写 user_id。"""
     db.add(AuditLog(action=action, target=target[:128], detail=detail[:2000], ip=""))
@@ -69,7 +82,7 @@ async def list_exchange_accounts(current=Depends(get_current_user), db: AsyncSes
         await db.execute(
             select(ExchangeAccount)
             .where(ExchangeAccount.customer_id == cid, ExchangeAccount.is_active.is_(True))
-            .order_by(ExchangeAccount.exchange, ExchangeAccount.testnet, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
+            .order_by(ExchangeAccount.exchange, ExchangeAccount.account_mode, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
         )
     ).scalars().all()
     out = []
@@ -115,9 +128,13 @@ async def add_exchange_account(
         )
     ).scalars().all()
 
-    # 校验 1:未授权多开时,同客户同交易所只能 1 个 API;授权后允许同交易所多 API 并选择默认账号
+    body_mode = _account_mode(body.exchange, body.testnet, body.account_mode)
+    body_testnet = body_mode != "live"
+
+    # 校验 1:未授权多开时,同客户同交易所同环境只能 1 个 API;授权后允许同交易所多 API 并选择默认账号
     for acc in existing:
-        if acc.exchange == body.exchange and acc.testnet == body.testnet and not cust.multi_exchange_allowed:
+        acc_mode = _account_mode(acc.exchange, acc.testnet, getattr(acc, "account_mode", None))
+        if acc.exchange == body.exchange and acc_mode == body_mode and not cust.multi_exchange_allowed:
             raise HTTPException(400, f"该客户已绑定 {body.exchange} 的 API,请先删除旧 API 再绑定新的")
 
     # 校验 2:未授权多开时,只能绑 1 个交易所
@@ -141,6 +158,21 @@ async def add_exchange_account(
     if dup and dup.customer_id != current.id:
         raise HTTPException(400, "该 API Key 已被其他账号绑定,禁止共用交易所 API")
 
+    if body.strategy_id:
+        from app.models.strategy import Strategy
+
+        strat = (
+            await db.execute(
+                select(Strategy).where(
+                    Strategy.id == body.strategy_id,
+                    Strategy.customer_id == current.id,
+                    Strategy.enabled.is_(True),
+                )
+            )
+        ).scalar_one_or_none()
+        if not strat:
+            raise HTTPException(400, "策略不存在或已停用")
+
     has_default = any(a.is_default for a in existing)
 
     acc = ExchangeAccount(
@@ -151,7 +183,8 @@ async def add_exchange_account(
         api_secret_enc=encrypt_secret(body.api_secret),
         passphrase_enc=encrypt_secret(body.passphrase) if body.passphrase else "",
         api_key_hash=api_key_hash,
-        testnet=body.testnet,
+        testnet=body_testnet,
+        account_mode=body_mode,
         is_active=True,
         follow_enabled=body.follow_enabled,
         follow_weight=body.follow_weight,
@@ -160,10 +193,9 @@ async def add_exchange_account(
         # 多 API 场景下,"默认下单 API" 是客户级唯一入口。
         # 新增账号不会抢占已有默认账号；只有客户没有任何默认账号时才自动设为默认。
         is_default=not has_default,
-        account_type=body.account_type if hasattr(body, "account_type") else "",
     )
     db.add(acc)
-    _audit(db, "exchange_account_create", f"exchange_account:{current.id}:{body.exchange}", f"customer_id={current.id}, exchange={body.exchange}, testnet={body.testnet}")
+    _audit(db, "exchange_account_create", f"exchange_account:{current.id}:{body.exchange}", f"customer_id={current.id}, exchange={body.exchange}, account_mode={body_mode}")
     try:
         await db.commit()
     except Exception:
@@ -181,7 +213,8 @@ async def add_exchange_account(
 async def set_default_exchange_account(aid: int, current=Depends(require_customer), db: AsyncSession = Depends(get_db)):
     """设置客户级默认下单 API。
 
-    自动跟单只使用一个默认下单 API,不会因添加多个 API 而全部跟单。
+    默认 API 用于手动下单和未显式开启多 API 跟单时的兼容兜底；
+    自动跟单会优先使用所有 follow_enabled=True 且验证正常的 API。
     """
     acc = (
         await db.execute(
@@ -352,32 +385,9 @@ async def test_exchange_account(aid: int, current=Depends(require_customer), db:
         api_key = decrypt_secret(acc.api_key_enc)
         api_secret = decrypt_secret(acc.api_secret_enc)
         passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-        account_type = getattr(acc, "account_type", "") or ""
-        ex = exchange_adapter._create_exchange(acc.exchange, "", "", "", acc.testnet, account_type)
-        try:
-            await ex.load_markets()
-        except Exception:
-            await ex.close()
-            ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, account_type)
-            await ex.load_markets()
-        ex.apiKey = api_key
-        ex.secret = api_secret
-        if passphrase:
-            ex.password = passphrase
+        ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_mode", None))
+        await ex.load_markets()
         bal = await exchange_adapter.fetch_balance(ex)
-        if acc.exchange == "bybit" and not account_type and hasattr(ex, "fetch_accounts"):
-            try:
-                accounts = await ex.fetch_accounts()
-                for a in accounts:
-                    a_type = (a.get("type") or "").lower()
-                    if a_type == "unified":
-                        acc.account_type = "unified"
-                        break
-                    elif a_type in ("contract", "swap"):
-                        acc.account_type = "classic"
-                        break
-            except Exception:
-                pass
         acc.last_error = ""
         acc.last_verified_at = datetime.now(timezone.utc)
         _audit(db, "exchange_account_test_success", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, equity={bal.get('equity', 0)}")
@@ -385,6 +395,7 @@ async def test_exchange_account(aid: int, current=Depends(require_customer), db:
         return ok({
             "success": True,
             "exchange": acc.exchange,
+            "account_mode": getattr(acc, "account_mode", "testnet" if acc.testnet else "live"),
             "equity": bal.get("equity", 0),
             "balance": bal.get("balance", 0),
             "last_verified_at": acc.last_verified_at.isoformat(),
@@ -415,18 +426,8 @@ async def get_exchange_account_balance(aid: int, current=Depends(require_custome
         api_key = decrypt_secret(acc.api_key_enc)
         api_secret = decrypt_secret(acc.api_secret_enc)
         passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-        account_type = getattr(acc, "account_type", "") or ""
-        ex = exchange_adapter._create_exchange(acc.exchange, "", "", "", acc.testnet, account_type)
-        try:
-            await ex.load_markets()
-        except Exception:
-            await ex.close()
-            ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, account_type)
-            await ex.load_markets()
-        ex.apiKey = api_key
-        ex.secret = api_secret
-        if passphrase:
-            ex.password = passphrase
+        ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_mode", None))
+        await ex.load_markets()
         bal = await exchange_adapter.fetch_balance(ex)
         acc.last_error = ""
         acc.last_verified_at = datetime.now(timezone.utc)
@@ -436,6 +437,7 @@ async def get_exchange_account_balance(aid: int, current=Depends(require_custome
             "id": acc.id,
             "exchange": acc.exchange,
             "testnet": acc.testnet,
+            "account_mode": getattr(acc, "account_mode", "testnet" if acc.testnet else "live"),
             "equity": bal.get("equity", 0),
             "balance": bal.get("balance", 0),
             "unrealized_pnl": bal.get("unrealized_pnl", 0),
@@ -462,7 +464,7 @@ async def get_exchange_balance_summary(current=Depends(require_customer), db: As
         await db.execute(
             select(ExchangeAccount)
             .where(ExchangeAccount.customer_id == current.id, ExchangeAccount.is_active.is_(True))
-            .order_by(ExchangeAccount.exchange, ExchangeAccount.testnet, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
+            .order_by(ExchangeAccount.exchange, ExchangeAccount.account_mode, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
         )
     ).scalars().all()
 
@@ -477,6 +479,7 @@ async def get_exchange_balance_summary(current=Depends(require_customer), db: As
             "id": acc.id,
             "exchange": acc.exchange,
             "testnet": acc.testnet,
+            "account_mode": getattr(acc, "account_mode", "testnet" if acc.testnet else "live"),
             "is_default": acc.is_default,
             "status": _api_status(acc),
             "equity": 0.0,
@@ -491,7 +494,7 @@ async def get_exchange_balance_summary(current=Depends(require_customer), db: As
             api_key = decrypt_secret(acc.api_key_enc)
             api_secret = decrypt_secret(acc.api_secret_enc)
             passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-            ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_type", "") or "")
+            ex = exchange_adapter._create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_mode", None))
             await ex.load_markets()
             bal = await exchange_adapter.fetch_balance(ex)
             equity = float(bal.get("equity", 0) or 0)
@@ -509,8 +512,9 @@ async def get_exchange_balance_summary(current=Depends(require_customer), db: As
             })
             total_equity += equity
             total_balance += balance
-            key = f"{acc.exchange}-{'testnet' if acc.testnet else 'live'}"
-            group = totals.setdefault(key, {"exchange": acc.exchange, "testnet": acc.testnet, "equity": 0.0, "balance": 0.0, "unrealized_pnl": 0.0, "account_count": 0, "failed_count": 0})
+            mode = getattr(acc, "account_mode", "testnet" if acc.testnet else "live")
+            key = f"{acc.exchange}-{mode}"
+            group = totals.setdefault(key, {"exchange": acc.exchange, "testnet": acc.testnet, "account_mode": mode, "equity": 0.0, "balance": 0.0, "unrealized_pnl": 0.0, "account_count": 0, "failed_count": 0})
             group["equity"] += equity
             group["balance"] += balance
             group["unrealized_pnl"] += unrealized_pnl
@@ -519,8 +523,9 @@ async def get_exchange_balance_summary(current=Depends(require_customer), db: As
             acc.last_error = str(e)[:500]
             item["status"] = "failed"
             item["error"] = acc.last_error
-            key = f"{acc.exchange}-{'testnet' if acc.testnet else 'live'}"
-            group = totals.setdefault(key, {"exchange": acc.exchange, "testnet": acc.testnet, "equity": 0.0, "balance": 0.0, "unrealized_pnl": 0.0, "account_count": 0, "failed_count": 0})
+            mode = getattr(acc, "account_mode", "testnet" if acc.testnet else "live")
+            key = f"{acc.exchange}-{mode}"
+            group = totals.setdefault(key, {"exchange": acc.exchange, "testnet": acc.testnet, "account_mode": mode, "equity": 0.0, "balance": 0.0, "unrealized_pnl": 0.0, "account_count": 0, "failed_count": 0})
             group["account_count"] += 1
             group["failed_count"] += 1
         finally:
@@ -546,16 +551,17 @@ async def get_exchange_risk_overview(current=Depends(require_customer), db: Asyn
         await db.execute(
             select(ExchangeAccount)
             .where(ExchangeAccount.customer_id == current.id, ExchangeAccount.is_active.is_(True))
-            .order_by(ExchangeAccount.exchange, ExchangeAccount.testnet, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
+            .order_by(ExchangeAccount.exchange, ExchangeAccount.account_mode, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
         )
     ).scalars().all()
     risk_rows = (await db.execute(select(RiskConfig).where(RiskConfig.customer_id == current.id, RiskConfig.enabled.is_(True)))).scalars().all()
     risk_map = {r.exchange: r for r in risk_rows}
 
     out = []
-    seen: set[tuple[str, bool]] = set()
+    seen: set[tuple[str, str]] = set()
     for acc in accounts:
-        key = (acc.exchange, acc.testnet)
+        mode = getattr(acc, "account_mode", "testnet" if acc.testnet else "live")
+        key = (acc.exchange, mode)
         if key in seen:
             continue
         seen.add(key)
@@ -583,6 +589,7 @@ async def get_exchange_risk_overview(current=Depends(require_customer), db: Asyn
         out.append({
             "exchange": acc.exchange,
             "testnet": acc.testnet,
+            "account_mode": mode,
             "api_status": _api_status(acc),
             "default_account_id": acc.id if acc.is_default else None,
             "open_positions": position_count,

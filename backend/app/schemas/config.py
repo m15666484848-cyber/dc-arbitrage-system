@@ -11,6 +11,7 @@ class ExchangeAccountOut(BaseModel):
     exchange: str
     label: str = ""
     testnet: bool = False
+    account_mode: str = "live"  # live|testnet|demo
     is_active: bool = True
     is_default: bool = False
     follow_enabled: bool = False
@@ -31,12 +32,12 @@ class ExchangeAccountCreate(BaseModel):
     label: str = ""
     api_key: str
     api_secret: str
-    passphrase: str = ""  # OKX / Bybit (Bybit V5 API Key 可选设置 passphrase)
+    passphrase: str = ""  # OKX
     testnet: bool = False
-    account_type: str = ""  # Bybit: ""(自动) / "unified" / "classic"
+    account_mode: str | None = None  # live|testnet|demo；为空时兼容旧 testnet 字段
     follow_enabled: bool = False
-    follow_weight: float = 1.0
-    max_order_usdt: float = 0.0
+    follow_weight: float = Field(default=1.0, ge=0, le=100)
+    max_order_usdt: float = Field(default=0.0, ge=0)
     strategy_id: int | None = None
 
 

@@ -53,12 +53,6 @@ _rate_locks: dict[str, "asyncio.Lock"] = defaultdict(asyncio.Lock)
 # 公开行情查询实例缓存(无 API Key,复用 HTTP 连接池)
 _public_exchanges: dict[str, Any] = {}
 
-# 私有交易实例短缓存:减少频繁平仓/撤单时重复创建 ccxt 实例和 load_markets。
-# key=exchange_account_id,value=(exchange_instance, expires_at)
-PRIVATE_EXCHANGE_CACHE_TTL = 60.0
-_private_exchange_cache: dict[int, tuple[Any, float]] = {}
-_private_exchange_locks: dict[int, "asyncio.Lock"] = defaultdict(asyncio.Lock)
-
 _EXCHANGE_SYMBOLS: dict[str, set[str]] = defaultdict(set)
 
 
@@ -113,7 +107,14 @@ async def _retry_with_backoff(func, *args, retries=MAX_RETRIES, **kwargs):
     raise last_error
 
 
-def _create_exchange(exchange: str, api_key: str, api_secret: str, passphrase: str, testnet: bool, account_type: str = ""):
+def _create_exchange(
+    exchange: str,
+    api_key: str,
+    api_secret: str,
+    passphrase: str,
+    testnet: bool,
+    account_mode: str | None = None,
+):
     ex_cls = {
         "okx": ccxt.okx,
         "binance": ccxt.binance,
@@ -131,18 +132,38 @@ def _create_exchange(exchange: str, api_key: str, api_secret: str, passphrase: s
             "defaultType": "future",
             "adjustForTimeDifference": True,
             "fetchOpenOrders": {"warnWithoutSymbol": False},
+            "fetchMarkets": {"types": ["linear"]},
+            "fetchMargins": False,
         }
     elif exchange == "bybit":
-        # Bybit: unified(UNIFIED) vs classic(CONTRACT)
-        if account_type == "unified":
-            kwargs["options"] = {"defaultType": "unified"}
-        else:
-            kwargs["options"] = {"defaultType": "swap"}
-    if passphrase and exchange in ("okx", "bybit"):
-        kwargs["password"] = passphrase  # OKX/Bybit 用 password 字段
+        kwargs["options"] = {
+            "defaultType": "swap",
+            "defaultSubType": "linear",
+            "defaultSettle": "USDT",
+        }
+    if exchange == "okx" and passphrase:
+        kwargs["password"] = passphrase
     ex = ex_cls(kwargs)
-    if testnet:
-        ex.set_sandbox_mode(True)
+    mode = account_mode or ("testnet" if testnet else "live")
+    if mode == "demo":
+        if exchange in ("bybit", "binance") and hasattr(ex, "enable_demo_trading"):
+            # Bybit/Binance Demo Trading 使用独立 demo 域名,不同于交易所测试网。
+            ex.enable_demo_trading(True)
+        else:
+            raise ValueError(f"{exchange} 不支持 Demo Trading 模式")
+    elif testnet or mode == "testnet":
+        if exchange == "binance":
+            # ccxt 4.x 已禁止 Binance futures sandbox 签名请求,但仍保留 test URL。
+            # 手动切换到 U 本位合约测试网域名,避免 sign() 因 sandboxMode 抛 NotSupported。
+            ex.urls["api"] = ex.urls.get("test", ex.urls["api"])
+            ex.options["sandboxMode"] = False
+            # Binance futures testnet 没有 sapi 钱包接口；load_markets 若拉 currencies 会失败。
+            ex.has["fetchCurrencies"] = False
+            async def _empty_currencies(params=None):
+                return {}
+            ex.fetch_currencies = _empty_currencies
+        else:
+            ex.set_sandbox_mode(True)
     return ex
 
 
@@ -152,7 +173,6 @@ async def load_exchange(
     exchange: str | None = None,
     testnet: bool | None = None,
     exchange_account_id: int | None = None,
-    use_cache: bool = True,
 ):
     if exchange_account_id is not None:
         stmt = select(ExchangeAccount).where(
@@ -184,64 +204,15 @@ async def load_exchange(
     acc = result.scalars().first()
     if not acc:
         raise ValueError(f"未配置 {exchange or exchange_account_id} 交易所账号")
-    if use_cache and acc.id:
-        cached = _private_exchange_cache.get(acc.id)
-        now = time.monotonic()
-        if cached and cached[1] > now:
-            ex = cached[0]
-            setattr(ex, "_dcq_cached_private", True)
-            return ex, acc
-        async with _private_exchange_locks[acc.id]:
-            cached = _private_exchange_cache.get(acc.id)
-            now = time.monotonic()
-            if cached and cached[1] > now:
-                ex = cached[0]
-                setattr(ex, "_dcq_cached_private", True)
-                return ex, acc
-            api_key = decrypt_secret(acc.api_key_enc)
-            api_secret = decrypt_secret(acc.api_secret_enc)
-            passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-            account_type = getattr(acc, "account_type", "") or ""
-            # Bybit 测试网在有 API Key 时,即使是公开行情接口也会发送 Key 头,
-            # Bybit 会校验 Key 有效性,无效则返回 10003 错误,导致 load_markets 失败。
-            # 解决方案:先不带 Key 创建实例加载市场数据(公开接口),再设置 Key 用于私有接口。
-            ex = _create_exchange(acc.exchange, "", "", "", acc.testnet, account_type)
-            try:
-                await ex.load_markets()
-            except Exception as e:
-                await ex.close()
-                ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, account_type)
-                try:
-                    await ex.load_markets()
-                except Exception as e2:
-                    await ex.close()
-                    raise ValueError(f"加载 {exchange} 市场数据失败: {e2}") from e2
-            ex.apiKey = api_key
-            ex.secret = api_secret
-            if passphrase:
-                ex.password = passphrase
-            setattr(ex, "_dcq_cached_private", True)
-            _private_exchange_cache[acc.id] = (ex, time.monotonic() + PRIVATE_EXCHANGE_CACHE_TTL)
-            return ex, acc
     api_key = decrypt_secret(acc.api_key_enc)
     api_secret = decrypt_secret(acc.api_secret_enc)
     passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-    account_type = getattr(acc, "account_type", "") or ""
-    ex = _create_exchange(acc.exchange, "", "", "", acc.testnet, account_type)
+    ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_mode", None))
     try:
         await ex.load_markets()
     except Exception as e:
         await ex.close()
-        ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, account_type)
-        try:
-            await ex.load_markets()
-        except Exception as e2:
-            await ex.close()
-            raise ValueError(f"加载 {exchange} 市场数据失败: {e2}") from e2
-    ex.apiKey = api_key
-    ex.secret = api_secret
-    if passphrase:
-        ex.password = passphrase
+        raise ValueError(f"加载 {exchange} 市场数据失败: {e}") from e
     return ex, acc
 
 
@@ -414,11 +385,7 @@ async def validate_symbol(exchange: str, symbol: str) -> bool:
     elif exchange == "binance":
         kwargs["options"] = {"defaultType": "future", "adjustForTimeDifference": True}
     elif exchange == "bybit":
-        # Bybit: unified(UNIFIED) vs classic(CONTRACT)
-        if account_type == "unified":
-            kwargs["options"] = {"defaultType": "unified"}
-        else:
-            kwargs["options"] = {"defaultType": "swap"}
+        kwargs["options"] = {"defaultType": "swap"}
     ex = ex_cls(kwargs)
     try:
         await ex.load_markets()
@@ -580,116 +547,84 @@ async def cancel_order(ex, order_id: str, symbol: str) -> dict:
 
 
 async def fetch_positions(ex) -> list[dict]:
-    positions = await ex.fetch_positions()
-    return [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
+    try:
+        positions = await ex.fetch_positions()
+        return [p for p in positions if float(p.get("contracts", 0) or 0) > 0]
+    except Exception as e:
+        logger.warning(f"获取持仓失败: {e}")
+        return []
 
 
-async def fetch_balance(ex) -> dict:
-    balance = await ex.fetch_balance()
-    info = balance.get("info", {}) or {}
-    available = 0.0
-    for key in ("availEq", "availableEq", "availableMargin", "free", "availBal"):
-        if info.get(key):
-            try:
-                available = float(info[key])
-                break
-            except (ValueError, TypeError):
-                pass
-    usdt = balance.get("USDT", {}) or {}
-    if not available:
-        available = float(usdt.get("free", 0) or balance.get("free", {}).get("USDT", 0) or 0)
+def _extract_balance_from_ccxt(balance: dict) -> dict:
+    info = balance.get("info", {})
     for key in ("totalEq", "totalWalletBalance", "totalMarginBalance"):
         if key in info and info[key]:
             try:
-                equity = float(info[key])
-                wallet = float(info.get("totalWalletBalance", info[key]) or 0)
-                return {"equity": equity, "balance": wallet, "available_margin": available or wallet}
+                return {"equity": float(info[key]), "balance": float(info.get("totalWalletBalance", info[key]))}
             except (ValueError, TypeError):
                 continue
-    total = float(usdt.get("total", 0) or 0)
-    return {"equity": total, "balance": total, "available_margin": available or total}
+    usdt = balance.get("USDT", {})
+    total = usdt.get("total", 0) or 0
+    return {"equity": total, "balance": total}
 
 
-def build_native_stop_loss_params(exchange: str, side: str, stop_price: float) -> dict:
-    """构建交易所原生止损参数。默认不自动启用,供灰度开关调用。"""
-    if stop_price <= 0:
-        raise ValueError("止损价格必须大于 0")
-    ex_name = (exchange or "").lower()
-    if ex_name == "okx":
-        return {
-            "tdMode": "cross",
-            "posSide": side,
-            "reduceOnly": True,
-            "slTriggerPx": str(stop_price),
-            "slOrdPx": "-1",
-        }
-    if ex_name == "binance":
-        return {
-            "reduceOnly": True,
-            "stopPrice": stop_price,
-            "workingType": "MARK_PRICE",
-        }
-    if ex_name == "bybit":
-        return {
-            "reduceOnly": True,
-            "triggerPrice": stop_price,
-            "triggerDirection": 2 if side == "long" else 1,
-        }
-    raise ValueError(f"不支持原生止损单的交易所: {exchange}")
+def _extract_bybit_wallet_balance(data: dict) -> dict:
+    """解析 Bybit V5 钱包余额,兼容 UNIFIED / CONTRACT。"""
+    result = data.get("result") or {}
+    accounts = result.get("list") or []
+    if not accounts:
+        return {"equity": 0.0, "balance": 0.0, "unrealized_pnl": 0.0}
+
+    account = accounts[0] or {}
+    coins = account.get("coin") or []
+    usdt = next((c for c in coins if str(c.get("coin", "")).upper() == "USDT"), {})
+
+    def _num(*keys: str) -> float:
+        for key in keys:
+            value = usdt.get(key)
+            if value in (None, ""):
+                value = account.get(key)
+            if value not in (None, ""):
+                try:
+                    return float(value)
+                except (ValueError, TypeError):
+                    continue
+        return 0.0
+
+    equity = _num("equity", "totalEquity", "totalMarginBalance", "totalWalletBalance")
+    wallet = _num("walletBalance", "totalWalletBalance", "totalMarginBalance", "totalEquity")
+    unrealized_pnl = _num("unrealisedPnl", "totalPerpUPL")
+    return {"equity": equity or wallet, "balance": wallet or equity, "unrealized_pnl": unrealized_pnl}
 
 
-async def place_native_stop_loss_order(
-    ex,
-    exchange: str,
-    symbol: str,
-    side: str,
-    amount: float,
-    stop_price: float,
-) -> dict:
-    """提交交易所原生止损单。
+async def _fetch_bybit_balance_native(ex) -> dict:
+    """Bybit 测试网/UTA 下 ccxt 自动账户探测可能失败,优先直接读 V5 钱包余额。"""
+    last_error: Exception | None = None
+    for account_type in ("UNIFIED", "CONTRACT"):
+        try:
+            data = await ex.privateGetV5AccountWalletBalance({
+                "accountType": account_type,
+                "coin": "USDT",
+            })
+            bal = _extract_bybit_wallet_balance(data)
+            if bal.get("equity", 0) or bal.get("balance", 0):
+                return bal
+        except Exception as e:
+            last_error = e
+            logger.debug(f"Bybit {account_type} 余额查询失败: {e}")
+    if last_error:
+        raise last_error
+    return {"equity": 0.0, "balance": 0.0, "unrealized_pnl": 0.0}
 
-    当前实际启用 OKX 原生 algo conditional 止损单。其他交易所先显式拒绝,
-    避免条件单参数差异导致小仓验证时误触发。
-    """
-    ex_name = (exchange or getattr(ex, "id", "") or "").lower()
-    if ex_name != "okx":
-        raise ValueError(f"原生止损小仓验证当前仅启用 OKX,当前交易所={exchange}")
-    if stop_price <= 0:
-        raise ValueError("止损价格必须大于 0")
 
-    norm_symbol = _normalize_symbol("okx", symbol)
-    market = ex.market(norm_symbol)
-    inst_id = market.get("id") or norm_symbol.replace("/", "-").replace(":USDT", "-SWAP")
-    contract_size = float(market.get("contractSize") or 1.0)
-    sz = amount / contract_size if contract_size > 0 else amount
-    if hasattr(ex, "amount_to_precision"):
-        sz = ex.amount_to_precision(norm_symbol, sz)
-    else:
-        sz = str(sz)
-    trigger_px = ex.price_to_precision(norm_symbol, stop_price) if hasattr(ex, "price_to_precision") else str(stop_price)
-    close_side = "sell" if side == "long" else "buy"
-
-    payload = {
-        "instId": inst_id,
-        "tdMode": "cross",
-        "side": close_side,
-        "posSide": side,
-        "ordType": "conditional",
-        "sz": str(sz),
-        "slTriggerPx": str(trigger_px),
-        "slOrdPx": "-1",
-        "reduceOnly": "true",
-    }
-    try:
-        return await ex.privatePostTradeOrderAlgo(payload)
-    except Exception as e:
-        msg = str(e)
-        if "posSide" in msg or "51000" in msg:
-            fallback = dict(payload)
-            fallback["posSide"] = "net"
-            logger.warning(f"OKX 原生止损 posSide={side} 被拒,改用 net 重试: {inst_id}")
-            return await ex.privatePostTradeOrderAlgo(fallback)
-        raise
+async def fetch_balance(ex) -> dict:
+    if (getattr(ex, "id", "") or "").lower() == "bybit":
+        try:
+            return await _fetch_bybit_balance_native(ex)
+        except Exception as e:
+            logger.warning(f"Bybit 原生余额查询失败,回退 ccxt fetch_balance: {e}")
+    balance = await ex.fetch_balance()
+    return _extract_balance_from_ccxt(balance)
 
 
 async def close_position_market(ex, symbol: str, side: str, amount: float) -> dict:
@@ -721,8 +656,8 @@ async def close_position_market(ex, symbol: str, side: str, amount: float) -> di
                         break
             except Exception as e:
                 logger.debug(f"探测 OKX 持仓模式失败,按方向 posSide 平仓: {e}")
-    except Exception as e:
-        logger.debug(f"平仓数量/持仓模式探测失败 {symbol}: {e}")
+    except Exception:
+        pass
     # OKX 双向持仓模式平仓必须传 posSide=持仓方向；净持仓模式使用 posSide=net。
     return await place_order(
         ex, symbol, close_side, "market", amount,
@@ -783,26 +718,11 @@ def extract_fee_from_order(
         return filled_qty * filled_price * 0.001
 
 
-async def invalidate_exchange_cache(exchange_account_id: int | None = None) -> None:
-    # 剔除并关闭私有交易实例缓存。exchange_account_id=None 时清空全部。
-    ids = list(_private_exchange_cache.keys()) if exchange_account_id is None else [exchange_account_id]
-    for acc_id in ids:
-        cached = _private_exchange_cache.pop(acc_id, None)
-        if not cached:
-            continue
-        try:
-            await cached[0].close()
-        except Exception as e:
-            logger.debug(f"关闭交易所缓存实例失败 account_id={acc_id}: {e}")
-
-
 async def close_exchange(ex) -> None:
     try:
-        if getattr(ex, "_dcq_cached_private", False):
-            return
         await ex.close()
-    except Exception as e:
-        logger.debug(f"关闭交易所实例失败: {e}")
+    except Exception:
+        pass
 
 
 # OKX 模拟交易使用相同域名 + x-simulated-trading: 1 请求头区分
@@ -854,20 +774,12 @@ async def okx_native_balance(api_key: str, api_secret: str, passphrase: str, tes
                     account = balances[0]
                     total_eq = float(account.get("totalEq") or 0)
                     total_wb = float(account.get("totalWalletBalance") or 0)
-                    available = float(account.get("availEq") or account.get("availableEq") or 0)
-                    details = account.get("details") or []
-                    if not available and details:
-                        for item in details:
-                            ccy = (item.get("ccy") or "").upper()
-                            if ccy in ("USDT", "USDC", "USD"):
-                                available = float(item.get("availBal") or item.get("availEq") or 0)
-                                break
-                    return {"equity": total_eq or total_wb, "balance": total_wb, "available_margin": available or total_wb}
+                    return {"equity": total_eq or total_wb, "balance": total_wb}
             logger.warning(f"OKX 原生余额查询失败: {data.get('msg', 'unknown')}")
-            return {"equity": 0.0, "balance": 0.0, "available_margin": 0.0}
+            return {"equity": 0.0, "balance": 0.0}
     except Exception as e:
         logger.warning(f"OKX 原生余额查询异常: {e}")
-        return {"equity": 0.0, "balance": 0.0, "available_margin": 0.0}
+        return {"equity": 0.0, "balance": 0.0}
 
 
 async def fetch_balance_fast(
@@ -901,7 +813,7 @@ async def fetch_balance_fast(
             )
         acc = (await db.execute(stmt)).scalars().first()
         if not acc:
-            return {"equity": 0.0, "balance": 0.0, "available_margin": 0.0}
+            return {"equity": 0.0, "balance": 0.0}
         api_key = decrypt_secret(acc.api_key_enc)
         api_secret = decrypt_secret(acc.api_secret_enc)
         passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
