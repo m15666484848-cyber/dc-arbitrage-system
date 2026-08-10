@@ -627,7 +627,7 @@ async def _process_update_signal(
 
     strategy, _ = await _get_cached_strategy_for_follow(db, customer_id, signal.kol_id)
 
-    decision = strategy_engine.compute_decision(strategy)
+    decision = strategy_engine.compute_decision(strategy, kol_id=signal.kol_id, symbol=parsed.symbol)
 
     defaults = strategy_engine.get_strategy_defaults(decision.params or {})
 
@@ -1476,7 +1476,7 @@ async def process_signal(
 
     strategy, notional_override = await _get_cached_strategy_for_follow(db, customer_id, signal.kol_id)
 
-    decision = strategy_engine.compute_decision(strategy)
+    decision = strategy_engine.compute_decision(strategy, kol_id=signal.kol_id, symbol=parsed.symbol)
 
     # 客户自定义跟单金额覆盖策略中的 base_qty
 
@@ -1572,7 +1572,7 @@ async def process_signal(
         if api_strategy:
             strategy = api_strategy
             notional_override = None
-            decision = strategy_engine.compute_decision(strategy)
+            decision = strategy_engine.compute_decision(strategy, kol_id=signal.kol_id, symbol=parsed.symbol)
             defaults = strategy_engine.get_strategy_defaults(decision.params or {})
             if max_sl_pct:
                 defaults["default_sl_pct"] = -max_sl_pct
@@ -3921,7 +3921,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
                         notional = (position.entry_price or 0) * (position.initial_qty or 0)
 
-                        await strategy_engine.record_trade_result(db, strat.id, won=position.realized_pnl > 0, notional_usdt=notional, break_even=abs(position.realized_pnl) < 0.01)
+                        await strategy_engine.record_trade_result(db, strat.id, won=position.realized_pnl > 0, notional_usdt=notional, break_even=abs(position.realized_pnl) < 0.01, kol_id=position.kol_id, symbol=position.symbol)
 
                         _invalidate_strategy_cache(position.customer_id, position.kol_id)
 
@@ -4040,7 +4040,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
                                 child_notional = (child.entry_price or 0) * (child.initial_qty or 0)
 
-                                await strategy_engine.record_trade_result(db, strat.id, won=child.realized_pnl > 0, notional_usdt=child_notional, break_even=abs(child.realized_pnl) < 0.01)
+                                await strategy_engine.record_trade_result(db, strat.id, won=child.realized_pnl > 0, notional_usdt=child_notional, break_even=abs(child.realized_pnl) < 0.01, kol_id=child.kol_id, symbol=child.symbol)
 
                                 _invalidate_strategy_cache(child.customer_id, child.kol_id)
 
@@ -4569,7 +4569,7 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
 
                                 sib_notional = (sib.entry_price or 0) * (sib.initial_qty or 0)
 
-                                await strategy_engine.record_trade_result(db, strat.id, won=sib.realized_pnl > 0, notional_usdt=sib_notional, break_even=abs(sib.realized_pnl) < 0.01)
+                                await strategy_engine.record_trade_result(db, strat.id, won=sib.realized_pnl > 0, notional_usdt=sib_notional, break_even=abs(sib.realized_pnl) < 0.01, kol_id=sib.kol_id, symbol=sib.symbol)
 
                                 _invalidate_strategy_cache(sib.customer_id, sib.kol_id)
 

@@ -41,4 +41,7 @@ class Strategy(Base, TimestampMixin):
     martingale_round: Mapped[int] = mapped_column(Integer, default=0)
     last_result: Mapped[str] = mapped_column(String(16), default="")  # win|loss|""
     last_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    # 按 KOL + 币种隔离的马丁状态。
+    # key 示例: "5:BTC/USDT" -> {"round": 1, "last_result": "loss", "last_qty": 100.0}
+    martingale_state: Mapped[dict] = mapped_column(JSONB, default=dict)
     enabled: Mapped[bool] = mapped_column(default=True)

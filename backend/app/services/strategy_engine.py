@@ -8,7 +8,7 @@
 
 - anti_martingale(反马丁格尔):上一单盈利 → 下单 ×倍数;亏损重置
 
-每策略独立追踪 martingale_round / last_result / last_qty。
+普通/反马丁仍使用策略级状态；马丁策略按 KOL + BTC/ETH 独立追踪状态。
 
 """
 
@@ -23,6 +23,7 @@ from typing import Any
 
 
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -120,7 +121,47 @@ async def get_strategy_for_follow(
 
 
 
-def compute_decision(strategy: Strategy | None) -> StrategyDecision:
+_MARTINGALE_SUPPORTED_SYMBOLS = {"BTC/USDT", "ETH/USDT"}
+
+
+def _normalize_martingale_symbol(symbol: str | None) -> str:
+    """把 BTCUSDT / BTC/USDT 等格式统一为 BTC/USDT。"""
+    raw = (symbol or "").upper().replace("-", "/").replace("_", "/").strip()
+    if raw in ("BTCUSDT", "BTC/USDT", "BTC"):
+        return "BTC/USDT"
+    if raw in ("ETHUSDT", "ETH/USDT", "ETH"):
+        return "ETH/USDT"
+    return raw
+
+
+def _martingale_state_key(kol_id: int | None, symbol: str | None) -> str | None:
+    """马丁状态作用域:同一策略下按 KOL + BTC/ETH 隔离。"""
+    norm_symbol = _normalize_martingale_symbol(symbol)
+    if not kol_id or norm_symbol not in _MARTINGALE_SUPPORTED_SYMBOLS:
+        return None
+    return f"{kol_id}:{norm_symbol}"
+
+
+def _get_scoped_martingale_state(strategy: Strategy, kol_id: int | None, symbol: str | None) -> dict[str, Any] | None:
+    key = _martingale_state_key(kol_id, symbol)
+    if not key:
+        return None
+    state_map = strategy.martingale_state or {}
+    state = state_map.get(key) or {}
+    return {
+        "key": key,
+        "symbol": _normalize_martingale_symbol(symbol),
+        "round": int(state.get("round", 0) or 0),
+        "last_result": str(state.get("last_result", "") or ""),
+        "last_qty": float(state.get("last_qty", 0.0) or 0.0),
+    }
+
+
+def compute_decision(
+    strategy: Strategy | None,
+    kol_id: int | None = None,
+    symbol: str | None = None,
+) -> StrategyDecision:
 
     """根据策略当前状态计算本次下单决策。"""
 
@@ -164,13 +205,24 @@ def compute_decision(strategy: Strategy | None) -> StrategyDecision:
 
     elif strategy.type == STRATEGY_MARTINGALE:
 
-        if strategy.martingale_round >= max_rounds:
+        scoped_state = _get_scoped_martingale_state(strategy, kol_id, symbol)
 
-            return StrategyDecision(allow=False, notional_usdt=0.0, reason=f"马丁格尔连亏 {max_rounds} 轮熔断", params=p)
+        # 马丁暂时只支持 KOL 维度下的 BTC/ETH。其它币不参与马丁,按基础下单量执行。
+        if scoped_state is None:
+            qty = base_qty
 
-        if strategy.last_result == "loss" and strategy.last_qty > 0:
+        elif scoped_state["round"] >= max_rounds:
 
-            qty = strategy.last_qty * multiplier
+            return StrategyDecision(
+                allow=False,
+                notional_usdt=0.0,
+                reason=f"马丁格尔 {scoped_state['symbol']} 连亏 {max_rounds} 轮熔断",
+                params=p,
+            )
+
+        elif scoped_state["last_result"] == "loss" and scoped_state["last_qty"] > 0:
+
+            qty = scoped_state["last_qty"] * multiplier
 
         else:
 
@@ -207,7 +259,9 @@ def compute_decision(strategy: Strategy | None) -> StrategyDecision:
 async def record_trade_result(
 
     db: AsyncSession, strategy_id: int, won: bool, notional_usdt: float,
-    break_even: bool = False
+    break_even: bool = False,
+    kol_id: int | None = None,
+    symbol: str | None = None,
 ) -> None:
 
     """成交平仓后更新策略状态。
@@ -234,23 +288,42 @@ async def record_trade_result(
 
         return
 
-    strategy.last_result = "win" if won else "loss"
-
-    strategy.last_qty = float(notional_usdt or 0.0)
-
     if strategy.type == STRATEGY_MARTINGALE:
 
+        scoped_state = _get_scoped_martingale_state(strategy, kol_id, symbol)
+
+        # 马丁仅记录同一 KOL 的 BTC/ETH。其它币不更新马丁状态,避免串到后续 BTC/ETH。
+        if scoped_state is None:
+            return
+
         if break_even:
-            pass  # P2-5 fix: break-even does not count
-        elif won:
+            return  # 保本不计入马丁轮次,也不改变上一单结果。
 
-            strategy.martingale_round = 0
+        state_map = dict(strategy.martingale_state or {})
+        key = scoped_state["key"]
 
+        if won:
+            state_map[key] = {
+                "round": 0,
+                "last_result": "win",
+                "last_qty": 0.0,
+            }
         else:
 
-            strategy.martingale_round += 1
+            state_map[key] = {
+                "round": scoped_state["round"] + 1,
+                "last_result": "loss",
+                "last_qty": float(notional_usdt or 0.0),
+            }
+
+        strategy.martingale_state = state_map
+        flag_modified(strategy, "martingale_state")
 
     elif strategy.type == STRATEGY_ANTI_MARTINGALE:
+
+        strategy.last_result = "win" if won else "loss"
+
+        strategy.last_qty = float(notional_usdt or 0.0)
 
         if break_even:
             pass  # P2-5 fix: break-even does not count
@@ -346,4 +419,3 @@ def get_strategy_defaults(params: dict[str, Any]) -> dict:
         "batch_entry_window": params.get("batch_entry_window", 300),
 
     }
-
