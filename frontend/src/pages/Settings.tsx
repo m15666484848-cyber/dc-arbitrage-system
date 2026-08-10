@@ -460,7 +460,7 @@ function ExchangeTab() {
     api_secret: "",
     passphrase: "",
     testnet: false,
-    account_type: "" as string,
+    account_mode: "live",
     follow_enabled: false,
     follow_weight: 1,
     max_order_usdt: 0,
@@ -471,7 +471,7 @@ function ExchangeTab() {
   const positions: any[] = Array.isArray(positionsData) ? positionsData : [];
   const pendingOrders: any[] = Array.isArray(pendingData) ? pendingData : (pendingData?.items || []);
   const riskOverview: any[] = Array.isArray(riskOverviewData) ? riskOverviewData : [];
-  const platformWhitelistIp = window.location.hostname;
+  const platformWhitelistIp = "43.128.149.246";
   const formatMoney = (v: any) => {
     const n = Number(v || 0);
     return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -493,16 +493,32 @@ function ExchangeTab() {
   const exchangeOptions = [
     { value: "okx", label: "OKX", desc: "推荐，合约跟单常用" },
     { value: "binance", label: "Binance", desc: "币安合约账号" },
-    { value: "bybit", label: "Bybit", desc: "Bybit 合约(统一/普通均支持)" },
+    { value: "bybit", label: "Bybit", desc: "Bybit 合约账号" },
   ];
+  const getAccountMode = (a: any) => a.account_mode || (a.testnet ? "testnet" : "live");
+  const getModeLabel = (mode: string) => {
+    if (mode === "demo") return "Demo Trading";
+    if (mode === "testnet") return "测试网";
+    return "实盘";
+  };
+  const getModeBadgeTone = (mode: string) => {
+    if (mode === "live") return "profit" as const;
+    if (mode === "demo") return "accent" as const;
+    return "warn" as const;
+  };
+  const setAccountMode = (mode: string) => {
+    setF({ ...f, account_mode: mode, testnet: mode !== "live" });
+  };
   const exchangeOverview = Object.values(
     list.reduce((acc: Record<string, any>, item: any) => {
-      const key = `${item.exchange}-${item.testnet ? "testnet" : "live"}`;
+      const mode = getAccountMode(item);
+      const key = `${item.exchange}-${mode}`;
       if (!acc[key]) {
         acc[key] = {
           key,
           exchange: item.exchange,
           testnet: item.testnet,
+          account_mode: mode,
           count: 0,
           defaultAccount: null,
           hasError: false,
@@ -521,8 +537,8 @@ function ExchangeTab() {
   for (const group of exchangeOverview as any[]) {
     group.positionCount = positions.filter((p: any) => p.exchange === group.exchange && p.status === "open" && p.parent_id === null).length;
     group.pendingCount = pendingOrders.filter((o: any) => o.exchange === group.exchange).length;
-    group.balance = balanceSummary?.groups?.find((b: any) => b.exchange === group.exchange && b.testnet === group.testnet) || null;
-    group.risk = riskOverview.find((r: any) => r.exchange === group.exchange && r.testnet === group.testnet) || null;
+    group.balance = balanceSummary?.groups?.find((b: any) => b.exchange === group.exchange && getAccountMode(b) === group.account_mode) || null;
+    group.risk = riskOverview.find((r: any) => r.exchange === group.exchange && getAccountMode(r) === group.account_mode) || null;
   }
 
   const copyWhitelistIp = async () => {
@@ -543,10 +559,10 @@ function ExchangeTab() {
     }
     setSaving(true);
     try {
-      await API.addExchangeAccount(f);
+      await API.addExchangeAccount({ ...f, testnet: f.account_mode !== "live" });
       push("success", "交易所账号已添加(密钥已加密存储)");
       setModal(false);
-      setF({ exchange: "okx", label: "", api_key: "", api_secret: "", passphrase: "", testnet: false, account_type: "", follow_enabled: false, follow_weight: 1, max_order_usdt: 0, strategy_id: null });
+      setF({ exchange: "okx", label: "", api_key: "", api_secret: "", passphrase: "", testnet: false, account_mode: "live", follow_enabled: false, follow_weight: 1, max_order_usdt: 0, strategy_id: null });
       reload();
     } catch (e: any) {
       push("error", e?.response?.data?.message || "添加失败");
@@ -587,7 +603,7 @@ function ExchangeTab() {
 
   const remove = async (id: number) => {
     const target = list.find((a) => a.id === id);
-    const title = `${target?.exchange?.toUpperCase() || "交易所"} ${target?.testnet ? "测试网" : "实盘"} API`;
+    const title = `${target?.exchange?.toUpperCase() || "交易所"} ${getModeLabel(getAccountMode(target || {}))} API`;
     const warning = [
       `确认删除 ${title} 吗？`,
       "",
@@ -733,7 +749,7 @@ function ExchangeTab() {
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <div className="font-semibold text-slate-100">{g.exchange.toUpperCase()}</div>
-                    <div className="mt-1 text-xs text-slate-500">{g.testnet ? "模拟盘 / 测试网" : "实盘"}</div>
+                    <div className="mt-1 text-xs text-slate-500">{getModeLabel(g.account_mode)}</div>
                   </div>
                   <Badge tone={g.hasError ? "loss" : "accent"}>{g.hasError ? "有异常" : "已配置"}</Badge>
                 </div>
@@ -791,7 +807,7 @@ function ExchangeTab() {
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-semibold text-slate-100">{a.exchange.toUpperCase()}</span>
-                      {a.testnet ? <Badge tone="warn">测试网</Badge> : <Badge tone="profit">实盘</Badge>}
+                      <Badge tone={getModeBadgeTone(getAccountMode(a))}>{getModeLabel(getAccountMode(a))}</Badge>
                       {a.is_default && <Badge tone="gold"><Check size={11} /> 默认下单</Badge>}
                       {!a.is_default && <Badge tone="default">备用 API</Badge>}
                       <Badge tone={getAccountStatus(a).tone}>
@@ -938,7 +954,7 @@ function ExchangeTab() {
                 <button
                   key={opt.value}
                   type="button"
-                  onClick={() => setF({ ...f, exchange: opt.value })}
+                  onClick={() => setF({ ...f, exchange: opt.value, account_mode: f.account_mode === "demo" && opt.value !== "bybit" ? "live" : f.account_mode, testnet: f.account_mode !== "live" && !(f.account_mode === "demo" && opt.value !== "bybit") })}
                   className={`text-left rounded-xl border p-3 transition min-h-[82px] ${f.exchange === opt.value ? "border-gold/60 bg-gold/10 text-gold" : "border-white/10 bg-white/[0.03] text-slate-300 hover:border-border-soft"}`}
                 >
                   <div className="font-semibold">{opt.label}</div>
@@ -962,28 +978,25 @@ function ExchangeTab() {
               <Input type="password" autoComplete="new-password" value={f.api_secret} onChange={(e) => setF({ ...f, api_secret: e.target.value })} />
             </Field>
           </div>
-          {(f.exchange === "okx" || f.exchange === "bybit") && (
-            <Field label={f.exchange === "okx" ? "Passphrase(OKX 必填)" : "Passphrase(Bybit 选填,创建 API 时未设则留空)"}>
+          {f.exchange === "okx" && (
+            <Field label="Passphrase(OKX 专用)">
               <Input type="password" autoComplete="new-password" value={f.passphrase} onChange={(e) => setF({ ...f, passphrase: e.target.value })} />
             </Field>
           )}
-          {f.exchange === "bybit" && (
-            <Field label="账户类型">
-              <select
-                className="w-full rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-slate-200 outline-none focus:border-gold/40"
-                value={f.account_type}
-                onChange={(e) => setF({ ...f, account_type: e.target.value })}
-              >
-                <option value="">自动检测(推荐)</option>
-                <option value="unified">统一账户(UNIFIED)</option>
-                <option value="classic">普通合约(CONTRACT)</option>
-              </select>
-            </Field>
-          )}
-          <label className="flex items-center gap-3 text-sm text-slate-300 rounded-xl border border-white/10 bg-white/[0.03] p-3 cursor-pointer">
-            <input type="checkbox" className="accent-accent w-4 h-4" checked={f.testnet} onChange={(e) => setF({ ...f, testnet: e.target.checked })} />
-            <span>测试网(OKX / Bybit 测试网均可先在此验证连接)</span>
-          </label>
+          <Field label="交易环境">
+            <Select value={f.account_mode} onChange={(e) => setAccountMode(e.target.value)}>
+              <option value="live">实盘</option>
+              <option value="testnet">测试网</option>
+              {(f.exchange === "bybit" || f.exchange === "binance") && <option value="demo">Demo Trading</option>}
+            </Select>
+          </Field>
+          <div className="text-xs text-slate-500 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+            {f.exchange === "bybit"
+              ? "Bybit 测试网使用 testnet.bybit.com 的 API；Demo Trading 使用主网内模拟交易 API，二者不能混用。"
+              : f.exchange === "binance"
+                ? "Binance 测试网使用 testnet.binancefuture.com 的 U 本位合约 API；Demo Trading 使用 demo.binance.com 创建的 API，二者不能混用。"
+              : "测试网需要使用对应交易所测试环境创建的 API，不能填写实盘 API。"}
+          </div>
           <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
             <div className="mb-3 flex items-center justify-between gap-3">
               <div>
