@@ -626,7 +626,7 @@ async def _process_update_signal(
 
     strategy, _ = await _get_cached_strategy_for_follow(db, customer_id, signal.kol_id)
 
-    decision = strategy_engine.compute_decision(strategy)
+    decision = strategy_engine.compute_decision(strategy, kol_id=signal.kol_id, symbol=parsed.symbol)
 
     defaults = strategy_engine.get_strategy_defaults(decision.params or {})
 

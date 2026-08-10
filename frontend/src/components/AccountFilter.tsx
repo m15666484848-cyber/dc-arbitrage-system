@@ -6,8 +6,21 @@ import { useAccountFilterStore } from "@/stores/accountFilter";
 export function accountName(acc: any) {
   if (!acc) return "";
   const label = (acc.label || "").trim();
-  const mode = acc.account_mode || (acc.testnet ? "testnet" : "live");
-  return `${label || `${String(acc.exchange || "").toUpperCase()} ${mode}`} #${acc.id}`;
+  const exchangeKey = String(acc.exchange || "").toLowerCase();
+  const exchangeName =
+    {
+      binance: "币安",
+      okx: "OKX",
+      bybit: "Bybit",
+    }[exchangeKey] || String(acc.exchange || "未知交易所").toUpperCase();
+  const mode = String(acc.account_mode || (acc.testnet ? "testnet" : "live")).toLowerCase();
+  const modeName =
+    {
+      live: "实盘",
+      testnet: "测试网",
+      demo: "模拟盘",
+    }[mode] || mode;
+  return `${exchangeName} · ${modeName}${label ? ` · ${label}` : ""} #${acc.id}`;
 }
 
 export default function AccountFilter({ className = "" }: { className?: string }) {

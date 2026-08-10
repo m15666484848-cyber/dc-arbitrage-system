@@ -1,5 +1,5 @@
 #!/bin/bash
-LOG="/var/log/dcquant_monitor.log"
+LOG="/opt/dcquant/logs/dcquant_monitor.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 ALERT_WEBHOOK="https://open.feishu.cn/open-apis/bot/v2/hook/eb8cfb4f-fd41-4d15-86c5-e29970500a9e"
 
