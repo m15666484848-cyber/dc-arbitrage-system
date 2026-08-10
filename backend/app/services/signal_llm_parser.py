@@ -55,8 +55,8 @@ def _strip_urls(text: str) -> str:
 # 模型降级机制
 # ---------------------------------------------------------------------------
 
-# 备用模型名称(与 KOL 跟单系统配置一致,硬编码)
-_FALLBACK_MODEL = "deepseek-chat"
+# 备用模型名称：借鉴朋友服务器配置，主模型不稳/超时时切到更强的 V4-Pro。
+_FALLBACK_MODEL = "deepseek-v4-pro"
 
 # 主模型超时时间(秒,与 KOL 跟单系统一致)
 _PRIMARY_TIMEOUT = 15
@@ -440,6 +440,30 @@ async def parse_with_llm(
         # 如果没有品种信息，尝试从文本提取
         if not parsed.symbol:
             parsed.symbol = _extract_symbol_fallback(text)
+
+        # 借鉴朋友服务器的解析保护: 用止盈/入场/止损的价格关系自动纠正多空方向。
+        # 正常多单通常是 TP > Entry > SL；正常空单通常是 TP < Entry < SL。
+        # 只在三者都明确且关系非常清晰时纠正，避免覆盖无止损/无止盈的信号。
+        if (
+            not parsed.is_exit_signal
+            and parsed.side in ("long", "short")
+            and parsed.entry_price is not None
+            and parsed.stop_loss is not None
+            and parsed.take_profits
+        ):
+            tp_price = parsed.take_profits[0]
+            ep = parsed.entry_price
+            sl = parsed.stop_loss
+            if tp_price > ep > sl and parsed.side == "short":
+                logger.warning(
+                    f"LLM 方向纠正: short→long (TP={tp_price}>EP={ep}>SL={sl})"
+                )
+                parsed.side = "long"
+            elif tp_price < ep < sl and parsed.side == "long":
+                logger.warning(
+                    f"LLM 方向纠正: long→short (TP={tp_price}<EP={ep}<SL={sl})"
+                )
+                parsed.side = "short"
 
         logger.info(
             f"文本 LLM 解析成功: symbol={parsed.symbol}, side={parsed.side}, "

@@ -378,11 +378,15 @@ DOGE/狗狗 → DOGE/USDT
 ## 解析规则
 
 ### 开仓识别
-1. 开仓关键词：接/开/进/多/空/做多/做空/挂单/委托/埋伏/抄底/摸顶/上车/搞/干/操作/布局/进场/入场/建仓
+1. 开仓关键词：接/开/进/多/空/做多/做空/挂单/委托/埋伏/抄底/摸顶/上车/上车了/搞/搞一波/干/操作/布局/进场/入场/建仓/挂/埋伏单/抄底单
 2. 平仓关键词：跑了/平了/出了/不格局了/落袋/落袋为安/跑路/撤退/撤/止盈了/止损了/平仓/全平/清仓/走人/下车/出局/兑现/获利了结
 3. "拿着/持有/继续拿着/不用管/继续格局/保持仓位" = 继续持有，不是新开仓 → is_valid_signal=false
 4. "关注/观察/留意/看看/等待/等一等/不急/再看看" = 观望，不是即时交易 → is_valid_signal=false
 5. "想试试/咱就开" = 明确开仓意图 → is_valid_signal=true
+6. "挂一个反弹 X附近/在挂一个反弹 X附近/挂反弹 X附近" = 明确新挂单，通常表示做多反弹 → is_valid_signal=true, side=long, entry_price=X
+7. "挂一个回踩 X附近/在挂一个回踩 X附近/挂回踩 X附近" = 明确新挂单，通常表示做空回踩 → is_valid_signal=true, side=short, entry_price=X
+8. "委托 X 附近 空" = 在 X 挂空单 → is_valid_signal=true, side=short, entry_price=X
+9. "埋伏 X 多/抄底单 X/低吸 X" = 在 X 挂多单 → is_valid_signal=true, side=long, entry_price=X
 
 ### 入场价格
 - 有明确入场价（如"64000接一手"）→ entry_price=64000
@@ -399,11 +403,20 @@ DOGE/狗狗 → DOGE/USDT
 - “跌破/插针到/杀到/踩到/回踩到 X 后反弹 Y 空” → condition_price=X, entry_price=Y, side=short
 - “涨破/冲到/打到/站上 X 后回踩 Y 多” → condition_price=X, entry_price=Y, side=long
 - 如果只有“挂 X”“X 接”“X 空/多”，没有先决条件，则 condition_price=null, entry_price=X
+- 如果只有“挂一个反弹 X附近”，没有先决条件，则 condition_price=null, entry_price=X, side=long
+- 如果只有“挂一个回踩 X附近”，没有先决条件，则 condition_price=null, entry_price=X, side=short
 
 ### 分批建仓与仓位
 - 多个入场价如“64000/63500/63000 分批接” → entry_prices=[64000,63500,63000], entry_price取第一个入场价
+- 范围价如“63850-63250附近 做多” → entry_prices=[63850,63250], entry_price=63850；做多从高价到低价分批接
+- 范围价如“64500-65000附近 做空” → entry_prices=[64500,65000], entry_price=64500；做空从低价到高价分批空
 - “半仓/五成仓” → position_pct=50；“三成/轻仓” → position_pct=30；“重仓/七成” → position_pct=70
-- “减半/出一半/先出30%”属于部分平仓信号，is_exit_signal=true，并在 position_pct 中返回平仓比例
+- “减半/出一半/先出30%/止盈一半/减仓50%”属于部分平仓信号，is_exit_signal=true，并在 position_pct 中返回平仓比例
+
+### 修正信号
+- “改一下/更正/不是 X 是 Y/价格改成 Y/修正” = 修正上一条交易参数，is_valid_signal=true
+- “刚才价格不是64000是63500” → symbol/side 尽量结合文本或历史上下文，entry_price=63500，reasoning 标明是修正入场价
+- “止损改到63000/目标改到68000” → 作为更新止盈止损信号，不要当成新开仓
 
 ### TP1 后保本移动
 - “TP1后保本/到一止盈后保本/先止盈一半剩下保本/止盈后止损推到成本” → breakeven_after_tp=entry_price
@@ -434,6 +447,9 @@ c) 上下文暗示平仓：短消息(<50字)包含"走/出/撤/跑/抛/收/关"�
 - 纯链接/URL、纯表情/emoji
 - "反复震荡都不知道该不该做了" = 犹豫不决，非明确交易指令 → is_valid_signal=false
 - 举例式描述：含"比如"/"例如" + 无明确即时入场指令
+- "关注反弹/反弹以后考虑继续开空" = 观望，不是即时信号 → is_valid_signal=false
+- "ZEC空单，很多会员反馈进场了，那就拿着，出局我通知" = 继续持有旧仓，不是新开仓 → is_valid_signal=false
+- 市场评论/感慨如“惨呐/假突破/带崩大盘/警惕骗子” = 非交易内容 → is_valid_signal=false
 
 ### 黑话/俚语
 - "接一手/开一单/搞一波/想试试/咱就开" = 开仓
@@ -454,6 +470,15 @@ c) 上下文暗示平仓：短消息(<50字)包含"走/出/撤/跑/抛/收/关"�
 - "反弹以后考虑继续开空" = 观望建议，不是即时信号 → is_valid_signal=false
 - 对KOL消息要有判断力：分析市场观点≠交易指令
 - 所有价格以 USDT 计价
+
+## 参考样例
+- "比特币现价63600做多 止损62000 目标67000" → 有效多单，entry_price=null，stop_loss=62000，take_profits=[67000]
+- "BTC 64000接一半 63000再接一半 止损62000 目标68000" → 有效多单，entry_prices=[64000,63000]，position_pct=50
+- "BTC 63850-63250附近做多 止损62200 目标64900/66600" → 有效多单，entry_prices=[63850,63250]，take_profits=[64900,66600]
+- "比特币 委托 64500 附近 空" → 有效空单，entry_price=64500，side=short
+- "大饼跑了 不格局了" → 有效平仓信号，is_exit_signal=true
+- "止盈一半，剩下保本" → 有效部分平仓/止损更新信号，position_pct=50
+- "BTC和ETH都不错 大饼64000多 以太3200多" → 如果只能返回单信号，优先返回文本中第一个明确交易信号；不要混成一个币种
 
 返回严格的 JSON 格式，不要添加其他文字。"""
 
