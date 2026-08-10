@@ -3964,6 +3964,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                         position_id=child.id,
 
                         order_id=order.id,
+                        exchange_account_id=child.exchange_account_id,
 
                         exchange=child.exchange,
 
