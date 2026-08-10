@@ -1621,8 +1621,9 @@ async def parse_message(
                 image_urls=[image_url] if image_url else None,
                 image_base64_list=[image_base64] if image_base64 else None,
                 kol_vision_enabled=True,  # 已确认 KOL 启用
+                min_confidence=llm_min_confidence,
             )
-            if llm_parsed and llm_parsed.confidence >= 0.5:
+            if llm_parsed and llm_parsed.confidence >= llm_min_confidence:
                 logger.info(
                     f"[{kol_name}] 图片 LLM 解析成功: confidence={llm_parsed.confidence}, "
                     f"tokens={usage.get('total_tokens', 0)}"
@@ -1650,8 +1651,9 @@ async def parse_message(
                 image_urls=[image_url],
                 image_base64_list=[image_base64] if image_base64 else None,
                 kol_vision_enabled=True,
+                min_confidence=llm_min_confidence,
             )
-            if llm_parsed and llm_parsed.confidence >= 0.5:
+            if llm_parsed and llm_parsed.confidence >= llm_min_confidence:
                 logger.info(
                     f"[{kol_name}] 图片 LLM (OCR fallback) 解析成功: confidence={llm_parsed.confidence}, "
                     f"tokens={usage.get('total_tokens', 0)}"
@@ -1679,7 +1681,11 @@ async def parse_message(
     if use_llm and combined_for_parse:
         logger.info(f"[{kol_name}] 使用文本 LLM (DEEPSEEK V3) 解析信号")
         try:
-            llm_parsed, usage = await parse_with_llm(combined_for_parse, context=context)
+            llm_parsed, usage = await parse_with_llm(
+                combined_for_parse,
+                context=context,
+                min_confidence=llm_min_confidence,
+            )
             if llm_parsed is not None:
                 logger.info(
                     f"[{kol_name}] LLM 解析成功: symbol={llm_parsed.symbol}, "

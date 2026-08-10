@@ -9,7 +9,7 @@
   - 纯 URL 预过滤:纯 URL 消息直接跳过 LLM,节省 token 开销
   - 模型降级:主模型超时/异常时自动切换 deepseek-v4-pro,当天降级,次日重置
   - 历史上下文注入:支持传入 KOL 历史信号上下文,提升解析准确率
-  - 重试机制:LLM 调用失败时自动重试 3 次,指数退避(1s, 2s, 4s)
+  - 重试机制:LLM 调用失败时最多尝试 3 次,指数退避(2s, 4s)
   - 超时保护:备用模型调用添加 15 秒超时保护
 """
 from __future__ import annotations
@@ -64,11 +64,16 @@ _PRIMARY_TIMEOUT = 15
 # ★ P1 修复: 备用模型超时时间(秒)
 _FALLBACK_TIMEOUT = 15
 
-# ★ P1 修复: LLM 调用重试次数
+# ★ P1 修复: LLM 调用重试次数(2 次重试 = 最多 3 次尝试)
 _MAX_RETRIES = 2
 
-# ★ P1 修复: 指数退避延迟(秒): 1, 2, 4
+# ★ P1 修复: 指数退避延迟(秒): 2, 4
 _RETRY_DELAYS = [2, 4]
+
+# 低置信度重试：模型正常返回但 confidence 低于执行阈值时，重新解析几次。
+# 这类重试不同于网络/超时重试，目的是给模型第二次理解机会，减少误拦截。
+_LOW_CONFIDENCE_RETRY_COUNT = 2
+_DEFAULT_MIN_CONFIDENCE = 0.5
 
 # 全局降级状态:当天主模型失败后标记降级,后续直接走备用模型
 _model_degraded = False
@@ -142,20 +147,24 @@ async def _get_glm_fallback_client() -> LLMClient | None:
 async def _call_llm_with_retry(
     client: LLMClient,
     text: str,
+    image_urls: list[str] | None = None,
+    image_base64_list: list[str] | None = None,
     timeout: int | None = None,
     max_retries: int = _MAX_RETRIES,
     retry_delays: list[int] | None = None,
 ) -> dict[str, Any]:
     """带重试机制的 LLM 调用。
 
-    ★ P1 修复: 添加 3 次重试,指数退避(1s, 2s, 4s)。
+    ★ P1 修复: 添加失败重试,指数退避(2s, 4s)。
 
     Args:
         client: LLM 客户端实例
         text: 已处理的文本
+        image_urls: 图片 URL 列表(仅图片 LLM 使用)
+        image_base64_list: 图片 base64 列表(仅图片 LLM 使用)
         timeout: 调用超时时间(秒),None 表示不设超时
         max_retries: 最大重试次数
-        retry_delays: 重试间隔列表(秒),如 [1, 2, 4]
+        retry_delays: 重试间隔列表(秒),如 [2, 4]
 
     Returns:
         LLM 分析结果字典
@@ -174,11 +183,19 @@ async def _call_llm_with_retry(
             if timeout is not None:
                 # ★ P1 修复: 使用 asyncio.wait_for 添加超时保护
                 result = await asyncio.wait_for(
-                    client.analyze_signal(text),
+                    client.analyze_signal(
+                        text,
+                        image_urls=image_urls,
+                        image_base64_list=image_base64_list,
+                    ),
                     timeout=timeout,
                 )
             else:
-                result = await client.analyze_signal(text)
+                result = await client.analyze_signal(
+                    text,
+                    image_urls=image_urls,
+                    image_base64_list=image_base64_list,
+                )
             return result
         except asyncio.TimeoutError:
             last_exception = asyncio.TimeoutError()
@@ -227,7 +244,7 @@ async def _call_with_degradation(
             )
             _mark_degraded()
 
-    # Tier 2: same-provider fallback (deepseek-chat, non-thinking)
+    # Tier 2: same-provider fallback (deepseek-v4-pro, non-thinking)
     try:
         fallback = _get_fallback_client(primary_client)
         logger.info(f"using fallback model: {_FALLBACK_MODEL}")
@@ -340,6 +357,7 @@ async def parse_with_llm(
     image_base64_list: list[str] | None = None,
     llm_client: LLMClient | None = None,
     context: str = "",
+    min_confidence: float = _DEFAULT_MIN_CONFIDENCE,
 ) -> tuple[ParsedSignal | None, dict[str, Any]]:
     """
     使用文本 LLM 解析交易信号(DeepSeek V3)。
@@ -352,8 +370,9 @@ async def parse_with_llm(
       - 发送前剥离 URL,避免内容审核 400 错误
       - 模型降级:主模型超时/异常时自动切换 deepseek-v4-pro
       - 历史上下文注入:传入 KOL 历史信号,提升解析准确率
-      - 重试机制:LLM 调用失败时自动重试 3 次,指数退避(1s, 2s, 4s)
-      - 超时保护:主模型 10s 超时,备用模型 15s 超时
+      - 重试机制:LLM 调用失败时最多尝试 3 次,指数退避(2s, 4s)
+      - 超时保护:主模型 15s 超时,备用模型 15s 超时
+      - 低置信度重试:有效信号 confidence 低于 KOL 阈值时额外重试
 
     Args:
         text: 信号文本
@@ -365,6 +384,7 @@ async def parse_with_llm(
             ① open_long BTC/USDT 进场64000 止损62000
             ② close_all BTC/USDT
             ③ open_short ETH/USDT 进场3200
+        min_confidence: 当前 KOL 的最低执行置信度阈值
 
     Returns:
         (ParsedSignal 对象, usage 信息)，如果解析失败返回 (None, {})
@@ -394,12 +414,32 @@ async def parse_with_llm(
         return None, {}
 
     try:
+        threshold = max(0.0, min(_as_float(min_confidence, _DEFAULT_MIN_CONFIDENCE), 1.0))
+        result: dict[str, Any] = {}
+        usage: dict[str, Any] = {}
+
         # 6. 带降级机制的 LLM 调用(含重试和超时保护)
-        #    - 未降级:主模型(10s 超时 + 3次重试) -> 失败则备用模型(15s 超时 + 3次重试)
+        #    - 未降级:主模型(15s 超时 + 2次失败重试) -> 失败则备用模型(15s 超时 + 2次失败重试)
         #    - 已降级:直接备用模型 deepseek-v4-pro
-        response = await _call_with_degradation(primary_client, final_text)
-        result = response.get("result", {})
-        usage = response.get("usage", {})
+        #    - 有效信号但置信度低于阈值:额外重试 2 次,取最后一次返回
+        for low_conf_attempt in range(_LOW_CONFIDENCE_RETRY_COUNT + 1):
+            response = await _call_with_degradation(primary_client, final_text)
+            result = response.get("result", {})
+            usage = response.get("usage", {})
+
+            # 无效信号不做低置信度重试，避免闲聊/链接/复盘文本浪费 token。
+            if not _as_bool(result.get("is_valid_signal", False)):
+                break
+
+            confidence = max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0))
+            if confidence >= threshold:
+                break
+
+            if low_conf_attempt < _LOW_CONFIDENCE_RETRY_COUNT:
+                logger.warning(
+                    f"文本 LLM 置信度偏低 {confidence:.2f} < 阈值 {threshold:.2f}, "
+                    f"重新解析 {low_conf_attempt + 1}/{_LOW_CONFIDENCE_RETRY_COUNT}"
+                )
 
         # 检查是否为有效信号
         if not _as_bool(result.get("is_valid_signal", False)):
@@ -522,6 +562,7 @@ async def parse_image_with_llm(
     image_base64_list: list[str] | None = None,
     llm_client: LLMClient | None = None,
     kol_vision_enabled: bool = False,
+    min_confidence: float = _DEFAULT_MIN_CONFIDENCE,
 ) -> tuple[ParsedSignal | None, dict[str, Any]]:
     """
     直接使用图片 LLM 分析图片(GLM-4V,不经过 OCR)。
@@ -534,6 +575,7 @@ async def parse_image_with_llm(
         image_base64_list: 图片 base64 列表
         llm_client: 图片 LLM 客户端实例(可选,不传则从 runtime_config 构造)
         kol_vision_enabled: 该 KOL 是否启用图片 LLM(由调用方传入)
+        min_confidence: 当前 KOL 的最低执行置信度阈值
 
     Returns:
         (ParsedSignal 对象, usage 信息)
@@ -553,16 +595,36 @@ async def parse_image_with_llm(
     text = "请分析这些图片中的加密货币交易策略，提取品种、方向、入场价、止盈、止损等信息。"
 
     try:
+        threshold = max(0.0, min(_as_float(min_confidence, _DEFAULT_MIN_CONFIDENCE), 1.0))
+        result: dict[str, Any] = {}
+        usage: dict[str, Any] = {}
+
         # 直接调 vision client 的 analyze_signal(带图片)
-        # ★ P1 修复: 图片 LLM 也使用重试机制和超时保护
-        response = await _call_llm_with_retry(
-            client, text,
-            timeout=_FALLBACK_TIMEOUT,
-            max_retries=_MAX_RETRIES,
-            retry_delays=_RETRY_DELAYS,
-        )
-        result = response.get("result", {})
-        usage = response.get("usage", {})
+        # 图片 LLM 也使用失败重试；有效信号但低置信度时，额外重试 2 次。
+        for low_conf_attempt in range(_LOW_CONFIDENCE_RETRY_COUNT + 1):
+            response = await _call_llm_with_retry(
+                client, text,
+                image_urls=image_urls,
+                image_base64_list=image_base64_list,
+                timeout=_FALLBACK_TIMEOUT,
+                max_retries=_MAX_RETRIES,
+                retry_delays=_RETRY_DELAYS,
+            )
+            result = response.get("result", {})
+            usage = response.get("usage", {})
+
+            if not _as_bool(result.get("is_valid_signal", False)):
+                break
+
+            confidence = max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0))
+            if confidence >= threshold:
+                break
+
+            if low_conf_attempt < _LOW_CONFIDENCE_RETRY_COUNT:
+                logger.warning(
+                    f"图片 LLM 置信度偏低 {confidence:.2f} < 阈值 {threshold:.2f}, "
+                    f"重新解析 {low_conf_attempt + 1}/{_LOW_CONFIDENCE_RETRY_COUNT}"
+                )
 
         if not _as_bool(result.get("is_valid_signal", False)):
             logger.info(f"图片 LLM 判定为无效信号: {result.get('reasoning', 'N/A')}")
