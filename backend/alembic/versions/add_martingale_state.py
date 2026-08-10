@@ -10,7 +10,7 @@ from alembic import op
 
 
 revision: str = "add_martingale_state"
-down_revision: Union[str, Sequence[str], None] = "merge_daily_risk_discord_heads"
+down_revision: Union[str, Sequence[str], None] = "consolidate_startup_schema"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
