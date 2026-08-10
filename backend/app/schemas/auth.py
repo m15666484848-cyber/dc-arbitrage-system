@@ -53,6 +53,8 @@ class CustomerOut(BaseModel):
     last_login_at: datetime | None = None
     note: str = ""
     created_at: datetime
+    single_exchange_multi_api_allowed: bool = False
+    single_exchange_multi_api_limit: int = 2
     multi_exchange_allowed: bool = False
     max_order_usdt: float = 5000.0
     show_signal_summary: bool = False
@@ -90,6 +92,8 @@ class CustomerRegister(BaseModel):
 class CustomerApprove(BaseModel):
     """管理员审批客户 (激活账号,默认授权所有交易所)。"""
     max_order_usdt: float = 5000.0
+    single_exchange_multi_api_allowed: bool = False
+    single_exchange_multi_api_limit: int = 2
     multi_exchange_allowed: bool = False
     note: str = ""
 
@@ -106,6 +110,8 @@ class CustomerUpdate(BaseModel):
     is_active: bool | None = None
     note: str | None = None
     # 防共用控制(管理员可改)
+    single_exchange_multi_api_allowed: bool | None = None
+    single_exchange_multi_api_limit: int | None = None
     multi_exchange_allowed: bool | None = None
     max_order_usdt: float | None = None
     # 页面权限(管理员可改):是否向该客户开放信号汇总

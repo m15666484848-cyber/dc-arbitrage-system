@@ -14,7 +14,7 @@ from app.core.redis import get_redis
 from app.core.config import settings as _cfg
 from app.models.config import RiskConfig
 from app.models.trading import Position
-from app.services import exchange_adapter, order_manager
+from app.services import exchange_adapter, order_manager, price_feed
 from app.services.event_bus import bus
 
 # 内存锁:记录正在平仓中的仓位ID,防止止损监控循环重复触发同一仓位
@@ -202,7 +202,7 @@ async def _check_one_position(db: AsyncSession, position: Position) -> None:
     await _check_one_position_with_price(db, position, current_price)
 
 
-async def _check_one_position_with_price(db: AsyncSession, position: Position, current_price: float) -> None:
+async def _check_one_position_with_price(db: AsyncSession, position: Position, current_price: float, full_check: bool = True) -> None:
     """检查单个持仓的止盈止损/成本保护/追踪止损触发(使用已获取的价格)。"""
     if position.status != "open" or position.qty <= 0:
         return
@@ -219,6 +219,9 @@ async def _check_one_position_with_price(db: AsyncSession, position: Position, c
             await order_manager.close_position(db, position.id, position.qty)
         finally:
             await _remove_closing_position(position.id)
+        return
+
+    if not full_check:
         return
 
     # 止盈触发 → 按比例平仓 + 成本保护
@@ -251,7 +254,9 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
         if not position.sl or new_sl > position.sl:
             position.sl = new_sl
             try:
-                await db.flush()
+                if hasattr(db, "flush"):
+                    await db.flush()
+                await db.commit()
             except Exception as e:
                 logger.warning(f"追踪止损提交失败 pos={position.id}: {e}")
                 await db.rollback()
@@ -260,7 +265,9 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
         if not position.sl or new_sl < position.sl:
             position.sl = new_sl
             try:
-                await db.flush()
+                if hasattr(db, "flush"):
+                    await db.flush()
+                await db.commit()
             except Exception as e:
                 logger.warning(f"追踪止损提交失败 pos={position.id}: {e}")
                 await db.rollback()
@@ -478,24 +485,30 @@ async def stop_loss_monitor_loop() -> None:
                     await asyncio.sleep(1)
                     continue
 
-                # 按 exchange+symbol 分组,批量获取价格
+                # 按 exchange 分组,批量获取价格；缓存命中优先，未命中再批量请求。
                 price_cache: dict[tuple[str, str], float] = {}
+                missing_by_exchange: dict[str, set[str]] = {}
                 for pos in positions:
                     key = (pos.exchange, pos.symbol)
-                    if key not in price_cache:
-                        # 优先读 Redis 缓存
-                        cached = await _get_cached_price(pos.exchange, pos.symbol)
-                        if cached and cached > 0:
-                            price_cache[key] = cached
-                        else:
-                            # 从交易所获取
-                            try:
-                                price = await exchange_adapter.fetch_market_price(pos.exchange, pos.symbol)
-                                if price and price > 0:
-                                    price_cache[key] = price
-                                    await _set_cached_price(pos.exchange, pos.symbol, price)
-                            except Exception as e:
-                                logger.debug(f"获取价格失败 {pos.exchange}:{pos.symbol}: {e}")
+                    if key in price_cache:
+                        continue
+                    cached = await _get_cached_price(pos.exchange, pos.symbol)
+                    if cached and cached > 0:
+                        price_cache[key] = cached
+                    else:
+                        missing_by_exchange.setdefault(pos.exchange, set()).add(pos.symbol)
+
+                for exchange, symbols in missing_by_exchange.items():
+                    try:
+                        prices = await exchange_adapter.fetch_market_prices_batch(exchange, list(symbols))
+                    except Exception as e:
+                        logger.debug(f"批量获取价格失败 {exchange}:{symbols}: {e}")
+                        prices = {}
+                    for symbol in symbols:
+                        price = prices.get(symbol) if prices else None
+                        if price and price > 0:
+                            price_cache[(exchange, symbol)] = price
+                            await _set_cached_price(exchange, symbol, price)
 
                 # 检查每个持仓的止损
                 for pos in positions:

@@ -4,6 +4,7 @@ import { API } from "@/api/client";
 import { useFetch } from "@/lib/useFetch";
 import { useToast } from "@/components/ui/Toast";
 import { Card, CardTitle, Badge, Button, Empty, Input, Select, MetricCard } from "@/components/ui";
+import { useAccountFilterStore } from "@/stores/accountFilter";
 import { Modal } from "@/components/ui/Modal";
 import { fmtMoney, fmtTime, orderStatusLabel, pnlColor, sideLabel } from "@/lib/utils";
 
@@ -161,8 +162,9 @@ const TradeCard = React.memo(function TradeCard({ t }: { t: any }) {
 });
 
 export default function TradesPage() {
-  const { data: tradesData, reload: reloadTrades } = useFetch(() => API.listTrades(), []);
-  const { data: ordersData, reload: reloadOrders } = useFetch(() => API.listOrders(), []);
+  const { accountId } = useAccountFilterStore();
+  const { data: tradesData, reload: reloadTrades } = useFetch(() => API.listTrades(accountId), [accountId]);
+  const { data: ordersData, reload: reloadOrders } = useFetch(() => API.listOrders(accountId), [accountId]);
   const { push } = useToast();
   const [delId, setDelId] = useState<number | null>(null);
   const [manual, setManual] = useState(false);
@@ -264,6 +266,10 @@ export default function TradesPage() {
       </div>
 
       {/* KPI 概览 */}
+      {/* multi-api-account-filter */}
+      <div className="flex justify-end">
+      </div>
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <MetricCard label="订单总数" value={orders.length} icon={History} tone="default" />
         <MetricCard label="待成交挂单" value={pendingCount} icon={Clock} tone="gold" />

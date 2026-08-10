@@ -12,6 +12,7 @@ from app.core.security import get_current_user, require_customer
 from app.models.kol import Kol, KolFollow
 from app.models.strategy import Strategy
 from app.models.trading import Order, Position, Trade
+from app.models.config import ExchangeAccount
 from app.schemas.common import ok
 from app.schemas.kol import KolFollowUpdate, KolOut
 from app.schemas.trading import (
@@ -31,6 +32,32 @@ ALLOWED_EXCHANGES = {"okx", "binance", "bybit"}
 class CancelPendingOrderRequest(BaseModel):
     pending_id: int
     reason: str = ""
+
+
+def _account_display_name(acc: ExchangeAccount | None) -> str:
+    if not acc:
+        return ""
+    label = (acc.label or "").strip()
+    mode = getattr(acc, "account_mode", "") or ("testnet" if acc.testnet else "live")
+    base = label or f"{acc.exchange.upper()} {mode}"
+    return f"{base} #{acc.id}"
+
+
+async def _exchange_account_map(db: AsyncSession, account_ids: set[int | None]) -> dict[int, ExchangeAccount]:
+    ids = {int(i) for i in account_ids if i}
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(select(ExchangeAccount).where(ExchangeAccount.id.in_(ids)))
+    ).scalars().all()
+    return {r.id: r for r in rows}
+
+
+def _attach_account_meta(d: dict, acc: ExchangeAccount | None) -> dict:
+    d["exchange_account_label"] = (acc.label or "") if acc else ""
+    d["exchange_account_name"] = _account_display_name(acc)
+    d["exchange_account_mode"] = getattr(acc, "account_mode", "") if acc else ""
+    return d
 
 
 def _resolve_customer(current, customer_id: int | None) -> int:
@@ -242,15 +269,21 @@ async def resume_kol_follow(
 async def list_positions(
     current=Depends(get_current_user),
     customer_id: int | None = Query(None),
+    exchange_account_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     cid = _resolve_customer(current, customer_id)
-    # 持仓管理只展示未结束仓位；已平仓仓位应进入历史记录。
-    # 仍保留 master + sub 结构，前端 Positions.tsx 按 parent_id 分组展示。
+    # 持仓管理只展示未结束的子仓位；已平仓仓位应进入历史记录。
+    # master 仓位仅作为内部聚合记录，不直接返回给前端。
     positions = (
         await db.execute(
             select(Position)
-            .where(Position.customer_id == cid, Position.status == "open")
+            .where(
+                Position.customer_id == cid,
+                Position.status == "open",
+                Position.parent_id.is_not(None),
+                Position.exchange_account_id == exchange_account_id if exchange_account_id else True,
+            )
             .order_by(Position.opened_at.desc())
         )
     ).scalars().all()
@@ -268,10 +301,12 @@ async def list_positions(
             for sym, price in prices.items():
                 price_cache[(exh, sym)] = price
 
+    account_map = await _exchange_account_map(db, {p.exchange_account_id for p in positions})
     out = []
     for p in positions:
         price = price_cache.get((p.exchange, p.symbol), 0.0) if p.status == "open" else 0.0
-        out.append(await position_manager.enrich_position(p, price, kol_map.get(p.kol_id, "")))
+        d = await position_manager.enrich_position(p, price, kol_map.get(p.kol_id, ""))
+        out.append(_attach_account_meta(d, account_map.get(p.exchange_account_id)))
     return ok(out)
 
 
@@ -323,17 +358,21 @@ async def list_orders(
     current=Depends(get_current_user),
     customer_id: int | None = Query(None),
     status: str | None = Query(None),
+    exchange_account_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     cid = _resolve_customer(current, customer_id)
     stmt = select(Order).where(Order.customer_id == cid)
     if status:
         stmt = stmt.where(Order.status == status)
+    if exchange_account_id:
+        stmt = stmt.where(Order.exchange_account_id == exchange_account_id)
     stmt = stmt.order_by(Order.created_at.desc()).limit(200)
     orders = (await db.execute(stmt)).scalars().all()
     # 关联 KOL 名
     kol_ids = {o.kol_id for o in orders if o.kol_id}
     kols = {k.id: k.name for k in (await db.execute(select(Kol).where(Kol.id.in_(kol_ids)))).scalars().all()} if kol_ids else {}
+    account_map = await _exchange_account_map(db, {o.exchange_account_id for o in orders})
     out = []
     for o in orders:
         d = {
@@ -344,7 +383,7 @@ async def list_orders(
             "filled_price": o.filled_price, "tp_level": o.tp_level, "created_at": o.created_at,
             "filled_at": o.filled_at, "deleted_at": o.deleted_at, "error_msg": o.error_msg,
         }
-        out.append(d)
+        out.append(_attach_account_meta(d, account_map.get(o.exchange_account_id)))
     return ok(out)
 
 
@@ -392,14 +431,18 @@ async def manual_order(
     }
     if _rc:
         _defaults.update({
-            "default_tp_pct": _rc.default_tp_pct or [0.10, 0.20],
-            "default_sl_pct": _rc.default_sl_pct if _rc.default_sl_pct is not None else -0.05,
-            "no_stop_loss": _rc.no_stop_loss,
-            "cost_protection_buffer": _rc.cost_protection_buffer or 0.002,
-            "enable_trailing": _rc.enable_trailing,
-            "trailing_callback": _rc.trailing_callback or 0.01,
-            "batch_entry_enabled": _rc.batch_entry_enabled,
-            "batch_entry_window": _rc.batch_entry_window or 0,
+            "default_tp_pct": getattr(_rc, "default_tp_pct", None) or [0.10, 0.20],
+            "default_sl_pct": getattr(_rc, "default_sl_pct", None) if getattr(_rc, "default_sl_pct", None) is not None else -0.05,
+            "no_stop_loss": getattr(_rc, "no_stop_loss", False),
+            "cost_protection_buffer": getattr(_rc, "cost_protection_buffer", None) or 0.002,
+            "enable_trailing": getattr(_rc, "enable_trailing", getattr(_rc, "enable_trailing_stop", False)),
+            "trailing_callback": (
+                (float(getattr(_rc, "trailing_callback_pct", 0) or 0) / 100.0)
+                if getattr(_rc, "trailing_callback_pct", None) is not None
+                else (getattr(_rc, "trailing_callback", None) or 0.01)
+            ),
+            "batch_entry_enabled": getattr(_rc, "batch_entry_enabled", False),
+            "batch_entry_window": getattr(_rc, "batch_entry_window", None) or 0,
         })
     # ★ 检查急停状态
     if getattr(current, "emergency_stop", False):
@@ -476,6 +519,7 @@ async def manual_order(
 async def list_trades(
     current=Depends(get_current_user),
     customer_id: int | None = Query(None),
+    exchange_account_id: int | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -483,22 +527,27 @@ async def list_trades(
     cid = _resolve_customer(current, customer_id)
     # ★ P3 修复: 添加分页参数,避免一次性返回过多数据
     offset = (page - 1) * page_size
+    stmt = select(Trade).where(Trade.customer_id == cid)
+    if exchange_account_id:
+        stmt = stmt.where(Trade.exchange_account_id == exchange_account_id)
     trades = (
         await db.execute(
-            select(Trade).where(Trade.customer_id == cid).order_by(Trade.executed_at.desc()).offset(offset).limit(page_size)
+            stmt.order_by(Trade.executed_at.desc()).offset(offset).limit(page_size)
         )
     ).scalars().all()
     kol_ids = {t.kol_id for t in trades if t.kol_id}
     kols = {k.id: k.name for k in (await db.execute(select(Kol).where(Kol.id.in_(kol_ids)))).scalars().all()} if kol_ids else {}
+    account_map = await _exchange_account_map(db, {t.exchange_account_id for t in trades})
     out = []
     for t in trades:
-        out.append({
+        d = {
             "id": t.id, "kol_id": t.kol_id, "kol_name": kols.get(t.kol_id, ""),
             "exchange_account_id": t.exchange_account_id,
             "exchange": t.exchange, "symbol": t.symbol, "side": t.side, "qty": t.qty,
             "price": t.price, "fee": t.fee, "realized_pnl": t.realized_pnl, "is_close": t.is_close,
             "tp_level": t.tp_level, "executed_at": t.executed_at,
-        })
+        }
+        out.append(_attach_account_meta(d, account_map.get(t.exchange_account_id)))
     return ok(out)
 
 
@@ -510,6 +559,7 @@ async def list_pending_orders_api(
     current=Depends(get_current_user),
     customer_id: int | None = Query(None),
     status: str | None = Query(None),
+    exchange_account_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """查询待触发单列表。"""
@@ -517,6 +567,11 @@ async def list_pending_orders_api(
 
     cid = _resolve_customer(current, customer_id)
     data = await pending_order_manager.list_pending_orders(db, cid, status)
+    if exchange_account_id:
+        data = [p for p in data if p.get("exchange_account_id") == exchange_account_id]
+    account_map = await _exchange_account_map(db, {p.get("exchange_account_id") for p in data})
+    for p in data:
+        _attach_account_meta(p, account_map.get(p.get("exchange_account_id")))
     return ok(data)
 
 

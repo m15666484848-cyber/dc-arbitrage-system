@@ -16,6 +16,7 @@ import { useFetch } from "@/lib/useFetch";
 import { API } from "@/api/client";
 import { wsClient } from "@/api/ws";
 import { Card, Empty, Badge, Button } from "@/components/ui";
+import { useAccountFilterStore } from "@/stores/accountFilter";
 import { fmtMoney, fmtTime } from "@/lib/utils";
 
 function PanelTitle({
@@ -88,9 +89,10 @@ function getPositionRoi(position: any, totalPnl: number, notional: number) {
 }
 
 export default function DashboardPage() {
-  const { data: positionsData, reload: reloadPositions } = useFetch(() => API.listPositions(), []);
-  const { data: tradesData } = useFetch(() => API.listTrades(), []);
-  const { data: dashStats, reload: reloadDash } = useFetch(() => API.dashboard(), []);
+  const { accountId } = useAccountFilterStore();
+  const { data: positionsData, reload: reloadPositions } = useFetch(() => API.listPositions(accountId), [accountId]);
+  const { data: tradesData } = useFetch(() => API.listTrades(accountId), [accountId]);
+  const { data: dashStats, reload: reloadDash } = useFetch(() => API.dashboard(accountId), [accountId]);
   const { data: kolsData, reload: reloadKols } = useFetch(() => API.listKols(), []);
   const [resumingKolId, setResumingKolId] = useState<number | null>(null);
 
@@ -128,7 +130,7 @@ export default function DashboardPage() {
     [trades]
   );
   const totalPnl = useMemo(() => openPnl + realizedPnl, [openPnl, realizedPnl]);
-  const openCount = positions.filter((p: any) => p.status === "open" && !p.parent_id).length;
+  const openCount = positions.filter((p: any) => p.status === "open").length;
 
   // 订阅的 KOL
   const followedKols = useMemo(() => {
@@ -169,7 +171,7 @@ export default function DashboardPage() {
   const openPositions = useMemo(() => {
     const fromDashboard = s.open_positions_list || [];
     if (fromDashboard.length > 0) return fromDashboard;
-    return positions.filter((p: any) => p.status === "open" && !p.parent_id);
+    return positions.filter((p: any) => p.status === "open");
   }, [s.open_positions_list, positions]);
 
   // 聚合后的持仓信息(包含分批子仓位的汇总)
@@ -337,6 +339,7 @@ export default function DashboardPage() {
                   <div key={p.id} className="position-row">
                     <div className="position-row-symbol">
                       <span className="font-mono text-base font-bold text-text">{p.symbol}</span>
+                        {p.exchange_account_name && <Badge tone="default" className="text-[10px]">{p.exchange_account_name}</Badge>}
                       <Badge tone={p.side === "long" ? "profit" : "loss"} className="text-[10px]">
                         {p.side === "long" ? "多" : "空"}
                       </Badge>

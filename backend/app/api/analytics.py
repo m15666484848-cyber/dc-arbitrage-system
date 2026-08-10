@@ -10,9 +10,26 @@ from app.core.security import get_current_user, require_admin
 from app.models.kol import Kol, KolFollow
 from app.models.strategy import Strategy
 from app.models.trading import Position
+from app.models.config import ExchangeAccount
 from app.models.signal import Signal
 from app.schemas.common import ok
 from app.services import analytics, exchange_adapter, position_manager
+
+def _account_display_name(acc: ExchangeAccount | None) -> str:
+    if not acc:
+        return ""
+    label = (acc.label or "").strip()
+    mode = getattr(acc, "account_mode", "") or ("testnet" if acc.testnet else "live")
+    return f"{label or f'{acc.exchange.upper()} {mode}'} #{acc.id}"
+
+
+async def _exchange_account_map(db: AsyncSession, ids: set[int | None]) -> dict[int, ExchangeAccount]:
+    account_ids = {int(i) for i in ids if i}
+    if not account_ids:
+        return {}
+    rows = (await db.execute(select(ExchangeAccount).where(ExchangeAccount.id.in_(account_ids)))).scalars().all()
+    return {r.id: r for r in rows}
+
 
 router = APIRouter(tags=["分析"])
 
@@ -134,12 +151,16 @@ async def _build_follow_statuses(
     return statuses
 
 @router.get("/dashboard")
-async def dashboard(current=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def dashboard(
+    current=Depends(get_current_user),
+    exchange_account_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
     cid = current.id if current.role == "customer" else None
     if cid is None:
         return ok({"open_positions": 0, "today_pnl": 0, "total_pnl": 0, "total_trades": 0, "win_rate": 0,
                     "followed_kols": [], "open_positions_list": []})
-    stats = await analytics.dashboard_stats(db, cid)
+    stats = await analytics.dashboard_stats(db, cid, exchange_account_id)
     curve = await analytics.equity_curve(db, cid)
 
     # 当前订阅的 KOL 列表
@@ -181,13 +202,14 @@ async def dashboard(current=Depends(get_current_user), db: AsyncSession = Depend
             "follow_status": follow_status,
         })
 
-    # 当前持仓列表 (master 仓位)
+    # Dashboard open position list uses child positions only, same as /positions.
     open_pos_rows = (
         await db.execute(
             select(Position).where(
                 Position.customer_id == cid,
                 Position.status == "open",
-                Position.parent_id.is_(None),
+                Position.parent_id.is_not(None),
+                Position.exchange_account_id == exchange_account_id if exchange_account_id else True,
             ).order_by(Position.opened_at.desc())
         )
     ).scalars().all()
@@ -203,19 +225,14 @@ async def dashboard(current=Depends(get_current_user), db: AsyncSession = Depend
     price_cache: dict[tuple[str, str], float] = {}
     if open_pos_rows:
         exchange_symbols: dict[str, set[str]] = {}
-        for p in open_pos_rows:
-            exchange_symbols.setdefault(p.exchange, set()).add(p.symbol)
-        for exh, syms in exchange_symbols.items():
-            try:
-                prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
-                for sym, price in prices.items():
-                    price_cache[(exh, sym)] = price
-            except Exception:
-                pass
-
+    account_map = await _exchange_account_map(db, {p.exchange_account_id for p in open_pos_rows})
     for p in open_pos_rows:
         price = price_cache.get((p.exchange, p.symbol), 0.0)
         enriched = await position_manager.enrich_position(p, price, kol_map.get(p.kol_id, ""))
+        acc = account_map.get(p.exchange_account_id)
+        enriched["exchange_account_label"] = (acc.label or "") if acc else ""
+        enriched["exchange_account_name"] = _account_display_name(acc)
+        enriched["exchange_account_mode"] = getattr(acc, "account_mode", "") if acc else ""
         open_positions_list.append(enriched)
 
     return ok({**stats, "equity_curve": curve, "followed_kols": followed_kols,

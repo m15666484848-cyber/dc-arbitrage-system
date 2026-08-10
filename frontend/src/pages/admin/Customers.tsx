@@ -17,7 +17,7 @@ export default function AdminCustomers() {
   const [authForm, setAuthForm] = useState({ exchange: "all", starts_at: "", expires_at: "", note: "" });
   // 防共用设置
   const [guardCid, setGuardCid] = useState<number | null>(null);
-  const [guardForm, setGuardForm] = useState({ multi_exchange_allowed: false, max_order_usdt: 5000 });
+  const [guardForm, setGuardForm] = useState({ single_exchange_multi_api_allowed: false, single_exchange_multi_api_limit: 2, multi_exchange_allowed: false, max_order_usdt: 5000 });
   // 告警配置
   const [alertCid, setAlertCid] = useState<number | null>(null);
   const [alertList, setAlertList] = useState<any[]>([]);
@@ -114,6 +114,8 @@ export default function AdminCustomers() {
   const openGuard = (c: any) => {
     setGuardCid(c.id);
     setGuardForm({
+      single_exchange_multi_api_allowed: !!c.single_exchange_multi_api_allowed,
+      single_exchange_multi_api_limit: c.single_exchange_multi_api_limit ?? 2,
       multi_exchange_allowed: !!c.multi_exchange_allowed,
       max_order_usdt: c.max_order_usdt ?? 5000,
     });
@@ -122,6 +124,8 @@ export default function AdminCustomers() {
   const saveGuard = async () => {
     try {
       await API.updateCustomer(guardCid!, {
+        single_exchange_multi_api_allowed: guardForm.single_exchange_multi_api_allowed,
+        single_exchange_multi_api_limit: Number(guardForm.single_exchange_multi_api_limit || 1),
         multi_exchange_allowed: guardForm.multi_exchange_allowed,
         max_order_usdt: Number(guardForm.max_order_usdt),
       });
@@ -232,6 +236,38 @@ export default function AdminCustomers() {
     }
   };
 
+  // ===== 管理员以客户身份进入客户页面 =====
+  const loginAsCustomer = async (c: any) => {
+    try {
+      const res: any = await API.loginAsCustomer(c.id);
+      const newWin = window.open("/", "_blank");
+      if (newWin) {
+        newWin.localStorage.setItem("dc-quant-auth", JSON.stringify({
+          state: {
+            token: res.access_token,
+            user: {
+              id: res.user_id,
+              username: res.username,
+              role: "customer",
+              display_name: res.display_name,
+              authorization: res.authorization,
+              show_signal_summary: res.show_signal_summary,
+              emergency_stop: res.emergency_stop,
+            },
+            initialized: true,
+          },
+          version: 0,
+        }));
+        newWin.location.reload();
+        push("success", `已以 ${res.display_name || res.username} 身份打开新窗口`);
+      } else {
+        push("error", "新窗口被浏览器拦截,请允许弹窗");
+      }
+    } catch (e: any) {
+      push("error", e?.response?.data?.detail || "操作失败");
+    }
+  };
+
   // ===== 告警管理 =====
   const openAlerts = async (cid: number) => {
     setAlertCid(cid);
@@ -316,8 +352,16 @@ export default function AdminCustomers() {
       push("error", "请输入新密码");
       return;
     }
-    if (pwdForm.new_password.length < 6) {
-      push("error", "密码至少 6 位");
+    if (pwdForm.new_password.length < 8) {
+      push("error", "密码至少 8 位");
+      return;
+    }
+    if (!/[a-zA-Z]/.test(pwdForm.new_password)) {
+      push("error", "密码必须包含至少一个字母");
+      return;
+    }
+    if (!/\d/.test(pwdForm.new_password)) {
+      push("error", "密码必须包含至少一个数字");
       return;
     }
     try {
@@ -326,7 +370,7 @@ export default function AdminCustomers() {
       setPwdCid(null);
       setPwdForm({ new_password: "" });
     } catch (e: any) {
-      push("error", e?.response?.data?.message || "重置失败");
+      push("error", e?.response?.data?.detail || e?.response?.data?.message || "重置失败");
     }
   };
 
@@ -499,6 +543,14 @@ export default function AdminCustomers() {
                     <td className="px-3 text-center">
                       <div className="flex gap-1.5 justify-center items-center">
                         <button
+                          title={`以 ${c.display_name || c.username} 身份进入客户页面`}
+                          onClick={() => loginAsCustomer(c)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-emerald/30 bg-emerald/10 px-2 py-1 text-xs text-emerald hover:bg-emerald/15 transition"
+                        >
+                          <ArrowUpRight size={12} />
+                          进入
+                        </button>
+                        <button
                           title={`修改客户类型：当前为 ${customerTypeLabel(c.customer_type)}`}
                           onClick={() => openCustomerTypeChange(c)}
                           className="inline-flex items-center gap-1 rounded-lg border border-border/60 bg-bg-soft px-2 py-1 text-xs text-slate-200 hover:border-gold/40 hover:text-gold transition"
@@ -633,6 +685,14 @@ export default function AdminCustomers() {
                 <div className="flex items-center justify-between pt-3 border-t border-border/40 gap-2">
                   <div className="flex items-center gap-2">
                     <Badge tone={c.is_active ? "profit" : "default"}>{c.is_active ? "激活" : "停用"}</Badge>
+                    <button
+                      title={`以 ${c.display_name || c.username} 身份进入客户页面`}
+                      onClick={() => loginAsCustomer(c)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-emerald/30 bg-emerald/10 px-2 py-1 text-xs text-emerald hover:bg-emerald/15 transition"
+                    >
+                      <ArrowUpRight size={12} />
+                      进入
+                    </button>
                     <button
                       title={`修改客户类型：当前为 ${customerTypeLabel(c.customer_type)}`}
                       onClick={() => openCustomerTypeChange(c)}
@@ -827,6 +887,25 @@ export default function AdminCustomers() {
             <input
               type="checkbox"
               className="accent-accent"
+              checked={guardForm.single_exchange_multi_api_allowed}
+              onChange={(e) => setGuardForm({ ...guardForm, single_exchange_multi_api_allowed: e.target.checked })}
+            />
+            允许单交易所多 API
+          </label>
+          <Field label="单交易所同模式允许 API 数量">
+            <Input
+              type="number"
+              min={1}
+              max={20}
+              value={guardForm.single_exchange_multi_api_limit}
+              onChange={(e) => setGuardForm({ ...guardForm, single_exchange_multi_api_limit: Number(e.target.value) })}
+              disabled={!guardForm.single_exchange_multi_api_allowed && !guardForm.multi_exchange_allowed}
+            />
+          </Field>
+          <label className="flex items-center gap-2 text-sm text-slate-200">
+            <input
+              type="checkbox"
+              className="accent-accent"
               checked={guardForm.multi_exchange_allowed}
               onChange={(e) => setGuardForm({ ...guardForm, multi_exchange_allowed: e.target.checked })}
             />
@@ -981,14 +1060,14 @@ export default function AdminCustomers() {
       <Modal open={pwdCid !== null} onClose={() => setPwdCid(null)} title={`客户 #${pwdCid} 重置密码`}>
         <div className="space-y-4">
           <div className="text-xs text-slate-400 p-3 glass-soft rounded">
-            重置后客户需要使用新密码登录。密码至少 6 位。
+            重置后客户需要使用新密码登录。密码至少 8 位，并且必须包含字母和数字。
           </div>
           <Field label="新密码">
             <Input
               type="password"
               value={pwdForm.new_password}
               onChange={(e) => setPwdForm({ new_password: e.target.value })}
-              placeholder="输入新密码 (至少 6 位)"
+              placeholder="输入新密码 (至少 8 位，含字母和数字)"
               autoFocus
             />
           </Field>

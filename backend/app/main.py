@@ -85,6 +85,7 @@ async def _migrate_schema(conn) -> None:
     from sqlalchemy import text
 
     migrations = [
+        "ALTER TABLE customers ADD COLUMN IF NOT EXISTS single_exchange_multi_api_limit INTEGER NOT NULL DEFAULT 2",
         # system_config:双 LLM 架构(新增 text_llm_* 和 vision_llm_*)
         # 保留旧 llm_* 字段不删,避免破坏数据
         "ALTER TABLE system_config ADD COLUMN IF NOT EXISTS text_llm_provider VARCHAR(32) DEFAULT 'deepseek'",

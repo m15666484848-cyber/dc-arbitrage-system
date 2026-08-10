@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import decrypt_secret, encrypt_secret, hash_password, require_admin
+from app.core.security import decrypt_secret, encrypt_secret, hash_password, require_admin, create_access_token
 from app.models.audit import AuditLog
 from app.models.config import DiscordAccount
 from app.models.customer import Authorization, Customer
@@ -91,6 +91,17 @@ async def _ensure_discord_account_exists(db: AsyncSession, account_id: int | Non
 
 
 # ---------- Pydantic 输入校验模型 ----------
+
+
+class SimulateKolSignalRequest(BaseModel):
+    message: str
+    market_price: float | None = None
+    tp_levels: list[float] | None = None
+    default_sl_pct: float = -0.05
+    no_stop_loss: bool = False
+    max_sl_pct: float | None = None
+
+
 class CustomerAlertCreate(BaseModel):
     name: str = "飞书告警"
     webhook_url: str = ""
@@ -412,6 +423,15 @@ async def update_customer(cid: int, body: CustomerUpdate, db: AsyncSession = Dep
     if body.note is not None:
         cust.note = body.note
     # 防共用控制(管理员可改)
+    if body.single_exchange_multi_api_allowed is not None:
+        cust.single_exchange_multi_api_allowed = body.single_exchange_multi_api_allowed
+    if body.single_exchange_multi_api_limit is not None:
+        limit = int(body.single_exchange_multi_api_limit or 1)
+        if limit < 1:
+            raise HTTPException(400, "单交易所多 API 数量至少为 1")
+        if limit > 20:
+            raise HTTPException(400, "单交易所多 API 数量不能超过 20")
+        cust.single_exchange_multi_api_limit = limit
     if body.multi_exchange_allowed is not None:
         cust.multi_exchange_allowed = body.multi_exchange_allowed
     if body.max_order_usdt is not None:
@@ -1083,6 +1103,237 @@ class ResetDataConfirm(PydanticBaseModel):
     confirm_text: str
     reset_strategy_state: bool = True  # 是否重置策略马丁格尔状态
     customer_id: int | None = None  # 指定客户ID,为None时清除所有数据
+
+
+
+@router.post("/simulate-kol-signal")
+async def simulate_kol_signal(payload: SimulateKolSignalRequest, _: Customer = Depends(require_admin)):
+    """Admin safe simulation for one KOL text signal. No database writes, no orders."""
+    from app.services.signal_parser import parse_text, classify_signal_intent, classify_signal_scene
+    from app.services.signal_filter import apply_defaults, correct_direction, correct_price
+    from app.services.strategy_engine import get_strategy_defaults
+    from app.services.order_manager import _build_tp_levels
+
+    raw_message = (payload.message or "").strip()
+    if not raw_message:
+        raise HTTPException(status_code=400, detail="请输入要模拟的 KOL 消息")
+
+    parsed = parse_text(raw_message)
+    parsed_before = parsed.model_dump()
+    intent, intent_reason = classify_signal_intent(raw_message)
+    scene, scene_reason = classify_signal_scene(raw_message)
+
+    import re
+
+    def _evidence(pattern: str) -> str:
+        m = re.search(pattern, raw_message, re.IGNORECASE)
+        return m.group(0) if m else ""
+
+    analysis_basis: list[dict] = []
+
+    def add_basis(item: str, rule: str, evidence: str, result: str) -> None:
+        analysis_basis.append({
+            "item": item,
+            "rule": rule,
+            "evidence": evidence or "未命中明确片段",
+            "result": result,
+        })
+
+    add_basis(
+        "交易品种",
+        "优先识别 $TICKER、交易对、常见英文币种和中文币种映射",
+        _evidence(r"(比特币|大饼|BTC\s*/?\s*USDT|BTC)") if parsed.symbol else "",
+        parsed.symbol or "未识别",
+    )
+    add_basis(
+        "交易方向",
+        "匹配做多/多单/long/buy 等多头词，或做空/空单/short/sell 等空头词",
+        _evidence(r"(做多|多单|开多|买入|long|buy|做空|空单|开空|short|sell)") if parsed.side else "",
+        parsed.side or "未识别",
+    )
+    add_basis(
+        "入场价格",
+        "从现价/入场/进场/开仓等关键词后的价格中提取",
+        _evidence(r"(现价|入场|进场|开仓)\s*[:：]?\s*[0-9]+(?:\.[0-9]+)?"),
+        str(parsed.entry_price or "未识别"),
+    )
+    add_basis(
+        "止损价格",
+        "从止损/SL/防守位等关键词后的价格中提取；多单止损应低于入场，空单止损应高于入场",
+        _evidence(r"(止损|SL|sl|防守位|防守)\s*[:：]?\s*[^0-9]{0,8}[0-9]+(?:\.[0-9]+)?"),
+        str(parsed.stop_loss or "未识别"),
+    )
+    add_basis(
+        "止盈价格",
+        "从止盈/目标/TP 等关键词后的价格中提取；如果命中待定/暂无/无，则视为缺失止盈，后续按策略默认止盈补全",
+        _evidence(r"(止盈|目标|TP|tp)\s*[:：]?\s*[^\n，,。；;]*"),
+        "原文未给明确止盈" if not parsed.take_profits else str(parsed.take_profits),
+    )
+    add_basis(
+        "意图判断",
+        "先排除公告/噪音/分析复盘，再判断是否为交易动作；unknown 会继续走结构化解析",
+        raw_message[:120],
+        f"{intent}: {intent_reason}",
+    )
+    add_basis(
+        "场景判断",
+        "识别分析、条件观察、叙述、噪音等非直接交易场景",
+        raw_message[:120],
+        f"{scene}: {scene_reason}",
+    )
+
+    steps: list[dict] = []
+    steps.append({
+        "name": "文本解析",
+        "status": "ok" if parsed.confidence > 0 else "ignored",
+        "message": f"品种={parsed.symbol or '未识别'}, 方向={parsed.side or '未识别'}, 入场={parsed.entry_price}, 止损={parsed.stop_loss}, 止盈={parsed.take_profits}",
+    })
+    steps.append({
+        "name": "意图识别",
+        "status": "ok" if intent in ("trade", "unknown") else "reject",
+        "message": f"{intent}: {intent_reason}",
+    })
+    steps.append({
+        "name": "场景识别",
+        "status": "ok" if scene not in ("analysis", "conditional_observe", "narrative", "noise") else "reject",
+        "message": f"{scene}: {scene_reason}",
+    })
+
+    decision = "accept"
+    reject_reason = ""
+
+    if parsed.is_exit_signal:
+        decision = "exit_signal"
+        steps.append({"name": "信号类型", "status": "ok", "message": f"平仓信号: {parsed.exit_reason}"})
+    elif parsed.is_update_signal:
+        decision = "update_signal"
+        steps.append({"name": "信号类型", "status": "ok", "message": f"止盈止损更新: {parsed.update_reason}"})
+    else:
+        if intent == "noise":
+            decision = "reject"
+            reject_reason = f"噪音/公告: {intent_reason}"
+        elif intent == "analysis":
+            decision = "reject"
+            reject_reason = f"分析/复盘/假设: {intent_reason}"
+        elif not parsed.symbol:
+            decision = "reject"
+            reject_reason = "无交易品种"
+        elif not parsed.side:
+            decision = "reject"
+            reject_reason = "无交易方向"
+
+        if decision != "reject":
+            price_log = ""
+            price_rejected = False
+            try:
+                _, price_log, price_rejected = correct_price(parsed, payload.market_price)
+            except Exception as e:
+                price_log = f"价格纠错异常: {e}"
+                price_rejected = True
+            if price_log:
+                steps.append({"name": "价格纠错", "status": "reject" if price_rejected else "corrected", "message": price_log})
+            if price_rejected:
+                decision = "reject"
+                reject_reason = price_log
+
+        if decision != "reject":
+            _, dir_log = correct_direction(parsed)
+            if dir_log:
+                steps.append({"name": "方向纠错", "status": "corrected", "message": dir_log})
+
+            params = {"tp_levels": payload.tp_levels or [3, 5, 8], "default_sl_pct": payload.default_sl_pct, "no_stop_loss": payload.no_stop_loss}
+            defaults = get_strategy_defaults(params)
+            default_log = apply_defaults(
+                parsed,
+                payload.market_price,
+                defaults["default_tp_pct"],
+                defaults["default_sl_pct"],
+                defaults["no_stop_loss"],
+                payload.max_sl_pct,
+            )
+            if default_log:
+                steps.append({"name": "缺省补全", "status": "corrected", "message": default_log})
+                add_basis(
+                    "补全止盈止损",
+                    "当原文缺失止盈或止损时，按模拟参数/策略默认值生成；默认止盈来自 tp_levels，默认止损来自 default_sl_pct",
+                    str(params),
+                    default_log,
+                )
+            else:
+                steps.append({"name": "缺省补全", "status": "ok", "message": "止盈/止损信息完整,无需补全"})
+                add_basis(
+                    "补全止盈止损",
+                    "原文已经提供所需风险参数，或当前信号类型无需补全",
+                    str(params),
+                    "无需补全",
+                )
+
+    ref_entry = parsed.entry_price or payload.market_price
+    tp_preview = []
+    if parsed.symbol and parsed.side and ref_entry and ref_entry > 0:
+        try:
+            tp_preview = _build_tp_levels(parsed, {"tp_levels": payload.tp_levels or [3, 5, 8]}, float(ref_entry), parsed.side)
+        except Exception as e:
+            steps.append({"name": "止盈分级", "status": "warn", "message": f"生成止盈分级失败: {e}"})
+
+    order_preview = None
+    if decision not in ("reject", "exit_signal", "update_signal") and parsed.symbol and parsed.side:
+        order_preview = {
+            "would_open": True,
+            "symbol": parsed.symbol,
+            "side": parsed.side,
+            "order_side": "buy" if parsed.side == "long" else "sell",
+            "entry_price": ref_entry,
+            "stop_loss": parsed.stop_loss,
+            "take_profits": parsed.take_profits,
+            "tp_levels": tp_preview,
+            "note": "这里只是模拟预览,不会创建信号、订单或持仓。",
+        }
+
+    return {
+        "decision": decision,
+        "reject_reason": reject_reason,
+        "input": {
+            "message": raw_message,
+            "market_price": payload.market_price,
+            "tp_levels": payload.tp_levels or [3, 5, 8],
+            "default_sl_pct": payload.default_sl_pct,
+            "no_stop_loss": payload.no_stop_loss,
+            "max_sl_pct": payload.max_sl_pct,
+        },
+        "intent": {"value": intent, "reason": intent_reason},
+        "scene": {"value": scene, "reason": scene_reason},
+        "parsed_before": parsed_before,
+        "parsed_after": parsed.model_dump(),
+        "steps": steps,
+        "analysis_basis": analysis_basis,
+        "order_preview": order_preview,
+        "safe_mode": True,
+    }
+
+
+@router.post("/customers/{cid}/login-as")
+async def login_as_customer(cid: int, admin=Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    """管理员以客户身份登录(生成客户令牌,不记录登录时间)。"""
+    cust = (await db.execute(select(Customer).where(Customer.id == cid))).scalar_one_or_none()
+    if not cust:
+        raise HTTPException(404, "客户不存在")
+    if cust.status != "active" or not cust.is_active:
+        raise HTTPException(400, "客户未激活或未审批")
+    auth_status = await get_authorization_status(db, cust.id)
+    token = create_access_token(cust.username, "customer", {"customer_id": cust.id})
+    await _audit(db, admin.id, "login_as_customer", f"customer:{cust.username}({cust.id})")
+    return ok({
+        "access_token": token,
+        "role": "customer",
+        "user_id": cust.id,
+        "username": cust.username,
+        "display_name": cust.display_name,
+        "authorization": auth_status,
+        "show_signal_summary": cust.show_signal_summary,
+        "emergency_stop": cust.emergency_stop,
+    })
+
 
 
 @router.post("/reset-data")

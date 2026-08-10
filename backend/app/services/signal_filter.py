@@ -294,13 +294,18 @@ async def filter_signal(
         )
 
     # 1. 意图识别 (如果未在前置步骤执行)
+    #    图片信号经 LLM 高置信度解析后, parsed.raw_text 可能包含 LLM prompt 文本
+    #    (如 "请分析这些图片..."), 其中的 "分析" 等词会误触发意图检测, 需跳过
     if not skip_intent_check and parsed.raw_text:
-        intent, reason = classify_signal_intent(parsed.raw_text)
-        if intent == "noise":
-            return FilterResult("reject", parsed, reject_reason=f"信号为噪音/公告: {reason}")
-        if intent == "analysis":
-            return FilterResult("reject", parsed, reject_reason=f"信号为分析/复盘/假设: {reason}")
-        # 'trade' 和 'unknown' 继续执行后续流程
+        if getattr(parsed, 'has_image', False) and parsed.confidence >= 0.8:
+            logger.debug(f"图片信号已通过 LLM 高置信度验证(confidence={parsed.confidence}), 跳过意图检测")
+        else:
+            intent, reason = classify_signal_intent(parsed.raw_text)
+            if intent == "noise":
+                return FilterResult("reject", parsed, reject_reason=f"信号为噪音/公告: {reason}")
+            if intent == "analysis":
+                return FilterResult("reject", parsed, reject_reason=f"信号为分析/复盘/假设: {reason}")
+            # 'trade' 和 'unknown' 继续执行后续流程
 
     # 黑名单:无符号或无方向 → 拒绝
     if not parsed.symbol:

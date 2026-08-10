@@ -5,6 +5,7 @@ import { useFetch } from "@/lib/useFetch";
 import { useToast } from "@/components/ui/Toast";
 import { wsClient } from "@/api/ws";
 import { Card, CardTitle, Badge, Button, Empty, Input, SectionHeader, MetricCard } from "@/components/ui";
+import { useAccountFilterStore } from "@/stores/accountFilter";
 import { Modal } from "@/components/ui/Modal";
 import { fmtMoney, fmtPct, pnlColor } from "@/lib/utils";
 
@@ -102,8 +103,9 @@ const ActionBtns = React.memo(function ActionBtns({ p, closing, onStop, onClose 
 });
 
 export default function PositionsPage() {
-  const { data, reload } = useFetch(() => API.listPositions(), []);
-  const { data: pendingData, reload: reloadPending } = useFetch(() => API.listPendingOrders("pending"), []);
+  const { accountId } = useAccountFilterStore();
+  const { data, reload } = useFetch(() => API.listPositions(accountId), [accountId]);
+  const { data: pendingData, reload: reloadPending } = useFetch(() => API.listPendingOrders("pending", accountId), [accountId]);
   const { push } = useToast();
   const [closing, setClosing] = useState<number | null>(null);
   const [cancelingPending, setCancelingPending] = useState<number | null>(null);
@@ -169,6 +171,7 @@ export default function PositionsPage() {
       independentList.push(orphan);
     }
 
+    if (groupList.length === 0 && independentList.length === 0 && subs.length > 0) return { groups: [], independent: subs };
     return { groups: groupList, independent: independentList };
   }, [positions]);
 
@@ -273,6 +276,10 @@ export default function PositionsPage() {
         subtitle="实时持仓盈亏 · 手动平仓 · 止损/追踪止损调整"
         icon={Briefcase}
       />
+      {/* multi-api-account-filter */}
+      <div className="flex justify-end">
+      </div>
+
 
       {/* KPI 概览 */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 md:gap-4">

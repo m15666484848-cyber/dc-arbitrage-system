@@ -201,13 +201,18 @@ async def load_exchange(
             ExchangeAccount.id,
         )
     result = await db.execute(stmt)
-    acc = result.scalars().first()
+    scalars = result.scalars()
+    if hasattr(scalars, "first"):
+        acc = scalars.first()
+    else:
+        items = scalars.all() if hasattr(scalars, "all") else list(scalars)
+        acc = items[0] if items else None
     if not acc:
         raise ValueError(f"未配置 {exchange or exchange_account_id} 交易所账号")
     api_key = decrypt_secret(acc.api_key_enc)
     api_secret = decrypt_secret(acc.api_secret_enc)
     passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
-    ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_mode", None))
+    ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_mode", "") or getattr(acc, "account_type", "") or "")
     try:
         await ex.load_markets()
     except Exception as e:
@@ -403,6 +408,52 @@ async def set_leverage(ex, symbol: str, leverage: int) -> None:
     except Exception as e:
         logger.warning(f"设置杠杆失败 {symbol} {leverage}x: {e}")
 
+def build_native_stop_loss_params(exchange: str, position_side: str, stop_price: float) -> dict[str, Any]:
+    """构造交易所原生止损参数。"""
+    ex_name = (exchange or "").lower()
+    side = (position_side or "").lower()
+    if ex_name == "okx":
+        return {
+            "tdMode": "cross",
+            "posSide": side if side in ("long", "short") else "net",
+            "slTriggerPx": str(float(stop_price)),
+            "slOrdPx": "-1",
+            "reduceOnly": True,
+        }
+    if ex_name == "binance":
+        close_side = "SELL" if side == "long" else "BUY"
+        return {
+            "type": "STOP_MARKET",
+            "side": close_side,
+            "stopPrice": stop_price,
+            "reduceOnly": True,
+        }
+    if ex_name == "bybit":
+        return {
+            "triggerPrice": stop_price,
+            "reduceOnly": True,
+        }
+    raise ValueError(f"{exchange} 不支持原生止损")
+
+
+async def place_native_stop_loss_order(
+    ex,
+    exchange: str,
+    symbol: str,
+    position_side: str,
+    amount: float,
+    stop_price: float,
+) -> dict:
+    """提交原生止损单；目前仅 OKX 走实盘提交，其他交易所显式拒绝避免误下单。"""
+    ex_name = (exchange or getattr(ex, "id", "") or "").lower()
+    if ex_name != "okx":
+        raise ValueError(f"{exchange} 暂不支持原生止损实盘提交")
+    params = build_native_stop_loss_params("okx", position_side, stop_price)
+    close_side = "sell" if position_side == "long" else "buy"
+    return await ex.create_order(symbol, "market", close_side, amount, None, params)
+
+
+
 
 async def place_order(
     ex,
@@ -455,7 +506,17 @@ async def place_order(
     # 但净持仓模式(net_mode)传 posSide 会报 51000 Parameter posSide error。
     # 因此先按双向模式传，若交易所明确拒绝，再去掉 posSide 重试一次。
     if position_side and position_side in ("long", "short", "net"):
-        params["posSide"] = position_side
+        if ex_name.lower() == "bybit":
+            # Bybit 使用 positionIdx 区分持仓模式: 0=单向持仓,1=双向多,2=双向空。
+            # 先按双向模式提交；若账户实际为单向模式，会在下方捕获 10001 后去掉该参数重试。
+            if position_side == "long":
+                params["positionIdx"] = 1
+            elif position_side == "short":
+                params["positionIdx"] = 2
+            else:
+                params["positionIdx"] = 0
+        else:
+            params["posSide"] = position_side
 
     async def _create_order(order_params: dict[str, Any] | None = None):
         return await ex.create_order(
@@ -503,6 +564,14 @@ async def place_order(
             fallback_params.pop("posSide", None)
             logger.warning(
                 f"OKX 当前账户可能为净持仓模式,posSide 被拒绝,去掉 posSide 重试: "
+                f"{symbol} {side} {order_type}"
+            )
+            order = await _retry_with_backoff(lambda: _create_order(fallback_params), retries=1)
+        elif ex_name.lower() == "bybit" and ("position idx not match position mode" in msg or "10001" in msg) and "positionIdx" in params:
+            fallback_params = dict(params)
+            fallback_params.pop("positionIdx", None)
+            logger.warning(
+                f"Bybit 当前账户可能为单向持仓模式,positionIdx 被拒绝,去掉 positionIdx 重试: "
                 f"{symbol} {side} {order_type}"
             )
             order = await _retry_with_backoff(lambda: _create_order(fallback_params), retries=1)

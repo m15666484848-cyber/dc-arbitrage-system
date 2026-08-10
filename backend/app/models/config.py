@@ -31,6 +31,7 @@ class ExchangeAccount(Base, TimestampMixin):
     api_key_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
     testnet: Mapped[bool] = mapped_column(Boolean, default=False)
     account_mode: Mapped[str] = mapped_column(String(16), default="live")  # live|testnet|demo
+    account_type: Mapped[str] = mapped_column(String(16), default="")  # Bybit: unified|classic(空=自动)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     last_error: Mapped[str] = mapped_column(Text, default="")

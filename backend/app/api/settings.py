@@ -131,21 +131,30 @@ async def add_exchange_account(
     body_mode = _account_mode(body.exchange, body.testnet, body.account_mode)
     body_testnet = body_mode != "live"
 
-    # 校验 1:未授权多开时,同客户同交易所同环境只能 1 个 API;授权后允许同交易所多 API 并选择默认账号
+    # 校验 1: 同客户同交易所同环境 API 数量限制。
+    # 默认最多 1 个；开启“单交易所多 API”或“多交易所”后,按管理员配置的数量限制。
+    same_exchange_mode_count = 0
     for acc in existing:
         acc_mode = _account_mode(acc.exchange, acc.testnet, getattr(acc, "account_mode", None))
-        if acc.exchange == body.exchange and acc_mode == body_mode and not cust.multi_exchange_allowed:
-            raise HTTPException(400, f"该客户已绑定 {body.exchange} 的 API,请先删除旧 API 再绑定新的")
+        if acc.exchange == body.exchange and acc_mode == body_mode:
+            same_exchange_mode_count += 1
+    same_exchange_limit = 1
+    if cust.single_exchange_multi_api_allowed or cust.multi_exchange_allowed:
+        same_exchange_limit = max(1, int(getattr(cust, "single_exchange_multi_api_limit", 2) or 2))
+    if same_exchange_mode_count >= same_exchange_limit:
+        if same_exchange_limit <= 1:
+            raise HTTPException(400, "same exchange/mode already has an API; enable single-exchange multi-API in admin first")
+        raise HTTPException(400, f"同一交易所/账户模式最多允许绑定 {same_exchange_limit} 个 API,请联系管理员调整允许数量")
 
-    # 校验 2:未授权多开时,只能绑 1 个交易所
+    # Rule 2: without multi-exchange permission, only the already-bound exchange can be used.
     if existing and not cust.multi_exchange_allowed:
-        bound_exchanges = [a.exchange for a in existing]
-        raise HTTPException(
-            400,
-            f"默认每个账号只能绑定 1 个交易所(已绑:{','.join(bound_exchanges)}),多交易所需联系管理员授权",
-        )
+        bound_exchanges = sorted({a.exchange for a in existing})
+        if body.exchange not in bound_exchanges:
+            raise HTTPException(
+                400,
+                f"default account can bind only 1 exchange (bound:{','.join(bound_exchanges)}); enable multi-exchange in admin first",
+            )
 
-    # 校验 3:API Key 跨客户唯一(防止多人共用同一 API Key)
     api_key_hash = _hash_api_key(body.api_key)
     dup = (
         await db.execute(

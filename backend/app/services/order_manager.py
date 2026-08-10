@@ -1547,6 +1547,8 @@ async def process_signal(
 
     exchange_account_id = ex_acc.id
 
+    risk_cfg = await risk_manager.get_risk_config(db, customer_id, exchange)
+
     # 多 API 独立策略:单个 API 指定 strategy_id 时,优先使用 API 级策略覆盖 KOL 跟随策略。
     if getattr(ex_acc, "strategy_id", None):
         api_strategy = (
@@ -3610,6 +3612,9 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
     if not position or position.status != "open":
 
         return {"ok": False, "reason": "持仓不存在或已平仓"}
+
+    if qty is not None and qty <= 0:
+        return {"ok": False, "reason": "平仓数量必须大于 0"}
 
     close_qty = qty if qty and qty > 0 else position.qty
 

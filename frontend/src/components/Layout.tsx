@@ -21,11 +21,13 @@ import {
   ChevronRight,
   Power,
   CalendarDays,
+  FlaskConical,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/auth";
 import { wsClient } from "@/api/ws";
 import { API } from "@/api/client";
 import { cn } from "@/lib/utils";
+import AccountFilter from "@/components/AccountFilter";
 
 interface NavItem {
   to: string;
@@ -49,6 +51,7 @@ const NAV: NavItem[] = [
   { to: "/admin/kols", label: "KOL 管理", icon: Crown, roles: ["admin"] },
   { to: "/admin/signals", label: "信号监控", icon: Radio, roles: ["admin"] },
   { to: "/admin/diagnosis", label: "跟单诊断", icon: ShieldAlert, roles: ["admin"] },
+  { to: "/admin/simulator", label: "模拟测试", icon: FlaskConical, roles: ["admin"] },
   { to: "/admin/settings", label: "系统设置", icon: Cog, roles: ["admin"] },
   { to: "/admin/symbol-notional", label: "分类倍率", icon: Gauge, roles: ["admin"] },
 ];
@@ -314,6 +317,9 @@ export function Layout({ children }: { children: ReactNode }) {
             </div>
           </div>
           <div className="flex items-center gap-2 md:gap-3 shrink-0">
+            {/* API账户切换 - 仅多API客户可见 */}
+            {user?.role === "customer" && <AccountFilter />}
+
             {/* 实时连接状态 - 右上角常驻显示 */}
             <div className={cn(
               "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-all",
@@ -411,7 +417,7 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto p-4 md:p-6 pb-24 md:pb-6">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6 pb-36 md:pb-6 scroll-pb-36 md:scroll-pb-6">
           <div className="animate-fadeIn">{children}</div>
         </main>
 

@@ -259,55 +259,60 @@ async def calculate_advanced_metrics(db: AsyncSession, customer_id: int) -> dict
     }
 
 
-async def dashboard_stats(db: AsyncSession, customer_id: int) -> dict:
+async def dashboard_stats(db: AsyncSession, customer_id: int, exchange_account_id: int | None = None) -> dict:
     """仪表盘关键指标。
 
     胜率和交易次数按 Position 统计(每个子仓位从开到平算 1 次),避免分批止盈重复计数。
     利润按 Trade 统计(按成交时间累加,准确反映当日/累计盈亏)。
     """
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    # 持仓数:只算 master 仓位
+    account_filter_pos = Position.exchange_account_id == exchange_account_id if exchange_account_id else True
+    account_filter_trade = Trade.exchange_account_id == exchange_account_id if exchange_account_id else True
+    # Open positions: child positions only, same as /positions.
     open_positions = (
         await db.execute(
             select(func.count(Position.id)).where(
                 Position.customer_id == customer_id,
                 Position.status == "open",
-                Position.parent_id.is_(None),
+                Position.parent_id.is_not(None),
+                account_filter_pos,
             )
         )
     ).scalar_one()
-    # 利润:按 Trade 统计(按成交时间)
     today_pnl = (
         await db.execute(
             select(func.coalesce(func.sum(Trade.realized_pnl), 0.0)).where(
                 Trade.customer_id == customer_id,
                 Trade.is_close.is_(True),
                 Trade.executed_at >= today,
+                account_filter_trade,
             )
         )
     ).scalar_one()
     total_pnl = (
         await db.execute(
             select(func.coalesce(func.sum(Trade.realized_pnl), 0.0)).where(
-                Trade.customer_id == customer_id, Trade.is_close.is_(True)
+                Trade.customer_id == customer_id,
+                Trade.is_close.is_(True),
+                account_filter_trade,
             )
         )
     ).scalar_one()
-    # 总手续费(开仓+平仓)
     total_fee = (
         await db.execute(
             select(func.coalesce(func.sum(Trade.fee), 0.0)).where(
-                Trade.customer_id == customer_id
+                Trade.customer_id == customer_id,
+                account_filter_trade,
             )
         )
     ).scalar_one()
-    # 交易数和胜率:按 Position 统计(已平仓的子仓位,避免分批止盈重复计数)
     total_trades = (
         await db.execute(
             select(func.count(Position.id)).where(
                 Position.customer_id == customer_id,
                 Position.status == "closed",
-                Position.parent_id.is_not(None),  # 只算子仓位
+                Position.parent_id.is_not(None),
+                account_filter_pos,
             )
         )
     ).scalar_one()
@@ -318,6 +323,7 @@ async def dashboard_stats(db: AsyncSession, customer_id: int) -> dict:
                 Position.status == "closed",
                 Position.parent_id.is_not(None),
                 Position.realized_pnl > 0,
+                account_filter_pos,
             )
         )
     ).scalar_one()

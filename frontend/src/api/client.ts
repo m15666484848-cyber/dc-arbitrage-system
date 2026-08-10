@@ -38,6 +38,7 @@ export const API = {
   deleteCustomer: (id: number) => api("delete", `/admin/customers/${id}`),
   // 邀请码 / 邀请链接
   getInviteLink: (cid: number) => api("get", `/admin/customers/${cid}/invite-link`),
+  loginAsCustomer: (cid: number) => api("post", `/admin/customers/${cid}/login-as`),
   // 设置客户类型(normal=普通客户, internal=内部用户)
   setCustomerType: (cid: number, customer_type: string) =>
     api("put", `/admin/customers/${cid}/type`, { customer_type }),
@@ -72,21 +73,22 @@ export const API = {
   updateSystemConfig: (data: any) => api("put", "/admin/system-config", data),
   testLlm: (llm_type: "text" | "vision" = "text") =>
     api("post", `/admin/system-config/test-llm?llm_type=${llm_type}`),
+  simulateKolSignal: (data: any) => api("post", "/admin/simulate-kol-signal", data),
   // trading
   listKols: () => api("get", "/kols"),
   setFollows: (kol_settings: { kol_id: number; strategy_id: number | null; notional_usdt: number | null }[]) =>
     api("post", "/kols/follow", { kol_settings: kol_settings }),
   resumeKolFollow: (kol_id: number) => api("post", `/kols/${kol_id}/resume`),
-  listPositions: (cid?: number) => api("get", "/positions", undefined),
+  listPositions: (exchange_account_id?: number | null, cid?: number) => api("get", "/positions", undefined, { exchange_account_id: exchange_account_id || undefined, customer_id: cid }),
   closePosition: (position_id: number, qty?: number) =>
     api("post", "/positions/close", { position_id, qty }),
   updateStop: (data: any) => api("put", "/positions/stop", data),
-  listOrders: (cid?: number, status?: string) => api("get", "/orders", undefined),
+  listOrders: (exchange_account_id?: number | null, cid?: number, status?: string) => api("get", "/orders", undefined, { exchange_account_id: exchange_account_id || undefined, customer_id: cid, status }),
   deleteOrder: (order_id: number) => api("post", "/orders/delete", { order_id }),
   manualOrder: (data: any) => api("post", "/orders/manual", data),
-  listTrades: (cid?: number) => api("get", "/trades", undefined),
-  dailyStats: (month: string, cid?: number) => api("get", "/daily-stats", undefined, { month, customer_id: cid }),
-  listPendingOrders: (status: string = "pending") => api("get", "/pending-orders", undefined, { status }),
+  listTrades: (exchange_account_id?: number | null, cid?: number) => api("get", "/trades", undefined, { exchange_account_id: exchange_account_id || undefined, customer_id: cid }),
+  dailyStats: (month: string, exchange_account_id?: number | null, cid?: number) => api("get", "/daily-stats", undefined, { month, exchange_account_id: exchange_account_id || undefined, customer_id: cid }),
+  listPendingOrders: (status: string = "pending", exchange_account_id?: number | null) => api("get", "/pending-orders", undefined, { status, exchange_account_id: exchange_account_id || undefined }),
   cancelPendingOrder: (pending_id: number, reason: string = "用户手动取消") =>
     api("post", "/pending-orders/cancel", { pending_id, reason }),
   // symbol multipliers (customer)
@@ -107,7 +109,7 @@ export const API = {
   updateStrategy: (id: number, data: any) => api("put", `/strategies/${id}`, data),
   deleteStrategy: (id: number) => api("delete", `/strategies/${id}`),
   // analytics
-  dashboard: () => api("get", "/dashboard"),
+  dashboard: (exchange_account_id?: number | null) => api("get", "/dashboard", undefined, { exchange_account_id: exchange_account_id || undefined }),
   kolRanking: (days = 30) => api("get", `/kol-ranking?days=${days}`),
   equityCurve: (days = 30) => api("get", `/equity-curve?days=${days}`),
   getEquityHistory: (days = 90) => api("get", `/equity-curve?days=${days}`),

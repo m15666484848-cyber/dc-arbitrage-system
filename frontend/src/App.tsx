@@ -22,6 +22,7 @@ import AdminSettings from "@/pages/admin/Settings";
 import SymbolNotionalPage from "@/pages/admin/SymbolNotional";
 import ProfitStatsPage from "@/pages/admin/ProfitStats";
 import AdminDiagnosis from "@/pages/admin/Diagnosis";
+import AdminSimulator from "@/pages/admin/Simulator";
 
 function Protected({
   children,
@@ -91,6 +92,7 @@ export default function App() {
             <Route path="/admin/kols" element={<Protected role="admin"><AdminKols /></Protected>} />
             <Route path="/admin/signals" element={<Protected role="admin"><AdminSignals /></Protected>} />
             <Route path="/admin/diagnosis" element={<Protected role="admin"><AdminDiagnosis /></Protected>} />
+            <Route path="/admin/simulator" element={<Protected role="admin"><AdminSimulator /></Protected>} />
             <Route path="/admin/settings" element={<Protected role="admin"><AdminSettings /></Protected>} />
             <Route path="/admin/symbol-notional" element={<Protected role="admin"><SymbolNotionalPage /></Protected>} />
             <Route

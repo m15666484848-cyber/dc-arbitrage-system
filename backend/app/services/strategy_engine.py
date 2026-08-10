@@ -208,10 +208,19 @@ def compute_decision(
         scoped_state = _get_scoped_martingale_state(strategy, kol_id, symbol)
 
         # 马丁暂时只支持 KOL 维度下的 BTC/ETH。其它币不参与马丁,按基础下单量执行。
+        # 未传 kol_id/symbol 的旧调用继续使用策略级状态,避免测试和手动场景退化。
         if scoped_state is None:
-            qty = base_qty
+            if kol_id is None and symbol is None:
+                scoped_state = {
+                    "last_result": strategy.last_result,
+                    "last_qty": strategy.last_qty,
+                    "round": strategy.martingale_round,
+                    "symbol": "strategy",
+                }
+            else:
+                qty = base_qty
 
-        elif scoped_state["round"] >= max_rounds:
+        if scoped_state is not None and scoped_state["round"] >= max_rounds:
 
             return StrategyDecision(
                 allow=False,
@@ -220,7 +229,7 @@ def compute_decision(
                 params=p,
             )
 
-        elif scoped_state["last_result"] == "loss" and scoped_state["last_qty"] > 0:
+        elif scoped_state is not None and scoped_state["last_result"] == "loss" and scoped_state["last_qty"] > 0:
 
             qty = scoped_state["last_qty"] * multiplier
 

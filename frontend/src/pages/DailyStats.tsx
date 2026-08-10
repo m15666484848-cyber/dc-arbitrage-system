@@ -3,6 +3,7 @@ import { CalendarDays, Activity, TrendingUp, TrendingDown, Wallet, ListChecks, T
 import { API } from "@/api/client";
 import { useFetch } from "@/lib/useFetch";
 import { Badge, Card, CardTitle, Empty, MetricCard, SectionHeader } from "@/components/ui";
+import { useAccountFilterStore } from "@/stores/accountFilter";
 import { cn, fmtMoney, pnlColor } from "@/lib/utils";
 
 type SymbolStat = {
@@ -63,7 +64,8 @@ function toneByPnl(pnl: number) {
 
 export default function DailyStatsPage() {
   const [month, setMonth] = useState(currentMonth());
-  const { data, reload } = useFetch(() => API.dailyStats(month), [month]);
+  const { accountId } = useAccountFilterStore();
+  const { data, reload } = useFetch(() => API.dailyStats(month, accountId), [month, accountId]);
   const payload: any = data || {};
   const stats: DayStat[] = payload.days || [];
   const summary: any = payload.summary || {};
@@ -112,7 +114,7 @@ export default function DailyStatsPage() {
         subtitle="按北京时间自然日统计：每日 00:00 到次日 00:00"
         icon={CalendarDays}
         action={
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button className="btn-ghost px-3 py-2" onClick={() => setMonth(monthShift(month, -1))}>上月</button>
             <input
               type="month"
