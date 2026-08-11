@@ -17,6 +17,7 @@ import {
   X,
   Cog,
   Gauge,
+  BarChart3,
   TrendingUp,
   ChevronRight,
   Power,
@@ -39,6 +40,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { to: "/dashboard", label: "仪表盘", icon: LayoutDashboard, roles: ["customer"] },
+  { to: "/data-charts", label: "数据图表", icon: BarChart3, roles: ["customer"] },
   { to: "/kols", label: "KOL 排行", icon: Crown, roles: ["customer"] },
   { to: "/signals", label: "信号汇总", icon: Radio, roles: ["customer", "admin"], permission: "show_signal_summary" },
   { to: "/positions", label: "持仓管理", icon: Wallet, roles: ["customer"] },

@@ -8,7 +8,9 @@ import { API } from "@/api/client";
 import LoginPage from "@/pages/Login";
 import RegisterPage from "@/pages/Register";
 import Dashboard from "@/pages/Dashboard";
+import DataChartsPage from "@/pages/DataCharts";
 import KolsPage from "@/pages/Kols";
+import KolDetailPage from "@/pages/KolDetail";
 import SignalsPage from "@/pages/Signals";
 import PositionsPage from "@/pages/Positions";
 import TradesPage from "@/pages/Trades";
@@ -80,7 +82,9 @@ export default function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/dashboard" element={<Protected><Dashboard /></Protected>} />
+            <Route path="/data-charts" element={<Protected role="customer"><DataChartsPage /></Protected>} />
             <Route path="/kols" element={<Protected><KolsPage /></Protected>} />
+            <Route path="/kols/:id" element={<Protected><KolDetailPage /></Protected>} />
             <Route path="/signals" element={<Protected requireSignalSummary><SignalsPage /></Protected>} />
             <Route path="/positions" element={<Protected><PositionsPage /></Protected>} />
             <Route path="/trades" element={<Protected><TradesPage /></Protected>} />

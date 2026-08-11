@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { Crown, Check, Star, Settings2, Trophy, TrendingUp, TrendingDown, Radio } from "lucide-react";
 import { API } from "@/api/client";
 import { useFetch } from "@/lib/useFetch";
@@ -280,6 +281,15 @@ export default function KolsPage() {
 
                       {/* 操作 */}
                       <td className="py-3 px-2 text-center">
+                        <div className="flex items-center justify-center gap-1">
+                          <Link
+                            to={`/kols/${kol.id}`}
+                            onClick={(e) => e.stopPropagation()}
+                            className="px-2 h-7 rounded-lg bg-bg-hover hover:bg-border-soft text-[11px] text-text-secondary inline-flex items-center justify-center"
+                            title="查看 KOL 详情"
+                          >
+                            详情
+                          </Link>
                         {active && (
                           <button
                             onClick={(e) => { e.stopPropagation(); openDetail(kol); }}
@@ -289,6 +299,7 @@ export default function KolsPage() {
                             <Settings2 size={13} className="text-accent-glow" />
                           </button>
                         )}
+                        </div>
                       </td>
                     </tr>
                   );
