@@ -72,6 +72,80 @@ _forced_exchange_account_id: contextvars.ContextVar[int | None] = contextvars.Co
     "forced_exchange_account_id", default=None
 )
 
+
+def _fmt_value(value: Any, digits: int = 8) -> str:
+    """通知里使用的数值格式:保留必要精度,去掉多余 0。"""
+    if value is None or value == "":
+        return "未提供"
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(n) >= 100:
+        text = f"{n:.4f}"
+    else:
+        text = f"{n:.{digits}f}"
+    return text.rstrip("0").rstrip(".") or "0"
+
+
+def _pct_diff(a: float | None, b: float | None) -> str:
+    """返回两个价格的百分比偏差。"""
+    try:
+        if not a or not b:
+            return "无法计算"
+        return f"{abs(float(a) - float(b)) / float(b) * 100:.4f}%"
+    except Exception:
+        return "无法计算"
+
+
+def _failure_hint(err: Any) -> str:
+    """把交易所/系统错误转换成用户能看懂的依据说明。"""
+    msg = str(err or "")
+    lower = msg.lower()
+    if "insufficient" in lower or "余额不足" in msg or "margin" in lower:
+        return "余额或保证金不足，交易所拒绝执行"
+    if "position" in lower and ("not exist" in lower or "no" in lower) or "没仓位" in msg or "无持仓" in msg:
+        return "交易所侧未找到可平仓仓位，可能已被手动平掉或仓位方向不匹配"
+    if "order does not exist" in lower or "51603" in msg:
+        return "交易所返回订单不存在，系统已按未成交处理，避免生成幽灵持仓"
+    if "symbol" in lower or "交易对" in msg:
+        return "交易对不存在或交易所不支持该合约"
+    if "timeout" in lower or "timed out" in lower:
+        return "交易所接口超时，未确认成交"
+    return "交易所或系统返回错误，未确认成功前不会当作已成交"
+
+
+def _order_success_lines(
+    *,
+    action: str,
+    order: dict | None,
+    requested_entry: float | None = None,
+    market_price: float | None = None,
+    trigger_price: float | None = None,
+    notional_usdt: float | None = None,
+    account_id: int | None = None,
+    basis: str = "",
+) -> str:
+    """生成入场/挂单触发成功通知的关键执行字段。"""
+    order = order or {}
+    lines = [
+        f"执行结果: {action}",
+        f"API账户: #{account_id or order.get('exchange_account_id') or '未知'}",
+        f"本地订单ID: {order.get('id') or '未记录'}",
+        f"交易所订单ID: {order.get('exchange_order_id') or '未返回'}",
+        f"计划入场价: {_fmt_value(requested_entry)}",
+        f"触发市价: {_fmt_value(trigger_price)}" if trigger_price is not None else "",
+        f"下单参考市价: {_fmt_value(market_price)}" if market_price is not None else "",
+        f"实际成交价: {_fmt_value(order.get('filled_price'))}",
+        f"实际成交数量: {_fmt_value(order.get('filled_qty'))}",
+        f"名义价值: {_fmt_value(notional_usdt, 4)} USDT" if notional_usdt is not None else "",
+        f"成功依据: 交易所订单已返回成交数量和成交价，系统已创建持仓记录",
+    ]
+    if basis:
+        lines.append(f"执行依据: {basis}")
+    return "\n".join(line for line in lines if line)
+
+
 # P3-4: 策略配置缓存(进程级,300秒TTL),避免策略修改后不生效直到重启
 
 _strategy_config_cache: dict[tuple[int, int], tuple[Any, float | None, float]] = {}
@@ -402,6 +476,23 @@ async def _process_exit_signal(
 
         )
 
+        await notify(
+            "error",
+            "平仓未执行",
+            f"KOL: {kol_name}\n"
+            f"API账户: #{ex_acc.id}\n"
+            f"交易所: {exchange.upper()} {'测试网' if testnet else '实盘'}\n"
+            f"品种: {parsed.symbol or '全部'}\n"
+            f"方向: {parsed.side or '全部方向'}\n"
+            f"执行结果: 未平仓\n"
+            f"失败原因: 未找到该 KOL 对应的未平子仓位\n"
+            f"判断依据: 只匹配 customer={customer_id}, kol_id={signal.kol_id}, "
+            f"exchange={exchange}, symbol={parsed.symbol or '不限'}, side={parsed.side or '不限'} 的 open 子仓位；"
+            f"为避免误伤，不会自动平其他 KOL 或其他账号仓位",
+            customer_id,
+            source_text=signal.raw_text,
+        )
+
         return {"ok": False, "reason": "无对应持仓"}
 
     # 执行平仓
@@ -409,6 +500,10 @@ async def _process_exit_signal(
     closed_positions = []
 
     total_pnl = 0.0
+
+    close_results: list[dict] = []
+
+    failed_results: list[dict] = []
 
     for pos in positions:
 
@@ -422,15 +517,52 @@ async def _process_exit_signal(
 
                 total_pnl += result.get("pnl", 0.0)
 
+                close_results.append({
+                    "position_id": pos.id,
+                    "symbol": pos.symbol,
+                    "side": pos.side,
+                    "filled_price": result.get("filled_price"),
+                    "filled_qty": result.get("filled_qty"),
+                    "order_id": result.get("order_id"),
+                    "exchange_order_id": result.get("exchange_order_id"),
+                    "pnl": result.get("pnl", 0.0),
+                    "status": result.get("status"),
+                })
+            else:
+                failed_results.append({"position_id": pos.id, "reason": result.get("reason", "未知原因")})
+
         except Exception as e:
 
             logger.warning(f"平仓失败 position={pos.id}: {e}")
+
+            failed_results.append({"position_id": pos.id, "reason": str(e), "hint": _failure_hint(e)})
 
             await db.rollback()
 
     if not closed_positions:
 
         await _log_signal_status(db, signal, "rejected", "平仓失败", customer_id)
+
+        failed_text = "\n".join(
+            f"  仓位#{x.get('position_id')}: {x.get('reason')} ({x.get('hint') or _failure_hint(x.get('reason'))})"
+            for x in failed_results
+        ) or "  未返回具体仓位失败明细"
+
+        await notify(
+            "error",
+            "平仓失败",
+            f"KOL: {kol_name}\n"
+            f"API账户: #{ex_acc.id}\n"
+            f"品种: {parsed.symbol or '全部'}\n"
+            f"方向: {parsed.side or '全部方向'}\n"
+            f"匹配到仓位数: {len(positions)}\n"
+            f"成功平仓数: 0\n"
+            f"执行结果: 未确认任何仓位平仓成功\n"
+            f"失败明细:\n{failed_text}\n"
+            f"判断依据: 只有交易所返回成交数量和成交价后,系统才会写入平仓成交并更新持仓",
+            customer_id,
+            source_text=signal.raw_text,
+        )
 
         return {"ok": False, "reason": "平仓失败"}
 
@@ -448,11 +580,32 @@ async def _process_exit_signal(
 
     # 通知
 
+    detail_text = "\n".join(
+        f"  仓位#{x['position_id']} {x['symbol']} {x['side']} "
+        f"价:{_fmt_value(x['filled_price'])} 数量:{_fmt_value(x['filled_qty'])} "
+        f"净盈亏:{float(x['pnl'] or 0):.2f} 本地单:{x.get('order_id') or '无'} 交易所单:{x.get('exchange_order_id') or '无'}"
+        for x in close_results
+    )
+
+    failed_text = ""
+    if failed_results:
+        failed_text = "\n失败明细:\n" + "\n".join(
+            f"  仓位#{x.get('position_id')}: {x.get('reason')}"
+            for x in failed_results
+        )
+
     await notify(
 
         "tp_sl", "平仓成功",
 
-        f"KOL {kol_name} 平仓信号\n品种: {parsed.symbol or '全部'}\n方向: {parsed.side or '全部'}\n平仓数: {len(closed_positions)}\n净盈亏: {total_pnl:.2f} USDT(已扣手续费)",
+        f"KOL: {kol_name}\n"
+        f"API账户: #{ex_acc.id}\n"
+        f"品种: {parsed.symbol or '全部'}\n方向: {parsed.side or '全部'}\n"
+        f"匹配仓位数: {len(positions)}\n成功平仓数: {len(closed_positions)}\n"
+        f"净盈亏: {total_pnl:.2f} USDT(已扣手续费)\n"
+        f"平仓明细:\n{detail_text}"
+        f"{failed_text}\n"
+        f"成功依据: 每个成功仓位均已拿到交易所成交价/成交数量,并写入平仓 Trade",
 
         customer_id,
 
@@ -626,7 +779,7 @@ async def _process_update_signal(
 
     strategy, _ = await _get_cached_strategy_for_follow(db, customer_id, signal.kol_id)
 
-    decision = strategy_engine.compute_decision(strategy, kol_id=signal.kol_id, symbol=parsed.symbol)
+    decision = strategy_engine.compute_decision(strategy)
 
     defaults = strategy_engine.get_strategy_defaults(decision.params or {})
 
@@ -2163,6 +2316,14 @@ async def process_signal(
 
                else "失败")
 
+            + (
+                f" (成交价:{_fmt_value((r.get('result') or {}).get('filled_price'))}, "
+                f"数量:{_fmt_value((r.get('result') or {}).get('filled_qty'))}, "
+                f"交易所单:{(r.get('result') or {}).get('exchange_order_id') or '无'})"
+                if r.get("type") == "filled" and r.get("ok")
+                else f" (原因:{r.get('reason') or r.get('error') or '等待触发'})"
+            )
+
             for r in _batch_results
 
         ])
@@ -2387,7 +2548,23 @@ async def process_signal(
 
         await _log_signal_status(db, signal, "rejected", f"下单异常: {e}", customer_id, fr.dedup_hash)
 
-        await notify("error", "下单失败", f"客户{customer_id} {parsed.symbol} 下单异常: {e}", customer_id, source_text=signal.raw_text, kol_name=kol_name)
+        await notify(
+            "error",
+            "市价进场失败",
+            f"KOL: {kol_name}\n"
+            f"API账户: #{exchange_account_id}\n"
+            f"品种: {parsed.symbol}\n"
+            f"方向: {parsed.side}\n"
+            f"计划入场价: {_fmt_value(parsed.entry_price)}\n"
+            f"下单参考市价: {_fmt_value(market_price)}\n"
+            f"名义价值: {_fmt_value(decision.notional_usdt, 4)} USDT\n"
+            f"执行结果: 未创建持仓\n"
+            f"失败原因: {e}\n"
+            f"判断依据: {_failure_hint(e)}",
+            customer_id,
+            source_text=signal.raw_text,
+            kol_name=kol_name,
+        )
 
         return {"ok": False, "reason": f"下单异常: {e}"}
 
@@ -2417,19 +2594,15 @@ async def process_signal(
 
     await notify(
 
-        "order", "跟单下单",
+        "order", "市价进场成功",
 
         f"KOL: {kol_name}\n品种: {parsed.symbol}\n方向: {side_cn}\n"
-
+        f"{_order_success_lines(action='市价进场成功', order=result.get('order'), requested_entry=parsed.entry_price, market_price=market_price, notional_usdt=decision.notional_usdt, account_id=result.get('exchange_account_id') or exchange_account_id, basis='入场价接近市价，未创建待触发单，直接按市价单执行')}\n"
         f"入场: {parsed.entry_price}\n"
-
+        f"杠杆: {parsed.leverage}x",
         f"止盈:\n{tp_str}\n止损: {sl_str}\n"
 
         f"杠杆: {parsed.leverage}x\n名义价值: {decision.notional_usdt} USDT",
-
-        customer_id,
-
-        source_text=signal.raw_text,
 
     )
 
@@ -3113,6 +3286,18 @@ async def _place_entry(
 
                 "order": _order_dict(order, kol_id),
 
+                "exchange_order_id": order.exchange_order_id,
+
+                "filled_qty": filled_qty,
+
+                "filled_price": real_entry,
+
+                "requested_entry_price": entry_price,
+
+                "exchange_account_id": exchange_account_id,
+
+                "entry_fee": entry_fee,
+
             }
 
         else:
@@ -3347,6 +3532,18 @@ async def _place_entry(
 
                 "order": _order_dict(order, kol_id),
 
+                "exchange_order_id": order.exchange_order_id,
+
+                "filled_qty": filled_qty,
+
+                "filled_price": sub_entry,
+
+                "requested_entry_price": entry_price,
+
+                "exchange_account_id": exchange_account_id,
+
+                "entry_fee": entry_fee,
+
             }
 
     finally:
@@ -3578,6 +3775,8 @@ def _order_dict(order: Order, kol_id: int | None) -> dict:
         "status": order.status,
 
         "filled_qty": order.filled_qty,
+        "exchange_order_id": order.exchange_order_id,
+        "filled_at": order.filled_at.isoformat() if order.filled_at else None,
 
         "filled_price": order.filled_price,
 
@@ -4059,13 +4258,16 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             "tp_sl", "平仓成交",
 
-            f"品种: {position.symbol}\n方向: {position.side}\n平仓价: {fill_price}\n数量: {filled}\n"
+            f"品种: {position.symbol}\n方向: {position.side}\n"
+            f"API账户: #{position.exchange_account_id or '未知'}\n"
+            f"仓位ID: {position.id}\n本地平仓订单ID: {order.id}\n交易所订单ID: {order.exchange_order_id or '未返回'}\n"
+            f"入场价: {_fmt_value(position.entry_price)}\n实际平仓价: {_fmt_value(fill_price)}\n实际平仓数量: {_fmt_value(filled)}\n"
 
-            f"毛盈亏: {gross_pnl:.2f} USDT\n开仓手续费: {opening_fee_portion:.4f} USDT\n平仓手续费: {close_fee:.4f} USDT\n"
+            f"净盈亏: {pnl:.2f} USDT\n"
+            f"平仓后状态: {'已全平' if position.status == 'closed' else '部分平仓,剩余数量 ' + _fmt_value(position.qty)}\n"
+            f"成功依据: 交易所平仓单已返回成交数量和成交均价,系统已写入平仓 Trade 并更新持仓状态",
 
             f"净盈亏: {pnl:.2f} USDT",
-
-            position.customer_id,
 
             source_text=_pos_src,
 
@@ -4073,7 +4275,19 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
         )
 
-        return {"ok": True, "pnl": pnl, "gross_pnl": gross_pnl, "close_fee": close_fee, "opening_fee": opening_fee_portion, "status": position.status}
+        return {
+            "ok": True,
+            "pnl": pnl,
+            "gross_pnl": gross_pnl,
+            "close_fee": close_fee,
+            "opening_fee": opening_fee_portion,
+            "status": position.status,
+            "filled_qty": filled,
+            "filled_price": fill_price,
+            "order_id": order.id,
+            "exchange_order_id": order.exchange_order_id,
+            "remaining_qty": position.qty,
+        }
 
     except Exception as e:
 
@@ -4089,7 +4303,15 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
                 "error", "平仓失败",
 
-                f"品种: {position.symbol}\n方向: {position.side}\n仓位ID: {position.id}\n平仓数量: {close_qty}\n失败原因: {e}",
+                f"品种: {position.symbol}\n方向: {position.side}\n"
+                f"API账户: #{position.exchange_account_id or '未知'}\n"
+                f"仓位ID: {position.id}\n"
+                f"入场价: {_fmt_value(position.entry_price)}\n"
+                f"系统剩余数量: {_fmt_value(position.qty)}\n"
+                f"本次请求平仓数量: {_fmt_value(close_qty)}\n"
+                f"执行结果: 未确认平仓成功,系统不会改成已平仓\n"
+                f"失败原因: {e}\n"
+                f"判断依据: {_failure_hint(e)}",
 
                 position.customer_id,
 
@@ -4684,4 +4906,3 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
             )
 
         return result
-

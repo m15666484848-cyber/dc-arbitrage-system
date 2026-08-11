@@ -138,6 +138,7 @@ class EquitySnapshot(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    exchange_account_id: Mapped[int | None] = mapped_column(ForeignKey("exchange_accounts.id", ondelete="SET NULL"), nullable=True, index=True)
     exchange: Mapped[str] = mapped_column(String(32), index=True)
     equity: Mapped[float] = mapped_column(Float)  # 账户权益(USDT)
     balance: Mapped[float] = mapped_column(Float)  # 余额

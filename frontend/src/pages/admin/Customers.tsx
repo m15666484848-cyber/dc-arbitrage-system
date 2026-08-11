@@ -26,6 +26,8 @@ export default function AdminCustomers() {
   const [pwdCid, setPwdCid] = useState<number | null>(null);
   const [deleteCid, setDeleteCid] = useState<number | null>(null);
   const [deleteName, setDeleteName] = useState("");
+  const [deleteUsername, setDeleteUsername] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState("");
   const [pwdForm, setPwdForm] = useState({ new_password: "" });
   // 标签/备注编辑
   const [noteCid, setNoteCid] = useState<number | null>(null);
@@ -376,14 +378,20 @@ export default function AdminCustomers() {
 
   const confirmDelete = async () => {
     if (!deleteCid) return;
+    if (deleteConfirm.trim() !== deleteUsername) {
+      push("error", `确认文字不匹配,请输入用户名: ${deleteUsername}`);
+      return;
+    }
     try {
-      await API.deleteCustomer(deleteCid);
+      await API.deleteCustomer(deleteCid, deleteConfirm.trim());
       push("success", `客户 ${deleteName} 已删除`);
       setDeleteCid(null);
       setDeleteName("");
+      setDeleteUsername("");
+      setDeleteConfirm("");
       reload();
     } catch (e: any) {
-      push("error", e?.response?.data?.detail || "删除失败");
+      push("error", e?.response?.data?.detail || e?.response?.data?.message || "删除失败");
     }
   };
 
@@ -599,7 +607,16 @@ export default function AdminCustomers() {
                         <button title="清除该客户数据" className="action-icon text-warn" onClick={() => openResetCust(c)}>
                           <Eraser size={14} />
                         </button>
-                        <button title="删除" className="action-icon action-icon-danger" onClick={() => { setDeleteCid(c.id); setDeleteName(c.display_name || c.username); }}>
+                        <button
+                          title="删除客户"
+                          className="action-icon action-icon-danger"
+                          onClick={() => {
+                            setDeleteCid(c.id);
+                            setDeleteName(c.display_name || c.username);
+                            setDeleteUsername(c.username);
+                            setDeleteConfirm("");
+                          }}
+                        >
                           <Trash2 size={14} />
                         </button>
                       </div>
@@ -744,7 +761,16 @@ export default function AdminCustomers() {
                     <button title="清除该客户数据" className="action-icon text-warn" onClick={() => openResetCust(c)}>
                       <Eraser size={15} />
                     </button>
-                    <button title="删除" className="action-icon action-icon-danger" onClick={() => { setDeleteCid(c.id); setDeleteName(c.display_name || c.username); }}>
+                    <button
+                      title="删除客户"
+                      className="action-icon action-icon-danger"
+                      onClick={() => {
+                        setDeleteCid(c.id);
+                        setDeleteName(c.display_name || c.username);
+                        setDeleteUsername(c.username);
+                        setDeleteConfirm("");
+                      }}
+                    >
                       <Trash2 size={15} />
                     </button>
                   </div>
@@ -1076,18 +1102,50 @@ export default function AdminCustomers() {
       </Modal>
 
       {/* 删除客户确认 Modal */}
-      <Modal open={deleteCid !== null} onClose={() => { setDeleteCid(null); setDeleteName(""); }} title="确认删除客户">
+      <Modal
+        open={deleteCid !== null}
+        onClose={() => { setDeleteCid(null); setDeleteName(""); setDeleteUsername(""); setDeleteConfirm(""); }}
+        title="危险操作：删除客户"
+      >
         <div className="space-y-4">
           <div className="text-sm text-slate-300 p-4 glass-soft rounded-lg border border-loss/20">
-            确定要删除客户 <span className="text-loss font-bold">{deleteName}</span> (ID: {deleteCid}) 吗？
-            <div className="mt-2 text-xs text-slate-400">
-              此操作不可撤销，将级联删除该客户的所有数据：<br />
-              授权记录、策略配置、持仓、订单、交易记录、交易所账号、告警配置等。
+            <div className="font-bold text-loss mb-2 flex items-center gap-1.5">
+              <Trash2 size={15} /> 删除后不可恢复，请务必确认没有选错客户
+            </div>
+            <div>
+              即将删除客户 <span className="text-loss font-bold">{deleteName}</span>，
+              用户名 <span className="font-mono text-slate-100">{deleteUsername}</span>，
+              ID: {deleteCid}
+            </div>
+            <div className="mt-2 text-xs text-slate-400 leading-relaxed">
+              此操作会级联删除该客户的所有数据，包括：授权记录、策略配置、持仓、订单、交易记录、交易所账号、告警配置等。
             </div>
           </div>
+          <Field label={`请输入用户名 ${deleteUsername} 以确认删除`}>
+            <Input
+              value={deleteConfirm}
+              onChange={(e) => setDeleteConfirm(e.target.value)}
+              placeholder={deleteUsername}
+              autoFocus
+            />
+          </Field>
+          <div className="text-xs text-slate-500">
+            必须完整输入 <code className="text-loss font-mono">{deleteUsername}</code>，否则无法删除。
+          </div>
           <div className="flex gap-2">
-            <Button variant="ghost" className="flex-1" onClick={() => { setDeleteCid(null); setDeleteName(""); }}>取消</Button>
-            <Button variant="danger" className="flex-1" onClick={confirmDelete}>
+            <Button
+              variant="ghost"
+              className="flex-1"
+              onClick={() => { setDeleteCid(null); setDeleteName(""); setDeleteUsername(""); setDeleteConfirm(""); }}
+            >
+              取消
+            </Button>
+            <Button
+              variant="danger"
+              className="flex-1"
+              onClick={confirmDelete}
+              disabled={deleteConfirm.trim() !== deleteUsername}
+            >
               <Trash2 size={14} /> 确认删除
             </Button>
           </div>

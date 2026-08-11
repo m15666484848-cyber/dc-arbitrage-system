@@ -257,6 +257,9 @@ HOLDING_INDICATORS = [
     r"继续持有",
     r"继续拿(?:住|着)",
     r"拿着(?:就行|别动|不动)?",
+    r"(?:目前|当前|现在|现|已经|已).{0,12}(?:持有|持仓|拿着|保留).{0,30}(?:多单|空单)",
+    r"(?:持有|持仓|拿着|保留).{0,20}(?:[一二两三四五六七八九十\d]+)?\s*(?:个|笔|单|批)?\s*(?:多单|空单)",
+    r"(?:多单|空单).{0,20}(?:持有|持仓|拿着|保留|还在)",
     r"持仓(?:没退|未退|还在|不动|别动|继续)",
     r"持仓是值得的",
     r"值得持有",
@@ -434,6 +437,8 @@ UPDATE_VERBS = r"(?:改为|改成|改到|调为|调到|调成|调整为|修改�
 UPDATE_KEYWORDS = [
     rf"修改\s*止盈", rf"调整\s*止盈", rf"止盈\s*{UPDATE_VERBS}",
     rf"修改\s*止损", rf"调整\s*止损", rf"止损\s*{UPDATE_VERBS}",
+    rf"(?:止损位|止损点位|止损价|止损线)\s*{UPDATE_VERBS}",
+    rf"(?:止损|止损位|止损点位|止损价|止损线).{{0,12}}(?:重设|重置|重新设置)\s*(?:为|到)?",
     rf"修改\s*止盈止损", rf"调整\s*止盈止损", rf"更新\s*止盈止损",
     rf"止盈止损\s*{UPDATE_VERBS}",
     # 新增: 目标/TP/SL 更新模式
@@ -466,12 +471,14 @@ def check_update_intent(text: str) -> tuple[bool, str]:
 CANCEL_ORDER_PATTERNS = [
     r"\bcancel\s+(?:order|orders|limit|limits)\b",
     r"\bcancel\s+pending\b",
+    r"^\s*撤[了掉]?\s*$",
     r"撤单",
     r"撤\s*不挂了",
     r"撤销(?:挂单|订单|委托)?",
     r"取消(?:挂单|订单|委托)",
     r"不挂了",
     r"别挂了|不用挂了|先不挂|暂不挂",
+    r"(?:这单|这个单|这个订单|这个策略|订单|策略).{0,8}(?:不要了|作废|取消)",
     r"(?:多单|空单|多|空|单子|挂单|委托).{0,8}(?:撤了|撤掉|撤回|取消)",
     r"(?:多单|空单|多|空|单子|挂单|委托).{0,8}不挂",
     r"(?:撤掉|撤回).{0,8}(?:多单|空单|多|空|单子|挂单|委托|点位)",
@@ -632,6 +639,211 @@ def classify_signal_scene(text: str) -> tuple[str, str]:
 
 def _has_any_pattern(text: str, patterns: list[str]) -> bool:
     return any(re.search(p, text, re.IGNORECASE) for p in patterns)
+
+
+def detect_recent_cancel_context(recent_texts: list[str] | None) -> tuple[bool, str]:
+    """检测最近消息中是否存在短期撤单上下文。
+
+    用于处理 KOL 分开发消息的场景:
+    ① "撤，不挂了"
+    ② 紧接着复制原策略参数
+
+    第二条的完整策略参数应作为旧挂单定位信息,不能被当成新开仓。
+    recent_texts 由调用方保证只传短时间窗口内的同 KOL 历史消息。
+    """
+    for raw in reversed(recent_texts or []):
+        text = strip_analysis_sections(raw or "").strip()
+        if not text:
+            continue
+        if _has_any_pattern(text, CANCEL_ORDER_PATTERNS) and not _has_any_pattern(text, REOPEN_AFTER_CANCEL_PATTERNS):
+            return True, f"近期撤单消息: {text[:80]}"
+    return False, ""
+
+
+def apply_cancel_context_if_needed(
+    text: str,
+    parsed: ParsedSignal,
+    recent_texts: list[str] | None = None,
+) -> ParsedSignal:
+    """在撤单上下文中,把后续完整策略单改判为 cancel_order。
+
+    保守原则:
+    - 当前消息已经明确"重新挂/再挂/新挂"时,不拦截新开仓。
+    - 只有当前解析结果本来会开仓时,才改判为撤单定位信息。
+    - 保留 symbol/side/entry/tp/sl,方便下游精确匹配并取消 pending 单。
+    """
+    if not recent_texts:
+        return parsed
+    if _has_any_pattern(text, REOPEN_AFTER_CANCEL_PATTERNS):
+        return parsed
+    if "cancel_order" in (parsed.actions or []):
+        return parsed
+
+    would_open = any(a.startswith("open_") for a in (parsed.actions or []))
+    if not would_open:
+        return parsed
+
+    has_cancel_context, context_reason = detect_recent_cancel_context(recent_texts)
+    if not has_cancel_context:
+        return parsed
+
+    parsed.actions = ["cancel_order"]
+    parsed.action = "cancel_order"
+    parsed.is_exit_signal = False
+    parsed.is_update_signal = False
+    parsed.reason = (
+        f"撤单上下文命中: {context_reason}; "
+        "当前完整策略作为旧挂单定位参数,未执行新开仓"
+    )
+    parsed.confidence = max(parsed.confidence, 0.75)
+    return parsed
+
+
+POSITION_CONTEXT_PATTERNS = [
+    r"(?:目前|当前|现在|现|已经|已).{0,12}(?:持有|持仓|拿着|保留).{0,40}(?:多单|空单|long|short)",
+    r"(?:持有|持仓|拿着|保留).{0,24}(?:[一二两三四五六七八九十\d]+)?\s*(?:个|笔|单|批)?\s*(?:多单|空单|long|short)",
+    r"(?:多单|空单|long|short).{0,24}(?:持有|持仓|拿着|保留|还在)",
+]
+
+POSITION_FOLLOW_UP_PATTERNS = [
+    r"(?:没|未|还没|没有).{0,10}(?:进|入场|上车|跟|跟上|布局).{0,18}(?:可以|现在|现价|这里|直接)?.{0,10}(?:跟进|进|入场|上车|跟|补)",
+    r"(?:可以|现在|现价|这里|直接).{0,10}(?:跟进|进场|入场|上车|跟上|补进)",
+    r"(?:跟进|上车|进场|入场|补进)(?:即可|就行|吧)?\s*$",
+]
+
+
+def _extract_position_context_prices(text: str) -> list[float]:
+    """从持仓说明中提取入场/分批价格,过滤批次数、杠杆、百分比等非价格数字。"""
+    if not text:
+        return []
+
+    # 持仓上下文里如果同时提到 TP/SL,只取其之前的价格作为入场/持仓成本。
+    segment = re.split(r"(?:止盈|止损|\btp\b|\bsl\b|目标)", text, maxsplit=1, flags=re.IGNORECASE)[0]
+    prices: list[float] = []
+    for m in re.finditer(PRICE_RE, segment):
+        raw = m.group(1)
+        p = _to_float(raw)
+        if p is None or p <= 0:
+            continue
+
+        before = segment[max(0, m.start() - 4):m.start()]
+        after = segment[m.end():m.end() + 4]
+        if m.end() < len(segment) and segment[m.end()] == "万":
+            p *= 10000
+
+        # "三个空单/3笔/第2批/5x/10%" 不是价格。
+        if re.search(r"(?:第\s*)?$", before) and re.match(r"\s*(?:个|笔|单|批|层)", after):
+            continue
+        if re.match(r"\s*(?:x|X|倍|%)", after):
+            continue
+        if p <= 20 and re.search(r"(?:个|笔|单|批|层|第)\s*$", before + after):
+            continue
+
+        if p not in prices:
+            prices.append(p)
+    return prices
+
+
+def extract_position_context(text: str) -> ParsedSignal | None:
+    """提取"当前持有/目前持仓"类消息中的可跟进上下文。
+
+    这类消息本身不触发下单,仅供紧随其后的"没进可跟进"等短消息补全。
+    """
+    cleaned = strip_analysis_sections(text or "").strip()
+    if not cleaned or not _has_any_pattern(cleaned, POSITION_CONTEXT_PATTERNS):
+        return None
+
+    symbol = extract_symbol(cleaned)
+    side = detect_side(cleaned)
+    if not side:
+        if re.search(r"多单|long", cleaned, re.IGNORECASE):
+            side = "long"
+        elif re.search(r"空单|short", cleaned, re.IGNORECASE):
+            side = "short"
+
+    entry, entry_prices = extract_entry(cleaned)
+    if not entry_prices:
+        entry_prices = _extract_position_context_prices(cleaned)
+        entry = entry_prices[0] if entry_prices else entry
+
+    if not symbol or side not in ("long", "short"):
+        return None
+
+    return ParsedSignal(
+        symbol=symbol,
+        side=side,
+        entry_price=entry,
+        entry_prices=entry_prices,
+        take_profits=extract_take_profits(cleaned),
+        stop_loss=extract_stop_loss(cleaned),
+        raw_text=text or "",
+        confidence=0.0,
+        reason="持仓上下文,等待后续跟进话术确认",
+    )
+
+
+def is_position_follow_up_text(text: str) -> bool:
+    """识别"没进的可以跟进/现价跟进/上车"这类补跟指令。"""
+    cleaned = strip_analysis_sections(text or "").strip()
+    if not cleaned:
+        return False
+    if _has_any_pattern(cleaned, CANCEL_ORDER_PATTERNS):
+        return False
+    if _has_any_pattern(cleaned, UPDATE_KEYWORDS):
+        return False
+    is_exit, _ = check_exit_intent(cleaned)
+    if is_exit:
+        return False
+    return _has_any_pattern(cleaned, POSITION_FOLLOW_UP_PATTERNS)
+
+
+def apply_position_context_if_needed(
+    text: str,
+    parsed: ParsedSignal,
+    recent_texts: list[str] | None = None,
+) -> ParsedSignal:
+    """用近期持仓说明补全后续跟进短消息。
+
+    保守原则:
+    - 只有当前消息明确出现"跟进/上车/没进可进"时才补全。
+    - 只使用调用方传入的同 KOL 短时间窗口 recent_texts。
+    - 上下文消息本身仍是非交易信号,不会直接开仓。
+    """
+    if not recent_texts or not is_position_follow_up_text(text):
+        return parsed
+    if parsed.is_exit_signal or parsed.is_update_signal or "cancel_order" in (parsed.actions or []):
+        return parsed
+
+    context_signal: ParsedSignal | None = None
+    context_text = ""
+    for raw in reversed(recent_texts or []):
+        context_signal = extract_position_context(raw)
+        if context_signal:
+            context_text = strip_analysis_sections(raw or "").strip()
+            break
+    if not context_signal:
+        return parsed
+
+    symbol = parsed.symbol or context_signal.symbol
+    side = parsed.side or context_signal.side
+    if not symbol or side not in ("long", "short"):
+        return parsed
+
+    entry_price = parsed.entry_price if parsed.entry_price is not None else context_signal.entry_price
+    entry_prices = parsed.entry_prices or context_signal.entry_prices
+    parsed.symbol = symbol
+    parsed.side = side
+    parsed.entry_price = entry_price
+    parsed.entry_prices = entry_prices
+    parsed.take_profits = parsed.take_profits or context_signal.take_profits
+    parsed.stop_loss = parsed.stop_loss if parsed.stop_loss is not None else context_signal.stop_loss
+    parsed.actions = [f"open_{side}"]
+    parsed.action = parsed.actions[0]
+    parsed.is_exit_signal = False
+    parsed.is_update_signal = False
+    parsed.reason = f"持仓上下文跟进命中: {context_text[:80]}"
+    parsed.confidence = max(parsed.confidence, 0.75 if entry_price or entry_prices else 0.65)
+    return parsed
 
 
 
@@ -881,10 +1093,25 @@ def extract_take_profits(text: str) -> list[float]:
 def extract_stop_loss(text: str) -> float | None:
     # 关键词列表
     keywords = [
-        r"止损点位", r"止损价", r"止损线", r"止损", r"防守位", r"防守",
+        r"止损点位", r"止损位", r"止损价", r"止损线", r"止损", r"防守位", r"防守",
         r"stop\s*loss", r"cut\s*loss", r"\bsl\b", r"\bstop\b",
         r"invalidation", r"invalid",
     ]
+
+    # 更新型绝对止损价优先: "止损位下移500点，重设为63300" 应取 63300,
+    # 不能把中间的 "500点" 当成新的止损价。
+    reset_sl_patterns = [
+        rf"(?:止损点位|止损位|止损价|止损线|止损|\bSL\b).{{0,30}}(?:重设|重置|重新设置|设置|改为|改成|调为|调到|调整为|修改为|更新为)\s*(?:为|到)?\s*{PRICE_RE}\s*(?:万)?",
+        rf"(?:重设|重置|重新设置|设置|改为|改成|调为|调到|调整为|修改为|更新为)\s*(?:止损点位|止损位|止损价|止损线|止损|\bSL\b)?\s*(?:为|到)?\s*{PRICE_RE}\s*(?:万)?",
+    ]
+    for pat in reset_sl_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            p = _to_float(m.group(1))
+            if p and p > 0:
+                if "万" in m.group(0):
+                    p *= 10000
+                return p
 
     # 1. 先检查正向格式: 止损 + 价格 (如 "止损63000"、"止损：63000")
     #    优先于反向格式,避免 "止盈65000 止损63000" 中 65000 被误提取为 SL
@@ -1545,6 +1772,7 @@ async def parse_message(
     kol_config: KolLLMConfig | None = None,
     kol_name: str = "",
     context: str = "",
+    recent_texts: list[str] | None = None,
 ) -> ParsedSignal:
     """解析一条 Discord 消息(文本 + 可选图片)。
 
@@ -1554,6 +1782,7 @@ async def parse_message(
         image_base64: 图片 base64
         kol_config: KOL 级别 LLM 配置（为 None 则使用全局设置）
         kol_name: KOL 名称（用于日志）
+        recent_texts: 同 KOL 短时间窗口内的历史原文,用于撤单上下文锁和持仓跟进补全
 
     流程:
     1. 先用 LLM (DEEPSEEK V3) 解析文本信号
@@ -1676,6 +1905,36 @@ async def parse_message(
             f"{len(combined)} -> {len(combined_for_parse)} 字符"
         )
 
+    # ============ 阶段 1.85: 撤单上下文锁优先 ============
+    # 大镖客等 KOL 常见分开发法:
+    # ① "撤，不挂了"
+    # ② 紧接着复制原策略单
+    # 第二条应作为旧挂单定位信息,不能先交给 LLM 推断成新开仓。
+    if recent_texts:
+        rule_parsed = parse_text(combined_for_parse)
+        rule_parsed.raw_text = combined
+        rule_parsed.has_image = has_image
+        guarded = apply_cancel_context_if_needed(combined_for_parse, rule_parsed, recent_texts)
+        if guarded.action == "cancel_order" and guarded.reason.startswith("撤单上下文命中"):
+            logger.info(f"[{kol_name}] 撤单上下文锁命中,当前策略单改判为撤单定位信息: {guarded.reason}")
+            return guarded
+
+        followed = apply_position_context_if_needed(combined_for_parse, guarded, recent_texts)
+        if followed.action in ("open_long", "open_short") and followed.reason.startswith("持仓上下文跟进命中"):
+            logger.info(f"[{kol_name}] 持仓上下文跟进命中,当前短消息补全为开仓: {followed.reason}")
+            return followed
+
+    # ============ 阶段 1.9: 明确止盈止损更新优先走规则 ============
+    # "止损位下移500点，重设为63300" 这类消息是修改已有仓位风控,
+    # 不能先交给 LLM 推断方向,否则可能被误判为新开多/开空。
+    if scene == "update_tp_sl":
+        rule_parsed = parse_text(combined_for_parse)
+        rule_parsed.raw_text = combined
+        rule_parsed.has_image = has_image
+        if rule_parsed.is_update_signal or "update_tp_sl" in rule_parsed.actions:
+            logger.info(f"[{kol_name}] 明确更新场景命中规则优先: {rule_parsed.update_reason}")
+            return rule_parsed
+
     # ============ 阶段 2: LLM 文本解析（主要方式） ============
     llm_parsed = None  # 初始化,防止未进入LLM分支时引用未定义变量
     if use_llm and combined_for_parse:
@@ -1785,6 +2044,7 @@ async def parse_message(
     if use_llm_fallback or not use_llm:
         parsed = parse_text(combined)
         parsed.has_image = has_image
+        parsed = apply_position_context_if_needed(combined, parsed, recent_texts)
 
         # 最终检查
         if (

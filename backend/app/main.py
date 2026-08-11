@@ -133,10 +133,12 @@ async def _migrate_schema(conn) -> None:
         "ALTER TABLE positions ADD COLUMN IF NOT EXISTS exchange_account_id INTEGER",
         "ALTER TABLE trades ADD COLUMN IF NOT EXISTS exchange_account_id INTEGER",
         "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS exchange_account_id INTEGER",
+        "ALTER TABLE equity_snapshots ADD COLUMN IF NOT EXISTS exchange_account_id INTEGER",
         "CREATE INDEX IF NOT EXISTS ix_orders_exchange_account_id ON orders(exchange_account_id)",
         "CREATE INDEX IF NOT EXISTS ix_positions_exchange_account_id ON positions(exchange_account_id)",
         "CREATE INDEX IF NOT EXISTS ix_trades_exchange_account_id ON trades(exchange_account_id)",
         "CREATE INDEX IF NOT EXISTS ix_pending_orders_exchange_account_id ON pending_orders(exchange_account_id)",
+        "CREATE INDEX IF NOT EXISTS ix_equity_snapshots_exchange_account_id ON equity_snapshots(exchange_account_id)",
         # 马丁策略状态:按 KOL + BTC/ETH 隔离存储,避免一个币种亏损影响其它币种。
         "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS martingale_state JSONB DEFAULT '{}'::jsonb",
         # customers:客户分类与邀请系统
@@ -287,6 +289,18 @@ async def _migrate_schema(conn) -> None:
             "FROM chosen c "
             "WHERE po.exchange_account_id IS NULL "
             "  AND po.customer_id = c.customer_id AND po.exchange = c.exchange"
+        ))
+        await conn.execute(text(
+            "WITH chosen AS ("
+            "  SELECT DISTINCT ON (customer_id, exchange) id, customer_id, exchange "
+            "  FROM exchange_accounts WHERE is_active = TRUE AND last_error = '' "
+            "  ORDER BY customer_id, exchange, is_default DESC, "
+            "           last_verified_at DESC NULLS LAST, id ASC"
+            ") "
+            "UPDATE equity_snapshots es SET exchange_account_id = c.id "
+            "FROM chosen c "
+            "WHERE es.exchange_account_id IS NULL "
+            "  AND es.customer_id = c.customer_id AND es.exchange = c.exchange"
         ))
         # exchange_accounts:为已有记录回填 api_key_hash(解密后算 SHA256)
         try:

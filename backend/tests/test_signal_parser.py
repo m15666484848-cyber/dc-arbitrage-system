@@ -1,6 +1,10 @@
 """信号解析单元测试。"""
 from app.services.signal_parser import (
+    apply_cancel_context_if_needed,
+    apply_position_context_if_needed,
     detect_side,
+    detect_recent_cancel_context,
+    extract_position_context,
     extract_entry,
     extract_stop_loss,
     extract_symbol,
@@ -75,3 +79,91 @@ def test_parse_text_missing_tp_sl():
     assert parsed.entry_price == 150.0
     assert parsed.take_profits == []
     assert parsed.stop_loss is None
+
+
+def test_single_cancel_message_triggers_cancel_context():
+    parsed = parse_text("撤")
+    assert parsed.action == "cancel_order"
+    assert parsed.reason == "撤销未成交挂单"
+
+    has_context, reason = detect_recent_cancel_context(["撤"])
+    assert has_context is True
+    assert "近期撤单消息" in reason
+
+
+def test_cancel_context_turns_copied_strategy_into_cancel_order():
+    current = """
+BTC/USDT
+做多
+@ 64,800.0000
+TP: 66,700.0000
+SL: 63,300.0000
+"""
+    parsed = parse_text(current)
+    assert parsed.action == "open_long"
+    assert parsed.entry_price == 64800.0
+
+    guarded = apply_cancel_context_if_needed(current, parsed, ["撤，不挂了"])
+    assert guarded.action == "cancel_order"
+    assert guarded.actions == ["cancel_order"]
+    assert guarded.symbol == "BTC/USDT"
+    assert guarded.side == "long"
+    assert guarded.entry_price == 64800.0
+    assert guarded.stop_loss == 63300.0
+    assert "旧挂单定位参数" in guarded.reason
+
+
+def test_without_cancel_context_copied_strategy_still_open_order():
+    current = "BTC/USDT 做多 @ 64800 TP 66700 SL 63300"
+    parsed = parse_text(current)
+    guarded = apply_cancel_context_if_needed(current, parsed, [])
+    assert guarded.action == "open_long"
+
+
+def test_cancel_context_does_not_block_explicit_reopen():
+    current = "重新挂 BTC/USDT 做多 @ 63800 TP 65000 SL 63000"
+    parsed = parse_text(current)
+    guarded = apply_cancel_context_if_needed(current, parsed, ["撤，不挂了"])
+    assert guarded.action == "open_long"
+    assert guarded.entry_price == 63800.0
+
+
+def test_position_context_message_is_not_open_order():
+    text = "BTC 目前持有三个空单 118600 119200 119800"
+    parsed = parse_text(text)
+    assert parsed.action == ""
+    assert parsed.confidence == 0.0
+    assert "持仓" in parsed.reason
+
+    ctx = extract_position_context(text)
+    assert ctx is not None
+    assert ctx.symbol == "BTC/USDT"
+    assert ctx.side == "short"
+    assert ctx.entry_prices == [118600.0, 119200.0, 119800.0]
+
+
+def test_position_follow_up_uses_recent_holding_context():
+    recent = ["BTC 目前持有三个空单 118600 119200 119800"]
+    current = "没进的现在可以跟进"
+    parsed = parse_text(current)
+    completed = apply_position_context_if_needed(current, parsed, recent)
+
+    assert completed.action == "open_short"
+    assert completed.actions == ["open_short"]
+    assert completed.symbol == "BTC/USDT"
+    assert completed.side == "short"
+    assert completed.entry_price == 118600.0
+    assert completed.entry_prices == [118600.0, 119200.0, 119800.0]
+    assert completed.confidence >= 0.75
+    assert "持仓上下文跟进命中" in completed.reason
+
+
+def test_position_follow_up_without_context_stays_ignored():
+    current = "没进的现在可以跟进"
+    parsed = parse_text(current)
+    completed = apply_position_context_if_needed(current, parsed, [])
+
+    assert completed.action == ""
+    assert completed.symbol == ""
+    assert completed.side == ""
+    assert completed.confidence == 0.0

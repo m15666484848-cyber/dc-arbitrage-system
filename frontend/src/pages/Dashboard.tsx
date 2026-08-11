@@ -126,8 +126,12 @@ export default function DashboardPage() {
     [positions]
   );
   const realizedPnl = useMemo(
-    () => trades.reduce((sum: number, t: any) => sum + (t.realized_pnl || 0), 0),
-    [trades]
+    () => {
+      const backendTotal = Number(s.total_pnl);
+      if (Number.isFinite(backendTotal)) return backendTotal;
+      return trades.reduce((sum: number, t: any) => sum + (t.realized_pnl || 0), 0);
+    },
+    [s.total_pnl, trades]
   );
   const totalPnl = useMemo(() => openPnl + realizedPnl, [openPnl, realizedPnl]);
   const openCount = positions.filter((p: any) => p.status === "open").length;

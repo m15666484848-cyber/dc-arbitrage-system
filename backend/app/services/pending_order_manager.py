@@ -255,11 +255,15 @@ async def create_pending_order(
     await notify(
         "order", "待触发单已创建",
         f"KOL: {kol_name}\n"
+        f"API账户: #{pending.exchange_account_id or '未知'}\n"
+        f"挂单ID: {pending.id}\n"
         f"品种: {pending.symbol}\n方向: {_side_cn(pending.side)}\n"
         f"目标入场价: {pending.entry_price}\n"
         f"止盈:\n{tp_str}\n止损: {sl_str}\n"
         f"杠杆: {pending.leverage}x\n名义价值: {pending.notional_usdt} USDT\n"
-        f"过期时间: {pending.expires_at}",
+        f"过期时间: {pending.expires_at}\n"
+        f"执行结果: 已创建待触发单,尚未进场\n"
+        f"执行依据: KOL 入场价与当前市价偏离超过阈值,先等待价格触及目标价后再市价进场",
         customer_id,
         source_text=_src_text,
     )
@@ -267,7 +271,7 @@ async def create_pending_order(
     return {"ok": True, "pending_id": pending.id, "batch_no": batch_no}
 
 
-async def trigger_pending_order(db: AsyncSession, pending: PendingOrder) -> dict:
+async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger_price: float | None = None) -> dict:
     """触发待触发单:市价下单并更新状态。"""
     if pending.status != "pending":
         return {"ok": False, "reason": f"待触发单状态为 {pending.status},不可触发"}
@@ -387,11 +391,16 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder) -> dict
         await notify(
             "error", "待触发单下单失败",
             f"KOL: {kol_name}\n"
+            f"API账户: #{pending.exchange_account_id or '未知'}\n"
+            f"挂单ID: {pending.id}\n"
             f"品种: {pending.symbol}\n方向: {_side_cn(pending.side)}\n"
-            f"入场价: {pending.entry_price}\n"
+            f"目标入场价: {pending.entry_price}\n"
+            f"触发市价: {order_manager._fmt_value(trigger_price)}\n"
             f"止盈: {tp_str}\n止损: {sl_str}\n"
             f"杠杆: {pending.leverage}x\n名义价值: {pending.notional_usdt} USDT\n"
-            f"错误: {e}",
+            f"执行结果: 未创建持仓\n"
+            f"失败原因: {e}\n"
+            f"判断依据: {order_manager._failure_hint(e)}",
             pending.customer_id,
             source_text=_src_text,
         )
@@ -423,12 +432,13 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder) -> dict
     tp_str, sl_str = _format_tp_sl(pending.tp_levels, pending.sl)
     _src_text = await _get_signal_text(db, pending.signal_id)
     await notify(
-        "order", "待触发单已成交",
+        "order", "挂单触发进场成功",
         f"KOL: {kol_name}\n"
         f"品种: {pending.symbol}\n方向: {_side_cn(pending.side)}\n"
-        f"入场价: {pending.entry_price}\n"
+        f"挂单ID: {pending.id}\n"
+        f"{order_manager._order_success_lines(action='挂单触发后市价进场成功', order=result.get('order'), requested_entry=pending.entry_price, trigger_price=trigger_price, notional_usdt=pending.notional_usdt, account_id=result.get('exchange_account_id') or pending.exchange_account_id, basis='监控价已触及目标入场价,触发后按市价单执行')}\n"
         f"止盈:\n{tp_str}\n止损: {sl_str}\n"
-        f"杠杆: {pending.leverage}x\n名义价值: {pending.notional_usdt} USDT\n"
+        f"杠杆: {pending.leverage}x\n"
         f"持仓ID: {result.get('position_id')}\n订单ID: {result.get('order_id')}",
         pending.customer_id,
         source_text=_src_text,
@@ -569,7 +579,7 @@ async def monitor_loop() -> None:
                                     ).with_for_update()
                                 )).scalar_one_or_none()
                                 if p and p.status == "pending":
-                                    await trigger_pending_order(trigger_db, p)
+                                    await trigger_pending_order(trigger_db, p, current_price)
                         except Exception as e:
                             logger.exception(f"触发待触发单 {pending.id} 失败: {e}")
 

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.config import EquitySnapshot
+from app.models.config import EquitySnapshot, ExchangeAccount
 from app.models.kol import Kol
 from app.models.signal import Signal
 from app.models.trading import Position, Trade
@@ -120,6 +120,7 @@ async def take_equity_snapshot(
             await exchange_adapter.close_exchange(ex)
         snapshot = EquitySnapshot(
             customer_id=customer_id,
+            exchange_account_id=exchange_account_id,
             exchange=exchange,
             equity=float(bal.get("equity", 0)),
             balance=float(bal.get("balance", 0)),
@@ -135,8 +136,17 @@ async def take_equity_snapshot(
         await db.rollback()
 
 
-async def equity_curve(
-    db: AsyncSession, customer_id: int, exchange: str | None = None, days: int = 30
+def _snapshot_bucket(dt: datetime) -> datetime:
+    """按 5 分钟聚合快照，避免多 API 账号快照交替造成假回撤。"""
+    return dt.replace(minute=(dt.minute // 5) * 5, second=0, microsecond=0)
+
+
+async def _snapshot_points(
+    db: AsyncSession,
+    customer_id: int,
+    exchange: str | None = None,
+    days: int = 30,
+    exchange_account_id: int | None = None,
 ) -> list[dict]:
     since = datetime.now(timezone.utc) - timedelta(days=days)
     stmt = (
@@ -144,15 +154,115 @@ async def equity_curve(
         .where(EquitySnapshot.customer_id == customer_id, EquitySnapshot.snapshot_at >= since)
         .order_by(EquitySnapshot.snapshot_at.asc())
     )
+    fallback_exchange: str | None = None
+    if exchange_account_id:
+        stmt = stmt.where(EquitySnapshot.exchange_account_id == exchange_account_id)
+        rows = (await db.execute(stmt)).scalars().all()
+        # 老快照没有 exchange_account_id，按该 API 的交易所做只读兜底，避免切换后显示空白。
+        if not rows:
+            acc = (
+                await db.execute(
+                    select(ExchangeAccount).where(
+                        ExchangeAccount.id == exchange_account_id,
+                        ExchangeAccount.customer_id == customer_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            fallback_exchange = acc.exchange if acc else None
+        else:
+            return [
+                {
+                    "snapshot_at": r.snapshot_at,
+                    "equity": float(r.equity or 0),
+                    "balance": float(r.balance or r.equity or 0),
+                    "unrealized_pnl": float(r.unrealized_pnl or 0),
+                }
+                for r in rows
+            ]
+    if fallback_exchange:
+        stmt = (
+            select(EquitySnapshot)
+            .where(
+                EquitySnapshot.customer_id == customer_id,
+                EquitySnapshot.snapshot_at >= since,
+                EquitySnapshot.exchange == fallback_exchange,
+            )
+            .order_by(EquitySnapshot.snapshot_at.asc())
+        )
     if exchange:
         stmt = stmt.where(EquitySnapshot.exchange == exchange)
     rows = (await db.execute(stmt)).scalars().all()
+
+    if not exchange_account_id:
+        # 多 API 聚合不能简单按时间桶求和。
+        # 快照通常是逐个 API 账号轮询写入的，如果某个时间桶只包含部分账号，
+        # 会把“账号补齐后的权益增加”误判为真实收益/回撤。
+        # 因此这里按账号做前值补齐，并且只从所有账号都有首个快照后开始输出合计曲线。
+        account_ids = sorted({int(r.exchange_account_id) for r in rows if r.exchange_account_id})
+        if len(account_ids) > 1:
+            grouped: dict[datetime, list[EquitySnapshot]] = {}
+            for r in rows:
+                if not r.snapshot_at or not r.exchange_account_id:
+                    continue
+                grouped.setdefault(_snapshot_bucket(r.snapshot_at), []).append(r)
+
+            latest_by_account: dict[int, dict] = {}
+            points: list[dict] = []
+            for key in sorted(grouped):
+                for r in grouped[key]:
+                    latest_by_account[int(r.exchange_account_id)] = {
+                        "equity": float(r.equity or 0),
+                        "balance": float(r.balance or r.equity or 0),
+                        "unrealized_pnl": float(r.unrealized_pnl or 0),
+                    }
+                if all(account_id in latest_by_account for account_id in account_ids):
+                    points.append({
+                        "snapshot_at": key,
+                        "equity": sum(v["equity"] for v in latest_by_account.values()),
+                        "balance": sum(v["balance"] for v in latest_by_account.values()),
+                        "unrealized_pnl": sum(v["unrealized_pnl"] for v in latest_by_account.values()),
+                    })
+            return points
+
+        buckets: dict[datetime, dict] = {}
+        for r in rows:
+            if not r.snapshot_at:
+                continue
+            key = _snapshot_bucket(r.snapshot_at)
+            item = buckets.setdefault(
+                key,
+                {"snapshot_at": key, "equity": 0.0, "balance": 0.0, "unrealized_pnl": 0.0},
+            )
+            item["equity"] += float(r.equity or 0)
+            item["balance"] += float(r.balance or r.equity or 0)
+            item["unrealized_pnl"] += float(r.unrealized_pnl or 0)
+        return [buckets[k] for k in sorted(buckets)]
+
     return [
         {
-            "snapshot_at": r.snapshot_at.isoformat() if r.snapshot_at else None,
-            "equity": r.equity,
-            "balance": r.balance,
-            "unrealized_pnl": r.unrealized_pnl,
+            "snapshot_at": r.snapshot_at,
+            "equity": float(r.equity or 0),
+            "balance": float(r.balance or r.equity or 0),
+            "unrealized_pnl": float(r.unrealized_pnl or 0),
+        }
+        for r in rows
+    ]
+
+
+async def equity_curve(
+    db: AsyncSession,
+    customer_id: int,
+    exchange: str | None = None,
+    days: int = 30,
+    exchange_account_id: int | None = None,
+) -> list[dict]:
+    rows = await _snapshot_points(db, customer_id, exchange, days, exchange_account_id)
+    return [
+        {
+            "snapshot_at": r["snapshot_at"].isoformat() if r.get("snapshot_at") else None,
+            "equity": round(float(r.get("equity") or 0), 2),
+            "balance": round(float(r.get("balance") or 0), 2),
+            "unrealized_pnl": round(float(r.get("unrealized_pnl") or 0), 2),
         }
         for r in rows
     ]
@@ -160,7 +270,11 @@ async def equity_curve(
 
 
 
-async def calculate_advanced_metrics(db: AsyncSession, customer_id: int) -> dict:
+async def calculate_advanced_metrics(
+    db: AsyncSession,
+    customer_id: int,
+    exchange_account_id: int | None = None,
+) -> dict:
     """计算高级指标:余额、最大回撤、月化收益率、年化收益率、盈亏比、夏普比。"""
     import math
     from sqlalchemy import func as sql_func
@@ -168,18 +282,12 @@ async def calculate_advanced_metrics(db: AsyncSession, customer_id: int) -> dict
 
     # 1. 最大回撤 + 余额 (基于净值快照)
     since_90d = datetime.now(timezone.utc) - timedelta(days=90)
-    snapshots = (
-        await db.execute(
-            select(EquitySnapshot)
-            .where(EquitySnapshot.customer_id == customer_id, EquitySnapshot.snapshot_at >= since_90d)
-            .order_by(EquitySnapshot.snapshot_at.asc())
-        )
-    ).scalars().all()
+    snapshots = await _snapshot_points(db, customer_id, days=90, exchange_account_id=exchange_account_id)
 
     max_drawdown = 0.0
     peak = 0.0
     for snap in snapshots:
-        eq = float(snap.equity or 0)
+        eq = float(snap.get("equity") or 0)
         if eq > peak:
             peak = eq
         if peak > 0:
@@ -190,31 +298,35 @@ async def calculate_advanced_metrics(db: AsyncSession, customer_id: int) -> dict
     # 最新余额(取最新一条快照的 balance)
     balance = 0.0
     if snapshots:
-        balance = float(snapshots[-1].balance or snapshots[-1].equity or 0)
+        balance = float(snapshots[-1].get("balance") or snapshots[-1].get("equity") or 0)
 
     # 2. 月化/年化收益率 + 夏普比 (基于净值快照)
     monthly_return = 0.0
     annual_return = 0.0
     sharpe_ratio = 0.0
     if len(snapshots) >= 2:
-        first_eq = float(snapshots[0].equity or 0)
-        last_eq = float(snapshots[-1].equity or 0)
+        first_eq = float(snapshots[0].get("equity") or 0)
+        last_eq = float(snapshots[-1].get("equity") or 0)
         if first_eq > 0:
             total_return = (last_eq - first_eq) / first_eq
-            days = (snapshots[-1].snapshot_at - snapshots[0].snapshot_at).days or 1
-            if days > 0:
+            elapsed_seconds = (snapshots[-1]["snapshot_at"] - snapshots[0]["snapshot_at"]).total_seconds()
+            days = elapsed_seconds / 86400 if elapsed_seconds > 0 else 0
+            if days >= 7:
                 daily_return = total_return / days
-                # 复合月化/年化,限制在合理范围
                 monthly_return = ((1 + daily_return) ** 30 - 1) * 100
                 monthly_return = max(-100, min(999, monthly_return))
                 annual_return = ((1 + daily_return) ** 365 - 1) * 100
                 annual_return = max(-100, min(999, annual_return))
+            else:
+                # 样本不足 7 天时不做夸张年化，直接展示当前样本期收益率。
+                monthly_return = total_return * 100
+                annual_return = total_return * 100
 
         # 夏普比:基于日收益率的均值/标准差 (年化 = sqrt(365))
         daily_returns = []
         for i in range(1, len(snapshots)):
-            prev_eq = float(snapshots[i - 1].equity or 0)
-            curr_eq = float(snapshots[i].equity or 0)
+            prev_eq = float(snapshots[i - 1].get("equity") or 0)
+            curr_eq = float(snapshots[i].get("equity") or 0)
             if prev_eq > 0:
                 daily_returns.append((curr_eq - prev_eq) / prev_eq)
         if len(daily_returns) >= 2:
@@ -231,6 +343,7 @@ async def calculate_advanced_metrics(db: AsyncSession, customer_id: int) -> dict
             select(sql_func.avg(Trade.realized_pnl)).where(
                 Trade.customer_id == customer_id,
                 Trade.is_close.is_(True),
+                Trade.exchange_account_id == exchange_account_id if exchange_account_id else True,
                 Trade.realized_pnl > 0,
             )
         )
@@ -240,6 +353,7 @@ async def calculate_advanced_metrics(db: AsyncSession, customer_id: int) -> dict
             select(sql_func.avg(Trade.realized_pnl)).where(
                 Trade.customer_id == customer_id,
                 Trade.is_close.is_(True),
+                Trade.exchange_account_id == exchange_account_id if exchange_account_id else True,
                 Trade.realized_pnl < 0,
             )
         )
@@ -329,7 +443,7 @@ async def dashboard_stats(db: AsyncSession, customer_id: int, exchange_account_i
     ).scalar_one()
     win_rate = (win_trades / total_trades * 100) if total_trades else 0
     # 高级指标
-    advanced = await calculate_advanced_metrics(db, customer_id)
+    advanced = await calculate_advanced_metrics(db, customer_id, exchange_account_id)
     return {
         "open_positions": open_positions,
         "today_pnl": round(float(today_pnl), 2),

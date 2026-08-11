@@ -35,7 +35,8 @@ export const API = {
   listCustomers: () => api("get", "/admin/customers"),
   createCustomer: (data: any) => api("post", "/admin/customers", data),
   updateCustomer: (id: number, data: any) => api("put", `/admin/customers/${id}`, data),
-  deleteCustomer: (id: number) => api("delete", `/admin/customers/${id}`),
+  deleteCustomer: (id: number, confirm_username: string) =>
+    api("delete", `/admin/customers/${id}`, undefined, { confirm_username }),
   // 邀请码 / 邀请链接
   getInviteLink: (cid: number) => api("get", `/admin/customers/${cid}/invite-link`),
   loginAsCustomer: (cid: number) => api("post", `/admin/customers/${cid}/login-as`),
@@ -111,8 +112,10 @@ export const API = {
   // analytics
   dashboard: (exchange_account_id?: number | null) => api("get", "/dashboard", undefined, { exchange_account_id: exchange_account_id || undefined }),
   kolRanking: (days = 30) => api("get", `/kol-ranking?days=${days}`),
-  equityCurve: (days = 30) => api("get", `/equity-curve?days=${days}`),
-  getEquityHistory: (days = 90) => api("get", `/equity-curve?days=${days}`),
+  equityCurve: (days = 30, exchange_account_id?: number | null) =>
+    api("get", "/equity-curve", undefined, { days, exchange_account_id: exchange_account_id || undefined }),
+  getEquityHistory: (days = 90, exchange_account_id?: number | null) =>
+    api("get", "/equity-curve", undefined, { days, exchange_account_id: exchange_account_id || undefined }),
   listSignals: (page = 1, page_size = 50, kol_id?: number, status?: string) =>
     api("get", `/signals?page=${page}&page_size=${page_size}${kol_id ? `&kol_id=${kol_id}` : ""}${status ? `&status=${status}` : ""}`),
   injectSignal: (data: any) => api("post", "/signals/inject", data),

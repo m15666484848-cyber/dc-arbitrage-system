@@ -161,7 +161,7 @@ async def dashboard(
         return ok({"open_positions": 0, "today_pnl": 0, "total_pnl": 0, "total_trades": 0, "win_rate": 0,
                     "followed_kols": [], "open_positions_list": []})
     stats = await analytics.dashboard_stats(db, cid, exchange_account_id)
-    curve = await analytics.equity_curve(db, cid)
+    curve = await analytics.equity_curve(db, cid, exchange_account_id=exchange_account_id)
 
     # 当前订阅的 KOL 列表
     followed = (
@@ -248,12 +248,13 @@ async def kol_ranking(days: int = Query(30), db: AsyncSession = Depends(get_db),
 async def equity_curve(
     days: int = Query(30),
     exchange: str | None = Query(None),
+    exchange_account_id: int | None = Query(None),
     current=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     if current.role != "customer":
         return ok([])
-    return ok(await analytics.equity_curve(db, current.id, exchange, days))
+    return ok(await analytics.equity_curve(db, current.id, exchange, days, exchange_account_id))
 
 
 @router.get("/signals")
