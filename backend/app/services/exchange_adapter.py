@@ -167,6 +167,23 @@ def _create_exchange(
     return ex
 
 
+async def _ensure_okx_long_short_mode(ex) -> None:
+    """尽量确保 OKX 使用双向持仓模式。
+
+    DCQuant 本地仓位模型按 long/short 分开记录；OKX net_mode 会把反向开仓自动冲抵，
+    导致交易所净仓与本地分仓不一致。若已有持仓导致交易所拒绝切换，只记录告警；
+    后续开仓时仍会通过 posSide 强约束，避免静默降级为 net_mode。
+    """
+    if (getattr(ex, "id", "") or "").lower() != "okx":
+        return
+    try:
+        if hasattr(ex, "set_position_mode"):
+            await ex.set_position_mode(True, None, {"posMode": "long_short_mode"})
+            logger.info("OKX 持仓模式已确认/切换为 long_short_mode")
+    except Exception as e:
+        logger.warning(f"OKX 持仓模式切换 long_short_mode 失败，将依赖 posSide 强约束: {e}")
+
+
 async def load_exchange(
     db: AsyncSession,
     customer_id: int,
@@ -215,6 +232,7 @@ async def load_exchange(
     ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_mode", "") or getattr(acc, "account_type", "") or "")
     try:
         await ex.load_markets()
+        await _ensure_okx_long_short_mode(ex)
     except Exception as e:
         await ex.close()
         raise ValueError(f"加载 {exchange} 市场数据失败: {e}") from e
@@ -560,13 +578,13 @@ async def place_order(
                 else:
                     raise
         elif ex_name.lower() == "okx" and "posSide" in msg and "51000" in msg and "posSide" in params:
-            fallback_params = dict(params)
-            fallback_params.pop("posSide", None)
-            logger.warning(
-                f"OKX 当前账户可能为净持仓模式,posSide 被拒绝,去掉 posSide 重试: "
-                f"{symbol} {side} {order_type}"
-            )
-            order = await _retry_with_backoff(lambda: _create_order(fallback_params), retries=1)
+            # 开仓单绝不能静默去掉 posSide 降级为 net_mode。
+            # 本地仓位模型是 long/short 分仓；net_mode 会把反向开仓自动冲抵，
+            # 造成交易所有净仓但本地分仓不匹配，最终出现孤儿仓/数量不一致。
+            raise ValueError(
+                "OKX 当前账户不是双向持仓模式，开仓被拒绝。"
+                "请先将 OKX 持仓模式切换为 long_short_mode，或平掉现有净仓后由系统自动切换。"
+            ) from e
         elif ex_name.lower() == "bybit" and ("position idx not match position mode" in msg or "10001" in msg) and "positionIdx" in params:
             fallback_params = dict(params)
             fallback_params.pop("positionIdx", None)

@@ -3,7 +3,7 @@
 对账维度:
   1. 持仓对账(reconcile_positions)
      - 幽灵持仓:本地 DB 有 open master 仓位,交易所无对应持仓 → 自动标记 closed
-     - 孤儿持仓:交易所有持仓,本地 DB 无记录 → 告警(无法自动创建,缺 KOL 关联)
+     - 孤儿持仓:交易所有持仓,本地 DB 无记录 → 测试/模拟账号自动平仓,实盘仅告警
      - 数量不一致:本地 master qty ≠ 交易所实际数量 → 告警(不自动修改,需人工确认)
 
   2. 挂单对账(reconcile_orders)
@@ -13,7 +13,8 @@
 自动修复策略:
   - 幽灵持仓:将 master 及其所有子仓位标记为 closed(qty=0),记录对账日志
   - 幽灵挂单:将订单状态改为 cancelled,记录对账日志
-  - 数量不一致/孤儿:仅告警,不自动修改
+  - 孤儿持仓:测试/模拟账号自动市价平仓；实盘仅告警,不自动修改
+  - 数量不一致:仅告警,不自动修改
 
 安全原则:
   - 交易所 API 调用失败时,跳过该客户对账(不误判为幽灵)
@@ -161,6 +162,7 @@ async def reconcile_positions(
     customer_id: int,
     exchange: str,
     exchange_account_id: int | None,
+    account_mode: str,
     ex,
     report: ReconciliationReport,
 ) -> None:
@@ -170,6 +172,7 @@ async def reconcile_positions(
       1. 从交易所获取所有持仓(fetch_positions)
       2. 从本地 DB 获取所有 open master 仓位(parent_id IS NULL)
       3. 按 (symbol, side) 匹配,检测三类差异
+      4. 测试/模拟账号的孤儿持仓自动市价平仓；实盘只告警
     """
     # 1. 获取交易所持仓
     try:
@@ -204,17 +207,23 @@ async def reconcile_positions(
         )
     ).scalars().all()
 
-    # 3. 构建本地持仓映射: {(symbol, side): Position}
-    local_pos_map: dict[tuple[str, str], Position] = {}
+    # 3. 构建本地持仓映射: {(symbol, side): {"positions": [...], "qty": sum}}
+    # 同一账号同一 symbol+side 可能有多个 master 仓位，交易所侧通常只返回合并净仓。
+    # 因此必须按 key 聚合本地数量，否则会把正常多笔同向仓误判为数量不一致。
+    local_pos_map: dict[tuple[str, str], dict[str, Any]] = {}
     for pos in local_positions:
         key = (pos.symbol.upper(), pos.side.lower())
-        # 如果同一 symbol+side 有多个 master(不应该但防御性处理),取第一个
-        if key not in local_pos_map:
-            local_pos_map[key] = pos
+        bucket = local_pos_map.setdefault(key, {"positions": [], "qty": 0.0})
+        bucket["positions"].append(pos)
+        bucket["qty"] += float(pos.qty or 0)
 
     # 4. 检测幽灵持仓:本地有但交易所无
     matched_ex_keys: set[tuple[str, str]] = set()
-    for key, local_pos in local_pos_map.items():
+    for key, local_group in local_pos_map.items():
+        positions = local_group["positions"]
+        first_pos = positions[0]
+        local_qty = float(local_group["qty"] or 0)
+        local_ids = [p.id for p in positions]
         ex_qty = ex_pos_map.get(key, 0)
         if ex_qty <= 0:
             # 幽灵持仓:交易所无此仓位
@@ -223,21 +232,21 @@ async def reconcile_positions(
                 customer_id=customer_id,
                 exchange=exchange,
                 exchange_account_id=exchange_account_id,
-                symbol=local_pos.symbol,
-                side=local_pos.side,
-                local_qty=local_pos.qty,
+                symbol=first_pos.symbol,
+                side=first_pos.side,
+                local_qty=local_qty,
                 exchange_qty=0,
-                position_id=local_pos.id,
-                detail=f"本地 master 仓位 #{local_pos.id} 仍为 open,但交易所无此持仓(可能被手动平仓/强平/到期)",
+                position_id=first_pos.id,
+                detail=f"本地 master 仓位 {local_ids} 仍为 open,但交易所无此持仓(可能被手动平仓/强平/到期)",
             )
             report.position_discrepancies.append(disc)
 
-            # 自动修复:标记 master 及所有子仓位为 closed(使用独立 session)
-            await _fix_ghost_position(local_pos.id, local_pos.symbol, local_pos.side, report)
+            # 自动修复:标记该 key 下所有 master 及其子仓位为 closed(使用独立 session)
+            for pos in positions:
+                await _fix_ghost_position(pos.id, pos.symbol, pos.side, report)
         else:
             matched_ex_keys.add(key)
             # 检测数量不一致(允许 1% 误差,考虑合约精度)
-            local_qty = local_pos.qty
             if local_qty > 0:
                 diff_ratio = abs(local_qty - ex_qty) / local_qty
                 if diff_ratio > 0.01:
@@ -246,12 +255,12 @@ async def reconcile_positions(
                         customer_id=customer_id,
                         exchange=exchange,
                         exchange_account_id=exchange_account_id,
-                        symbol=local_pos.symbol,
-                        side=local_pos.side,
+                        symbol=first_pos.symbol,
+                        side=first_pos.side,
                         local_qty=local_qty,
                         exchange_qty=ex_qty,
-                        position_id=local_pos.id,
-                        detail=f"仓位 #{local_pos.id} 数量不一致: 本地={local_qty} 交易所={ex_qty} (差异 {diff_ratio*100:.1f}%)",
+                        position_id=first_pos.id,
+                        detail=f"仓位 {local_ids} 聚合数量不一致: 本地={local_qty} 交易所={ex_qty} (差异 {diff_ratio*100:.1f}%)",
                     )
                     report.position_discrepancies.append(disc)
 
@@ -271,6 +280,70 @@ async def reconcile_positions(
                 detail=f"交易所有 {sym} {side} 持仓 {ex_qty},但本地无 master 仓位记录(可能通过其他渠道开仓)",
             )
             report.position_discrepancies.append(disc)
+            if _should_auto_close_orphan(account_mode):
+                await _fix_orphan_position(
+                    ex,
+                    customer_id,
+                    exchange,
+                    exchange_account_id,
+                    sym,
+                    side,
+                    ex_qty,
+                    account_mode,
+                    report,
+                )
+
+
+def _should_auto_close_orphan(account_mode: str | None) -> bool:
+    """仅测试网/模拟盘自动平孤儿仓，实盘只告警。"""
+    mode = (account_mode or "").lower()
+    return mode in ("testnet", "demo")
+
+
+async def _fix_orphan_position(
+    ex,
+    customer_id: int,
+    exchange: str,
+    exchange_account_id: int | None,
+    symbol: str,
+    side: str,
+    exchange_qty: float,
+    account_mode: str,
+    report: ReconciliationReport,
+) -> None:
+    """修复测试/模拟账号孤儿持仓：直接在交易所市价平仓。
+
+    实盘不会调用本函数，避免误平用户真实仓位。
+    exchange_qty 已由 _exchange_position_qty 换算为币数，可直接传给 close_position_market。
+    """
+    try:
+        result = await exchange_adapter.close_position_market(ex, symbol, side, exchange_qty)
+        order_id = str((result or {}).get("id") or "")
+        async with AsyncSessionLocal() as db:
+            db.add(AuditLog(
+                user_id=None,
+                action="reconciliation_fix_orphan",
+                target=f"exchange_account:{exchange_account_id}:{symbol}:{side}",
+                detail=(
+                    f"对账自动修复测试/模拟孤儿持仓: customer={customer_id} "
+                    f"account={exchange_account_id} mode={account_mode} {exchange} "
+                    f"{symbol} {side} qty={exchange_qty}, close_order_id={order_id}"
+                ),
+            ))
+            await db.commit()
+        report.auto_fixed += 1
+        logger.warning(
+            f"[对账] 测试/模拟孤儿持仓已自动平仓: customer={customer_id} "
+            f"account={exchange_account_id} mode={account_mode} {exchange} "
+            f"{symbol} {side} qty={exchange_qty} order_id={order_id}"
+        )
+    except Exception as e:
+        msg = (
+            f"孤儿持仓自动平仓失败 customer={customer_id} account={exchange_account_id} "
+            f"{exchange} {symbol} {side} qty={exchange_qty}: {e}"
+        )
+        logger.error(f"[对账] {msg}")
+        report.errors.append(msg)
 
 
 async def _fix_ghost_position(
@@ -459,7 +532,7 @@ async def _reconcile_one_account(
             report.total_accounts_checked += 1
 
             # 持仓对账
-            await reconcile_positions(db, customer_id, exchange, exchange_account_id, ex, report)
+            await reconcile_positions(db, customer_id, exchange, exchange_account_id, account_mode, ex, report)
 
             # 挂单对账
             await reconcile_orders(db, customer_id, exchange, exchange_account_id, ex, report)
