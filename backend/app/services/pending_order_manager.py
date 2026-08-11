@@ -375,11 +375,21 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
     except Exception as e:
         logger.exception(f"触发待触发单 {pending.id} 下单失败: {e}")
         err_msg = str(e)
-        # 不可恢复的错误(余额不足等):直接标记为cancelled,防止监控循环无限重试
-        if "余额不足" in err_msg or "insufficient" in err_msg.lower():
-            logger.warning(f"待触发单 {pending.id} 因余额不足,自动取消防止循环触发")
+        err_low = err_msg.lower()
+        # 不可恢复的错误:直接标记为cancelled,防止监控循环无限重试并持续告警。
+        # 包括余额不足、最小下单额/精度不足、OKX非双向持仓模式等人工配置类问题。
+        non_retriable = any(token in err_low for token in (
+            "余额不足", "insufficient",
+            "minimum amount", "minimum amount precision",
+            "notional must be no smaller", "订单参数无效",
+            "订单查询连续失败", "fetchorder() can only access",
+            "不是双向持仓模式", "long_short_mode",
+            "min notional", "min_notional",
+        ))
+        if non_retriable:
+            logger.warning(f"待触发单 {pending.id} 因不可恢复错误自动取消,防止循环触发: {err_msg}")
             pending.status = "cancelled"
-            pending.cancel_reason = f"下单失败(余额不足): {err_msg}"
+            pending.cancel_reason = f"下单失败(不可恢复): {err_msg}"
             try:
                 await db.commit()
             except Exception as commit_err:

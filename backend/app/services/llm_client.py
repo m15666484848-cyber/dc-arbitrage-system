@@ -255,6 +255,8 @@ class LLMClient:
         # DeepSeek: disable Thinking mode for fast signal parsing (15-30s -> 3-8s)
         if self.provider == "deepseek":
             payload["thinking"] = {"type": "disabled"}
+            # JSON mode: 强制输出合法 JSON，减少偶发非 JSON 响应导致的解析失败
+            payload["response_format"] = {"type": "json_object"}
 
         # 发送请求
         headers = {
@@ -389,6 +391,12 @@ DOGE/狗狗 → DOGE/USDT
 7. "挂一个回踩 X附近/在挂一个回踩 X附近/挂回踩 X附近" = 明确新挂单，通常表示做空回踩 → is_valid_signal=true, side=short, entry_price=X
 8. "委托 X 附近 空" = 在 X 挂空单 → is_valid_signal=true, side=short, entry_price=X
 9. "埋伏 X 多/抄底单 X/低吸 X" = 在 X 挂多单 → is_valid_signal=true, side=long, entry_price=X
+10. "接一笔空单/接一手空单" = 做空开仓 → is_valid_signal=true, side=short
+11. "接一笔多单/接一手多单" = 做多开仓 → is_valid_signal=true, side=long
+12. "开一层多单/开一层仓" 且上下文为多单 = 做多开仓 → is_valid_signal=true, side=long
+13. "开一层空单/开一层仓" 且上下文为空单 = 做空开仓 → is_valid_signal=true, side=short
+14. "睡觉挂单多" / "挂单多 挂X" = 做多限价单 → is_valid_signal=true, side=long, entry_price=X
+15. "睡觉挂单空" / "挂单空 挂X" = 做空限价单 → is_valid_signal=true, side=short, entry_price=X
 
 ### 入场价格
 - 有明确入场价（如"64000接一手"）→ entry_price=64000
@@ -455,6 +463,19 @@ h) Round 4 平仓优先规则：以下即使出现在复盘、庆祝、收益汇
    - "移动止盈X%" / "止盈X%"（明确百分比=部分平仓，position_pct=X）
    - "剩余持仓止盈还是看X"（剩余仓位止盈目标，属于平仓意图）
    - "止盈50%…剩余仓位止损位移至X"（部分平仓+更新止损，主操作 close_position）
+
+i) 单独"止损！"/"止损了！"/"止损" + 感叹号 = 平仓信号（即使无品种方向）
+   → is_exit_signal=true, symbol=""（由系统查持仓推断）
+j) "到达第X止盈位" / "第X止盈位到了" / "止盈位到了" = 部分平仓 → is_exit_signal=true
+k) "X到了，注意止盈" / "注意止盈" + 有持仓上下文 = 平仓信号 → is_exit_signal=true
+l) "多单出掉" / "空单出掉" / "X单出掉" = 平仓（"出掉"是平仓动作）→ is_exit_signal=true
+m) "多单止盈掉" / "空单止盈掉" / "X单止盈掉" = 平仓 → is_exit_signal=true
+n) 军长格式"💰X单止盈💰" / "💰X单出掉💰" = 平仓 → is_exit_signal=true, symbol=对应品种
+o) "第二止盈了" / "超短线第X止盈了" = 部分平仓 → is_exit_signal=true
+
+强约束：当消息含"出局/出掉/止盈掉/止盈了/止损了/止损！/止盈位到了/第X止盈了"等明确平仓动作词时，
+即使缺少品种和方向，也必须判 is_exit_signal=true。系统会从持仓上下文推断品种方向。
+不要因缺品种/方向而判 is_valid_signal=false。
 
 ### 非交易内容（is_valid_signal=false）
 - 复盘/分析："顺利空到1890"、"昨夜重头戏"、"吃了个短线反弹"
@@ -585,6 +606,14 @@ KOL messages may be in English. Apply these rules:
   例: "三笔空单在手…盈利44+43+53个点" → 纯持仓收益汇报，无平仓动作词，is_valid_signal=false
 - 关键区分：平仓需要明确动作词（出局/离场/平仓/止盈出局）；只有"在手/持有/盈利X点/盈利X+X+X个点/收益分别"是状态汇报
 - 即使文本含多个成本价、方向词、盈利点数，只要无明确平仓动作词（出局/离场/平仓/止盈出局），就不是平仓信号
+
+- 关键区分："X单止盈/止损" ≠ 开仓：
+  "多单止盈💰" / "空单止盈💰" / "X单止盈掉" / "X单出掉" = 平仓信号
+  → is_exit_signal=true（"止盈/出掉"是平仓动作，"多单/空单"是被平仓的方向）
+- "三笔空单在手" / "X笔多单在手" + "分别盈利X+X+X个点" = 持仓描述
+  → is_valid_signal=false（"在手/分别盈利"是状态描述，无平仓动作）
+- 判定规则：有"止盈/出掉/出局/离场"动作词 → close_position；有"在手/持有/分别盈利"状态词 → ignore
+- 即使文本含多个成本价、方向词、盈利点数，只要无明确平仓动作词，就不是平仓信号
 
 ## 盘面分析过滤（Round 4 + Round 8 增强）
 - "交易思路" / "盘面分析" / "X月X日交易思路" → 分析文章标题，is_valid_signal=false，除非同段有明确建仓/进场/委托指令

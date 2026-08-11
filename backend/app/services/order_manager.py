@@ -3111,7 +3111,11 @@ async def _verify_order_filled(ex, ex_order: dict, symbol: str) -> tuple[float, 
 
             try:
 
-                fetched = await ex.fetch_order(order_id, symbol)
+                fetch_params = {}
+                if (getattr(ex, "id", "") or "").lower() == "bybit":
+                    # Bybit/ccxt 对 fetchOrder 有额外提示限制；传 acknowledged=True 避免查询阶段抛 ArgumentsRequired。
+                    fetch_params["acknowledged"] = True
+                fetched = await ex.fetch_order(order_id, symbol, fetch_params)
 
                 filled = float(fetched.get("filled") or 0)
 
@@ -3319,7 +3323,7 @@ async def _place_entry(
 
                 price=entry_price,
 
-                notional_usdt=decision.notional_usdt,
+                notional_usdt=notional_usdt,
 
                 leverage=parsed.leverage,
 
