@@ -384,6 +384,7 @@ export default function DashboardPage() {
                       </span>
                     </div>
                     <div className="position-row-profit">
+                      <div className="text-[10px] text-text-tertiary mb-0.5">未盈亏</div>
                       <div className={`position-row-pnl ${(p.total_pnl || 0) >= 0 ? "text-profit" : "text-loss"}`}>
                         {fmtMoney(p.total_pnl || 0)}
                       </div>
@@ -416,6 +417,7 @@ export default function DashboardPage() {
                         <div className="text-xs text-text-tertiary mt-1 truncate">{p.kol_name || "—"}</div>
                       </div>
                       <div className="text-right shrink-0">
+                        <div className="text-[10px] text-text-tertiary mb-0.5">未盈亏</div>
                         <div className={`text-base font-bold font-mono ${(p.total_pnl || 0) >= 0 ? "text-profit" : "text-loss"}`}>
                           {fmtMoney(p.total_pnl || 0)}
                         </div>
