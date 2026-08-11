@@ -1,7 +1,7 @@
 """原始信号模型。"""
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -77,3 +77,18 @@ class ParserShadowResult(Base, TimestampMixin):
     reviewer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     signal_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+
+class ParserRegressionCase(Base, TimestampMixin):
+    """解析回归测试用例。"""
+
+    __tablename__ = "parser_regression_cases"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), default="", index=True)
+    raw_text: Mapped[str] = mapped_column(Text, default="")
+    image_url: Mapped[str] = mapped_column(String(512), default="")
+    expected: Mapped[dict] = mapped_column(JSONB, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    tags: Mapped[str] = mapped_column(String(256), default="", index=True)
+    note: Mapped[str] = mapped_column(Text, default="")

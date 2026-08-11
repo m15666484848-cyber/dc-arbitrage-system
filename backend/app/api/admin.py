@@ -1,11 +1,13 @@
 """管理端路由(仅管理员):管理员账号、客户、时间授权、KOL 管理。"""
 from datetime import datetime, timedelta, timezone
 from typing import Literal
+import re
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -14,7 +16,7 @@ from app.models.audit import AuditLog
 from app.models.config import DiscordAccount
 from app.models.customer import Authorization, Customer
 from app.models.kol import Kol
-from app.models.signal import ParserShadowResult, Signal
+from app.models.signal import ParserRegressionCase, ParserShadowResult, Signal
 from app.models.trading import Order
 from app.models.user import User
 from app.schemas.auth import (
@@ -141,6 +143,54 @@ class CustomerTypeUpdate(BaseModel):
 class ShadowReviewRequest(BaseModel):
     status: Literal["pending", "accepted", "rejected", "ignored"]
     review_note: str = ""
+
+
+class ParserRegressionCaseCreate(BaseModel):
+    name: str = ""
+    raw_text: str
+    image_url: str = ""
+    expected: dict = {}
+    enabled: bool = True
+    tags: str = ""
+    note: str = ""
+
+
+class ParserRegressionCaseUpdate(BaseModel):
+    name: str | None = None
+    raw_text: str | None = None
+    image_url: str | None = None
+    expected: dict | None = None
+    enabled: bool | None = None
+    tags: str | None = None
+    note: str | None = None
+
+
+class ParserRegressionRunRequest(BaseModel):
+    ids: list[int] | None = None
+    enabled_only: bool = True
+
+
+class ParserRegressionBulkImportRequest(BaseModel):
+    raw_text: str
+    enabled: bool = False
+    tag_prefix: str = "批量导入"
+    include_noise: bool = True
+    max_cases: int = 200
+
+
+class ParserRegressionBulkDeleteRequest(BaseModel):
+    mode: Literal["filtered", "drafts", "all"]
+    q: str | None = None
+    enabled: bool | None = None
+    confirm: str = ""
+
+
+class ParserRegressionImportReportSave(BaseModel):
+    import_batch_id: str
+    source_file: str = ""
+    total_messages: int = 0
+    created_cases: int = 0
+    report: dict = {}
 
 
 # ---------- 转发源状态 ----------
@@ -1246,6 +1296,850 @@ class ResetDataConfirm(PydanticBaseModel):
     reset_strategy_state: bool = True  # 是否重置策略马丁格尔状态
     customer_id: int | None = None  # 指定客户ID,为None时清除所有数据
 
+
+
+# ============ 解析回归测试 ============
+
+def _regression_case_out(case: ParserRegressionCase) -> dict:
+    return {
+        "id": case.id,
+        "name": case.name,
+        "raw_text": case.raw_text,
+        "image_url": case.image_url,
+        "expected": case.expected or {},
+        "enabled": case.enabled,
+        "tags": case.tags,
+        "note": case.note,
+        "created_at": case.created_at,
+        "updated_at": case.updated_at,
+    }
+
+
+def _normalize_regression_value(value):
+    if isinstance(value, float):
+        return round(value, 8)
+    if isinstance(value, int):
+        return float(value) if abs(value) > 100 else value
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        return [_normalize_regression_value(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_regression_value(v) for k, v in value.items()}
+    return value
+
+
+def _split_bulk_regression_messages(raw_text: str, max_cases: int = 500) -> list[str]:
+    """把批量粘贴的历史消息拆成独立用例文本。"""
+    text = (raw_text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return []
+    # 优先按空行或明显分隔线拆分。
+    chunks = [c.strip() for c in re.split(r"\n\s*\n+|\n\s*[-=]{3,}\s*\n", text) if c.strip()]
+    # 如果没有空行,则按每行作为一条历史消息处理。
+    if len(chunks) <= 1:
+        chunks = [c.strip() for c in text.split("\n") if c.strip()]
+    out: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        # 去掉常见复制噪音,但保留消息正文。
+        chunk = re.sub(r"^\s*\[?\d{4}[-/]\d{1,2}[-/]\d{1,2}[^\n]{0,40}\]?\s*", "", chunk).strip()
+        chunk = re.sub(r"^\s*(?:KOL|作者|Author|From)\s*[:：].*?\n", "", chunk, flags=re.IGNORECASE).strip()
+        if not chunk or chunk in seen:
+            continue
+        seen.add(chunk)
+        out.append(chunk)
+        if len(out) >= max(1, min(max_cases, 1000)):
+            break
+    return out
+
+def _expected_from_parsed_for_draft(parsed) -> dict:
+    """从当前解析结果生成草稿期望值；仅取稳定关键字段，供人工确认后启用。"""
+    data = parsed.model_dump() if hasattr(parsed, "model_dump") else {}
+    expected: dict = {}
+    for field in ("symbol", "side", "entry_price", "stop_loss", "take_profits", "is_exit_signal", "is_update_signal", "action"):
+        value = data.get(field)
+        if value in (None, "", [], {}, False):
+            continue
+        expected[field] = value
+    return expected
+
+def _compact_parser_actual(parsed) -> dict:
+    data = parsed.model_dump() if hasattr(parsed, "model_dump") else {}
+    fields = (
+        "action", "actions", "symbol", "side", "entry_price", "entry_prices",
+        "take_profits", "stop_loss", "condition_price", "position_pct",
+        "confidence", "is_exit_signal", "is_update_signal", "reason",
+        "exit_reason", "update_reason",
+    )
+    return {k: data.get(k) for k in fields if data.get(k) not in (None, "", [], {}, False)}
+
+
+def _diagnose_parser_import_item(index: int, raw_text: str, parsed, expected: dict) -> dict:
+    """对导入样本做启发式风险诊断,用于快速定位最可能解析错的地方。"""
+    data = parsed.model_dump() if hasattr(parsed, "model_dump") else {}
+    text = raw_text or ""
+    action = data.get("action") or ""
+    actions = data.get("actions") or []
+    confidence = float(data.get("confidence") or 0.0)
+    symbol = data.get("symbol") or ""
+    side = data.get("side") or ""
+    entry = data.get("entry_price")
+    entries = data.get("entry_prices") or []
+    tps = data.get("take_profits") or []
+    sl = data.get("stop_loss")
+    pct = float(data.get("position_pct") or 0.0)
+
+    issues: list[dict] = []
+
+    def add(priority: str, category: str, title: str, reason: str, suggested_action: str = "") -> None:
+        score = {"P0": 100, "P1": 60, "P2": 30}.get(priority, 10)
+        issues.append({
+            "priority": priority,
+            "risk_level": "高" if priority == "P0" else ("中" if priority == "P1" else "低"),
+            "category": category,
+            "title": title,
+            "reason": reason,
+            "suggested_action": suggested_action,
+            "score": score,
+        })
+
+    open_action = action in ("open_long", "open_short") or any(a in ("open_long", "open_short") for a in actions)
+    close_action = action == "close_position" or "close_position" in actions
+    cancel_action = action == "cancel_order" or "cancel_order" in actions
+    update_action = action == "update_tp_sl" or "update_tp_sl" in actions or bool(data.get("is_update_signal"))
+
+    has_cancel_words = bool(re.search(r"撤掉|撤了|撤回|撤单|取消|不要了|作废|不挂了|别挂了", text))
+    has_exit_pct_words = bool(re.search(r"止盈\s*\d+(?:\.\d+)?\s*%|分批止盈|部分止盈|先出\s*\d+(?:\.\d+)?\s*%|减仓\s*\d+(?:\.\d+)?\s*%", text, re.IGNORECASE))
+    has_protect_words = bool(re.search(r"保护利润|保护本金|保护价|推保护|保本|成本价", text))
+    has_exit_words = bool(re.search(r"出局|离场|平仓|全平|清仓|减仓|止盈出|先出|平掉", text))
+    has_open_words = bool(re.search(r"做多|做空|开多|开空|进多|进空|入场|进场|挂多|挂空|买入|卖出|long|short", text, re.IGNORECASE))
+    has_price_words = bool(re.search(r"止损|止盈|目标|现价|附近|区间|\d{3,}", text))
+    has_follow_words = bool(re.search(r"再开一次|再开|重新开|再次开|再进一次|重新进|前面|之前|刚才", text))
+
+    if open_action and has_cancel_words:
+        add("P0", "误下单风险", "撤单话术被识别成开仓", "文本出现撤掉/取消/作废等撤单关键词,但当前解析为开仓。", "cancel_order")
+    if open_action and (has_exit_pct_words or has_exit_words or has_protect_words):
+        add("P0", "误下单风险", "平仓/保护利润话术被识别成开仓", "文本包含止盈比例、出局、保护利润或保本语义,但当前解析为开仓。", "close_position / update_tp_sl")
+    if close_action and not symbol:
+        add("P0", "平仓歧义", "平仓信号缺少品种", "没有识别出 symbol,真实执行时只能在唯一持仓时自动推断,多持仓会拒绝。", "补充 symbol 或优化上下文")
+    if close_action and pct <= 0:
+        add("P0", "平仓比例", "平仓信号缺少 position_pct", "明确平仓/止盈出局应有平仓比例；全部平仓应为 100。", "position_pct=100 或对应比例")
+    if cancel_action and not (symbol or entry or entries):
+        add("P1", "撤单定位", "撤单信号缺少定位信息", "撤单已识别,但没有币种或挂单价,可能无法准确找到要撤的挂单。", "补充 symbol/entry_price")
+    if update_action and not (tps or sl):
+        add("P1", "更新无参数", "保护/更新提示缺少具体 TP/SL", "这类消息不会下单,但也无法更新止损/止盈,需要等待明确价格。", "ignored / 等待明确价格")
+    if has_open_words and not open_action and not close_action and not cancel_action and not update_action:
+        add("P1", "漏单风险", "疑似策略消息未识别为动作", "文本有开仓关键词,但当前没有标准动作。", "open_long / open_short")
+    if open_action and not symbol:
+        add("P1", "缺字段", "开仓缺少品种", "开仓动作没有 symbol,后续会被拒绝。", "补充 symbol")
+    if open_action and side not in ("long", "short"):
+        add("P1", "缺字段", "开仓缺少方向", "开仓动作没有 long/short,后续会被拒绝。", "补充 side")
+    if open_action and entry is None and not entries and has_follow_words:
+        add("P1", "上下文缺失", "再开一次类信号缺少价格", "这类信号需要从前序策略补齐入场价/止损/止盈,否则可能市价兜底。", "关联前序信号")
+    if open_action and sl is None:
+        add("P2", "风控缺字段", "开仓缺少止损", "策略消息没有识别出止损,可能依赖默认策略或被风控拒绝。", "检查 stop_loss")
+    if confidence < 0.4 and (has_open_words or has_price_words or has_cancel_words or has_exit_words):
+        add("P1", "低置信漏判", "疑似交易消息但置信度低", "文本包含交易关键词/价格/撤单/平仓词,但 confidence 较低。", "人工抽查")
+
+    if not issues:
+        if expected:
+            add("P2", "低风险", "解析看起来正常", "当前解析有明确动作或关键字段,暂未命中高风险规则。", action)
+        else:
+            add("P2", "无用信息", "疑似聊天/噪音", "没有生成关键 expected 字段,大概率是无用消息或非交易内容。", "ignored")
+
+    primary = sorted(issues, key=lambda x: x["score"], reverse=True)[0]
+    return {
+        "index": index,
+        "raw_text": text,
+        "risk_level": primary["risk_level"],
+        "priority": primary["priority"],
+        "category": primary["category"],
+        "title": primary["title"],
+        "reason": primary["reason"],
+        "suggested_action": primary["suggested_action"],
+        "score": primary["score"],
+        "actual": _compact_parser_actual(parsed),
+        "issues": issues,
+    }
+
+
+def _build_parser_import_report(items: list[dict], total_messages: int, skipped_noise: int = 0) -> dict:
+    risk_counts = {"高": 0, "中": 0, "低": 0}
+    action_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    strategy_count = 0
+    noise_count = 0
+
+    for item in items:
+        risk_counts[item["risk_level"]] = risk_counts.get(item["risk_level"], 0) + 1
+        action = (item.get("actual") or {}).get("action") or "ignored"
+        action_counts[action] = action_counts.get(action, 0) + 1
+        category = item.get("category") or "其他"
+        category_counts[category] = category_counts.get(category, 0) + 1
+        if action == "ignored" or category == "无用信息":
+            noise_count += 1
+        else:
+            strategy_count += 1
+
+    high_items = [i for i in items if i["priority"] == "P0"]
+    medium_items = [i for i in items if i["priority"] == "P1"]
+    low_items = [i for i in items if i["priority"] == "P2"]
+    sorted_items = sorted(items, key=lambda x: x.get("score", 0), reverse=True)
+
+    groups = [
+        {
+            "category": cat,
+            "count": count,
+            "samples": [i for i in sorted_items if i.get("category") == cat][:5],
+        }
+        for cat, count in sorted(category_counts.items(), key=lambda x: x[1], reverse=True)
+    ]
+
+    normal_items = [
+        i for i in items
+        if i.get("priority") == "P2"
+        and i.get("category") == "低风险"
+        and i.get("title") == "解析看起来正常"
+        and ((i.get("actual") or {}).get("action") not in (None, "", "ignored"))
+    ]
+    noise_items = [i for i in items if i.get("category") == "无用信息" or ((i.get("actual") or {}).get("action") == "ignored")]
+    warning_items = [
+        i for i in items
+        if i not in high_items
+        and i not in medium_items
+        and i not in normal_items
+        and i not in noise_items
+    ]
+    high_risk_count = len(high_items)
+    medium_risk_count = len(medium_items)
+    low_risk_count = len(low_items)
+    risk_count = high_risk_count + medium_risk_count
+    effective_executable_items = [
+        i for i in items
+        if i not in high_items
+        and i not in medium_items
+        and i not in noise_items
+        and ((i.get("actual") or {}).get("action") not in (None, "", "ignored"))
+    ]
+    effective_executable_count = len(effective_executable_items)
+    normal_execution_count = len(normal_items)
+    warning_count = len(warning_items)
+    failed_count = 0
+    success_count = len(items)
+    # 未执行 = 有效信息总数(策略消息) - 有效可执行数；噪音/聊天不算在分母里
+    not_executed_count = max(strategy_count - effective_executable_count, 0)
+
+    fix_suggestions: list[str] = []
+    if high_risk_count:
+        fix_suggestions.append("优先处理 P0 高风险样本，重点核对误下单、平仓/撤单误判、关键价格识别错误。")
+    if medium_risk_count:
+        fix_suggestions.append("复查 P1 中风险样本，补齐方向、交易对、入场价、止损止盈等关键字段。")
+    if warning_count:
+        fix_suggestions.append("清理或修正低风险告警样本，减少字段缺失、低置信度和规则边界问题。")
+    if noise_count + skipped_noise:
+        fix_suggestions.append("将聊天、通知、行情闲聊等无用信息沉淀为噪音样本，避免后续误触发策略解析。")
+    if not fix_suggestions:
+        fix_suggestions.append("本次导入整体质量较好，可抽查少量样本后进入回归测试。")
+
+    success_rate = round((success_count / total_messages) * 100, 2) if total_messages else 0
+    # 成功率 = 有效可执行 / 有效信息总数(策略消息数)；噪音/聊天不应计入分母
+    execution_success_rate = round((effective_executable_count / strategy_count) * 100, 2) if strategy_count else 0
+    normal_rate = round((normal_execution_count / total_messages) * 100, 2) if total_messages else 0
+    if high_risk_count:
+        overall_analysis = (
+            f"本次共分析 {total_messages} 条消息，有效可执行 {effective_executable_count} 条，未执行 {not_executed_count} 条，"
+            f"执行成功率 {execution_success_rate}%（有效信息 {strategy_count} 条中可执行 {effective_executable_count} 条）。其中正常执行 {normal_execution_count} 条，存在 {high_risk_count} 条高风险样本，需要优先修复后再启用相关回归用例。"
+        )
+    elif risk_count:
+        overall_analysis = (
+            f"本次共分析 {total_messages} 条消息，有效可执行 {effective_executable_count} 条，未执行 {not_executed_count} 条，"
+            f"执行成功率 {execution_success_rate}%（有效信息 {strategy_count} 条中可执行 {effective_executable_count} 条）。其中正常执行 {normal_execution_count} 条，未发现 P0 高风险，但仍有 {risk_count} 条风险样本建议复查。"
+        )
+    elif warning_count:
+        overall_analysis = (
+            f"本次共分析 {total_messages} 条消息，有效可执行 {effective_executable_count} 条，未执行 {not_executed_count} 条，"
+            f"执行成功率 {execution_success_rate}%（有效信息 {strategy_count} 条中可执行 {effective_executable_count} 条）。其中正常执行 {normal_execution_count} 条，整体可用，但有 {warning_count} 条低风险告警建议抽查。"
+        )
+    else:
+        overall_analysis = (
+            f"本次共分析 {total_messages} 条消息，有效可执行 {effective_executable_count} 条，未执行 {not_executed_count} 条，"
+            f"执行成功率 {execution_success_rate}%（有效信息 {strategy_count} 条中可执行 {effective_executable_count} 条），正常执行 {normal_execution_count} 条，未发现明显风险。"
+        )
+
+    return {
+        "summary": {
+            "total_messages": total_messages,
+            "diagnosed": len(items),
+            "created_cases": len(items),
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "effective_executable_count": effective_executable_count,
+            "not_executed_count": not_executed_count,
+            "execution_success_rate": execution_success_rate,
+            "normal_execution_rate": normal_rate,
+            "import_success_rate": success_rate,
+            "strategy_count": strategy_count,
+            "noise_count": noise_count + skipped_noise,
+            "skipped_noise": skipped_noise,
+            "risk_count": risk_count,
+            "high_risk": high_risk_count,
+            "medium_risk": medium_risk_count,
+            "low_risk": low_risk_count,
+            "normal_execution_count": normal_execution_count,
+            "warning_count": warning_count,
+        },
+        "overall_analysis": overall_analysis,
+        "fix_suggestions": fix_suggestions,
+        "risk_counts": risk_counts,
+        "action_counts": action_counts,
+        "category_counts": category_counts,
+        "groups": groups,
+        "top_issues": sorted_items[:80],
+    }
+
+
+def _build_parser_report_comparison(previous_report: dict | None, current_report: dict) -> dict:
+    previous_summary = (previous_report or {}).get("summary") or {}
+    current_summary = (current_report or {}).get("summary") or {}
+    metric_labels = {
+        "total_messages": "共分析",
+        "effective_executable_count": "有效可执行",
+        "normal_execution_count": "正常执行",
+        "not_executed_count": "未执行",
+        "execution_success_rate": "成功率",
+        "risk_count": "风险合计",
+        "high_risk": "高风险",
+        "warning_count": "告警样本",
+    }
+    metrics: dict[str, dict] = {}
+    for key, label in metric_labels.items():
+        prev = previous_summary.get(key, 0) or 0
+        curr = current_summary.get(key, 0) or 0
+        try:
+            prev_num = float(prev)
+            curr_num = float(curr)
+        except Exception:
+            prev_num = 0.0
+            curr_num = 0.0
+        delta = round(curr_num - prev_num, 2)
+        metrics[key] = {
+            "label": label,
+            "previous": prev,
+            "current": curr,
+            "delta": delta,
+        }
+    improved = (
+        float(metrics["effective_executable_count"]["delta"]) > 0
+        or float(metrics["normal_execution_count"]["delta"]) > 0
+        or float(metrics["risk_count"]["delta"]) < 0
+        or float(metrics["high_risk"]["delta"]) < 0
+    )
+    summary = "相比上次报告有改善。" if improved else "相比上次报告暂无明显改善，建议继续处理高风险和告警样本。"
+    if not previous_report:
+        summary = "暂无上次报告可对比，本次刷新已作为新的基准。"
+    return {
+        "summary": summary,
+        "metrics": metrics,
+        "previous_generated_at": (previous_report or {}).get("generated_at") or (previous_report or {}).get("refreshed_at"),
+    }
+
+
+def _draft_case_name(index: int, raw_text: str, expected: dict) -> str:
+    symbol = expected.get("symbol") or "未识别"
+    action = expected.get("action") or ("无用信息" if not expected else "解析样本")
+    snippet = re.sub(r"\s+", " ", raw_text).strip()[:18]
+    return f"批量{index:03d}-{symbol}-{action}-{snippet}"
+
+
+def _run_one_regression_case(case: ParserRegressionCase) -> dict:
+    from app.services.signal_parser import parse_text
+
+    parsed = parse_text(case.raw_text or "")
+    actual = parsed.model_dump()
+    expected = case.expected or {}
+    failed_fields: list[dict] = []
+    passed_fields: list[str] = []
+    skipped_fields: list[str] = []
+    for field, expected_value in expected.items():
+        if expected_value is None or expected_value == "":
+            skipped_fields.append(field)
+            continue
+        actual_value = actual.get(field)
+        norm_expected = _normalize_regression_value(expected_value)
+        norm_actual = _normalize_regression_value(actual_value)
+        if norm_expected == norm_actual:
+            passed_fields.append(field)
+        else:
+            failed_fields.append({
+                "field": field,
+                "expected": expected_value,
+                "actual": actual_value,
+            })
+    return {
+        "case_id": case.id,
+        "name": case.name,
+        "raw_text": case.raw_text,
+        "enabled": case.enabled,
+        "tags": case.tags,
+        "expected": expected,
+        "actual": actual,
+        "passed": len(failed_fields) == 0,
+        "assertion_count": len(passed_fields) + len(failed_fields),
+        "passed_fields": passed_fields,
+        "failed_fields": failed_fields,
+        "skipped_fields": skipped_fields,
+    }
+
+
+@router.get("/parser-regression-cases")
+async def list_parser_regression_cases(
+    enabled: bool | None = Query(default=None, description="按启用状态过滤"),
+    q: str | None = Query(default=None, description="按名称/标签/原文搜索"),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=100, ge=20, le=300, description="每页数量"),
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    stmt = select(ParserRegressionCase)
+    if enabled is not None:
+        stmt = stmt.where(ParserRegressionCase.enabled == enabled)
+    if q:
+        # 支持多个关键词用空格分隔,多个词之间为 AND。
+        # 例如: "批次:20260811 高风险待确认"。
+        for token in [t.strip() for t in q.strip().split() if t.strip()]:
+            like = f"%{token}%"
+            stmt = stmt.where(
+                ParserRegressionCase.name.ilike(like)
+                | ParserRegressionCase.tags.ilike(like)
+                | ParserRegressionCase.raw_text.ilike(like)
+            )
+
+    total_stmt = select(func.count()).select_from(stmt.subquery())
+    total = int((await db.execute(total_stmt)).scalar() or 0)
+    offset = (page - 1) * page_size
+    rows = (
+        await db.execute(
+            stmt.order_by(ParserRegressionCase.id.desc()).offset(offset).limit(page_size)
+        )
+    ).scalars().all()
+    return ok({
+        "items": [_regression_case_out(r) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+    })
+
+
+@router.post("/parser-regression-cases")
+async def create_parser_regression_case(
+    body: ParserRegressionCaseCreate,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    if not body.raw_text.strip():
+        raise HTTPException(400, "请输入 KOL 消息原文")
+    case = ParserRegressionCase(
+        name=body.name.strip() or body.raw_text.strip()[:40],
+        raw_text=body.raw_text.strip(),
+        image_url=body.image_url.strip(),
+        expected=body.expected or {},
+        enabled=body.enabled,
+        tags=body.tags.strip(),
+        note=body.note.strip(),
+    )
+    db.add(case)
+    try:
+        await db.commit()
+        await db.refresh(case)
+    except Exception:
+        await db.rollback()
+        logger.exception("创建解析回归用例失败")
+        raise HTTPException(500, "创建解析回归用例失败")
+    await _audit(db, admin.id, "create_parser_regression_case", case.name)
+    return ok(_regression_case_out(case))
+
+
+@router.put("/parser-regression-cases/{case_id}")
+async def update_parser_regression_case(
+    case_id: int,
+    body: ParserRegressionCaseUpdate,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    case = (
+        await db.execute(select(ParserRegressionCase).where(ParserRegressionCase.id == case_id))
+    ).scalar_one_or_none()
+    if not case:
+        raise HTTPException(404, "回归用例不存在")
+    data = body.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        if isinstance(value, str):
+            value = value.strip()
+        setattr(case, field, value)
+    if not case.raw_text.strip():
+        raise HTTPException(400, "KOL 消息原文不能为空")
+    try:
+        await db.commit()
+        await db.refresh(case)
+    except Exception:
+        await db.rollback()
+        logger.exception("更新解析回归用例失败")
+        raise HTTPException(500, "更新解析回归用例失败")
+    await _audit(db, admin.id, "update_parser_regression_case", str(case_id))
+    return ok(_regression_case_out(case))
+
+
+async def _ensure_parser_import_report_table(db: AsyncSession) -> None:
+    await db.execute(text(
+        "CREATE TABLE IF NOT EXISTS parser_regression_import_reports ("
+        "id SERIAL PRIMARY KEY, "
+        "import_batch_id VARCHAR(64) NOT NULL UNIQUE, "
+        "source_file VARCHAR(256) DEFAULT '', "
+        "total_messages INTEGER DEFAULT 0, "
+        "created_cases INTEGER DEFAULT 0, "
+        "high_risk INTEGER DEFAULT 0, "
+        "medium_risk INTEGER DEFAULT 0, "
+        "low_risk INTEGER DEFAULT 0, "
+        "report JSONB DEFAULT '{}'::jsonb, "
+        "created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(), "
+        "updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now())"
+    ))
+    await db.execute(text("CREATE INDEX IF NOT EXISTS ix_parser_regression_import_reports_batch ON parser_regression_import_reports(import_batch_id)"))
+    await db.execute(text("CREATE INDEX IF NOT EXISTS ix_parser_regression_import_reports_created_at ON parser_regression_import_reports(created_at)"))
+
+
+def _import_report_row_out(row) -> dict:
+    return {
+        "id": row.id,
+        "import_batch_id": row.import_batch_id,
+        "source_file": row.source_file,
+        "total_messages": row.total_messages,
+        "created_cases": row.created_cases,
+        "high_risk": row.high_risk,
+        "medium_risk": row.medium_risk,
+        "low_risk": row.low_risk,
+        "report": row.report or {},
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+@router.get("/parser-regression-import-reports")
+async def list_parser_regression_import_reports(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    await _ensure_parser_import_report_table(db)
+    rows = (await db.execute(text(
+        "SELECT id, import_batch_id, source_file, total_messages, created_cases, "
+        "high_risk, medium_risk, low_risk, report, created_at, updated_at "
+        "FROM parser_regression_import_reports "
+        "ORDER BY created_at DESC LIMIT :limit"
+    ), {"limit": limit})).mappings().all()
+    return ok([dict(r) for r in rows])
+
+
+@router.post("/parser-regression-import-reports")
+async def save_parser_regression_import_report(
+    body: ParserRegressionImportReportSave,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    batch_id = (body.import_batch_id or "").strip()
+    if not batch_id:
+        raise HTTPException(400, "缺少导入批次 ID")
+    await _ensure_parser_import_report_table(db)
+    summary = (body.report or {}).get("summary") or {}
+    high = int(summary.get("high_risk") or 0)
+    medium = int(summary.get("medium_risk") or 0)
+    low = int(summary.get("low_risk") or 0)
+    try:
+        await db.execute(text(
+            "INSERT INTO parser_regression_import_reports "
+            "(import_batch_id, source_file, total_messages, created_cases, high_risk, medium_risk, low_risk, report, updated_at) "
+            "VALUES (:batch, :source_file, :total_messages, :created_cases, :high, :medium, :low, CAST(:report AS jsonb), now()) "
+            "ON CONFLICT (import_batch_id) DO UPDATE SET "
+            "source_file = EXCLUDED.source_file, total_messages = EXCLUDED.total_messages, "
+            "created_cases = EXCLUDED.created_cases, high_risk = EXCLUDED.high_risk, "
+            "medium_risk = EXCLUDED.medium_risk, low_risk = EXCLUDED.low_risk, "
+            "report = EXCLUDED.report, updated_at = now()"
+        ), {
+            "batch": batch_id,
+            "source_file": (body.source_file or "")[:256],
+            "total_messages": body.total_messages,
+            "created_cases": body.created_cases,
+            "high": high,
+            "medium": medium,
+            "low": low,
+            "report": json.dumps(body.report or {}, ensure_ascii=False),
+        })
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("保存解析导入报告失败")
+        raise HTTPException(500, "保存解析导入报告失败")
+    await _audit(db, admin.id, "save_parser_regression_import_report", batch_id)
+    return ok({"import_batch_id": batch_id})
+
+
+@router.post("/parser-regression-import-reports/{import_batch_id}/refresh")
+async def refresh_parser_regression_import_report(
+    import_batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    """按导入批次重新解析当前用例并刷新报告，修复 parser 后可直接对比上次结果。"""
+    from app.services.signal_parser import parse_text
+
+    batch_id = (import_batch_id or "").strip()
+    if not batch_id:
+        raise HTTPException(400, "缺少导入批次 ID")
+    await _ensure_parser_import_report_table(db)
+    row = (await db.execute(text(
+        "SELECT id, import_batch_id, source_file, total_messages, created_cases, "
+        "high_risk, medium_risk, low_risk, report, created_at, updated_at "
+        "FROM parser_regression_import_reports WHERE import_batch_id = :batch"
+    ), {"batch": batch_id})).mappings().first()
+    if not row:
+        raise HTTPException(404, "导入报告不存在")
+
+    cases = (await db.execute(
+        select(ParserRegressionCase)
+        .where(ParserRegressionCase.tags.ilike(f"%批次:{batch_id}%"))
+        .order_by(ParserRegressionCase.id.asc())
+    )).scalars().all()
+    if not cases:
+        raise HTTPException(404, "该批次没有可刷新的回归用例")
+
+    report_items: list[dict] = []
+    for idx, case in enumerate(cases, start=1):
+        parsed = parse_text(case.raw_text or "")
+        expected = _expected_from_parsed_for_draft(parsed)
+        diagnosis = _diagnose_parser_import_item(idx, case.raw_text or "", parsed, expected)
+        diagnosis["case_id"] = case.id
+        report_items.append(diagnosis)
+
+    previous_report = row["report"] or {}
+    refreshed_report = _build_parser_import_report(report_items, total_messages=len(cases), skipped_noise=0)
+    refreshed_report.update({
+        "import_batch_id": batch_id,
+        "source_file": row["source_file"] or "",
+        "generated_at": (previous_report or {}).get("generated_at"),
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        "comparison": _build_parser_report_comparison(previous_report, refreshed_report),
+    })
+    summary = refreshed_report.get("summary") or {}
+    await db.execute(text(
+        "UPDATE parser_regression_import_reports SET "
+        "total_messages = :total_messages, created_cases = :created_cases, "
+        "high_risk = :high, medium_risk = :medium, low_risk = :low, "
+        "report = CAST(:report AS jsonb), updated_at = now() "
+        "WHERE import_batch_id = :batch"
+    ), {
+        "batch": batch_id,
+        "total_messages": int(summary.get("total_messages") or len(cases)),
+        "created_cases": int(summary.get("created_cases") or len(cases)),
+        "high": int(summary.get("high_risk") or 0),
+        "medium": int(summary.get("medium_risk") or 0),
+        "low": int(summary.get("low_risk") or 0),
+        "report": json.dumps(refreshed_report, ensure_ascii=False),
+    })
+    await db.commit()
+    new_row = (await db.execute(text(
+        "SELECT id, import_batch_id, source_file, total_messages, created_cases, "
+        "high_risk, medium_risk, low_risk, report, created_at, updated_at "
+        "FROM parser_regression_import_reports WHERE import_batch_id = :batch"
+    ), {"batch": batch_id})).mappings().first()
+    await _audit(db, admin.id, "refresh_parser_regression_import_report", batch_id)
+    return ok(dict(new_row))
+
+
+@router.delete("/parser-regression-import-reports/{import_batch_id}")
+async def delete_parser_regression_import_report(
+    import_batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    batch_id = (import_batch_id or "").strip()
+    if not batch_id:
+        raise HTTPException(400, "缺少导入批次 ID")
+    await _ensure_parser_import_report_table(db)
+    await db.execute(text("DELETE FROM parser_regression_import_reports WHERE import_batch_id = :batch"), {"batch": batch_id})
+    await db.commit()
+    await _audit(db, admin.id, "delete_parser_regression_import_report", batch_id)
+    return ok({"import_batch_id": batch_id})
+
+
+@router.post("/parser-regression-cases/bulk-delete")
+async def bulk_delete_parser_regression_cases(
+    body: ParserRegressionBulkDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    """批量删除回归用例。
+
+    安全规则:
+    - filtered: 必须至少带 q 或 enabled 筛选条件,避免误删全部。
+    - drafts: 只删除 enabled=False 的草稿用例。
+    - all: 必须 confirm == DELETE ALL。
+    """
+    conditions = []
+    mode_label = body.mode
+
+    if body.mode == "drafts":
+        conditions.append(ParserRegressionCase.enabled == False)  # noqa: E712
+    elif body.mode == "filtered":
+        q = (body.q or "").strip()
+        if body.enabled is None and not q:
+            raise HTTPException(400, "删除当前筛选结果需要先设置搜索关键词或状态筛选,避免误删全部用例")
+        if body.enabled is not None:
+            conditions.append(ParserRegressionCase.enabled == body.enabled)
+        if q:
+            like = f"%{q}%"
+            conditions.append(
+                ParserRegressionCase.name.ilike(like)
+                | ParserRegressionCase.tags.ilike(like)
+                | ParserRegressionCase.raw_text.ilike(like)
+            )
+    elif body.mode == "all":
+        if body.confirm.strip() != "DELETE ALL":
+            raise HTTPException(400, "删除全部用例需要输入确认文字 DELETE ALL")
+    else:
+        raise HTTPException(400, "未知删除模式")
+
+    count_stmt = select(func.count()).select_from(ParserRegressionCase)
+    delete_stmt = delete(ParserRegressionCase)
+    for cond in conditions:
+        count_stmt = count_stmt.where(cond)
+        delete_stmt = delete_stmt.where(cond)
+
+    total = int((await db.execute(count_stmt)).scalar() or 0)
+    if total <= 0:
+        return ok({"deleted": 0, "mode": body.mode})
+
+    try:
+        result = await db.execute(delete_stmt)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("批量删除解析回归用例失败")
+        raise HTTPException(500, "批量删除解析回归用例失败")
+
+    deleted_count = int(result.rowcount if result.rowcount is not None else total)
+    await _audit(db, admin.id, "bulk_delete_parser_regression_cases", mode_label, f"deleted={deleted_count}, q={body.q}, enabled={body.enabled}")
+    return ok({"deleted": deleted_count, "mode": body.mode})
+
+
+@router.delete("/parser-regression-cases/{case_id}")
+async def delete_parser_regression_case(
+    case_id: int,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    case = (
+        await db.execute(select(ParserRegressionCase).where(ParserRegressionCase.id == case_id))
+    ).scalar_one_or_none()
+    if not case:
+        raise HTTPException(404, "回归用例不存在")
+    await db.delete(case)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("删除解析回归用例失败")
+        raise HTTPException(500, "删除解析回归用例失败")
+    await _audit(db, admin.id, "delete_parser_regression_case", str(case_id))
+    return ok({"id": case_id})
+
+
+@router.post("/parser-regression-cases/bulk-import")
+async def bulk_import_parser_regression_cases(
+    body: ParserRegressionBulkImportRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    """批量粘贴历史 KOL 消息,自动拆分并生成回归用例草稿。"""
+    from app.services.signal_parser import parse_text
+
+    messages = _split_bulk_regression_messages(body.raw_text, body.max_cases)
+    if not messages:
+        raise HTTPException(400, "没有识别到可导入的消息")
+
+    created: list[ParserRegressionCase] = []
+    report_items: list[dict] = []
+    skipped_noise = 0
+    prefix = (body.tag_prefix or "批量导入").strip()
+    for idx, msg in enumerate(messages, start=1):
+        parsed = parse_text(msg)
+        expected = _expected_from_parsed_for_draft(parsed)
+        diagnosis = _diagnose_parser_import_item(idx, msg, parsed, expected)
+        is_noise = not bool(expected)
+        if is_noise and not body.include_noise:
+            skipped_noise += 1
+            continue
+        risk_tag = "高风险待确认" if diagnosis["priority"] == "P0" else ("中风险待确认" if diagnosis["priority"] == "P1" else "低风险")
+        tags = f"{prefix},{'无用信息' if is_noise else '策略消息'},{risk_tag},待确认"
+        case = ParserRegressionCase(
+            name=_draft_case_name(idx, msg, expected),
+            raw_text=msg,
+            image_url="",
+            expected=expected,
+            enabled=body.enabled,
+            tags=tags,
+            note=f"批量导入自动生成草稿；诊断: {diagnosis['priority']} {diagnosis['category']} - {diagnosis['title']}。请人工确认 expected JSON 后再启用为黄金用例。",
+        )
+        db.add(case)
+        created.append(case)
+        report_items.append(diagnosis)
+
+    try:
+        await db.commit()
+        for case in created:
+            await db.refresh(case)
+    except Exception:
+        await db.rollback()
+        logger.exception("批量导入解析回归用例失败")
+        raise HTTPException(500, "批量导入解析回归用例失败")
+
+    await _audit(db, admin.id, "bulk_import_parser_regression_cases", f"created={len(created)}")
+    for item, case in zip(report_items, created):
+        item["case_id"] = case.id
+
+    return ok({
+        "created": len(created),
+        "skipped_noise": skipped_noise,
+        "enabled": body.enabled,
+        "items": [_regression_case_out(c) for c in created],
+        "report": _build_parser_import_report(report_items, total_messages=len(messages), skipped_noise=skipped_noise),
+    })
+
+
+@router.post("/parser-regression-run")
+async def run_parser_regression(
+    body: ParserRegressionRunRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    stmt = select(ParserRegressionCase)
+    if body.ids:
+        stmt = stmt.where(ParserRegressionCase.id.in_(body.ids))
+    if body.enabled_only:
+        stmt = stmt.where(ParserRegressionCase.enabled.is_(True))
+    cases = (
+        await db.execute(stmt.order_by(ParserRegressionCase.id))
+    ).scalars().all()
+    results = [_run_one_regression_case(case) for case in cases]
+    passed = len([r for r in results if r["passed"]])
+    failed = len(results) - passed
+    return ok({
+        "total": len(results),
+        "passed": passed,
+        "failed": failed,
+        "results": results,
+    })
 
 
 @router.post("/simulate-kol-signal")

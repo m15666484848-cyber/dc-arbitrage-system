@@ -85,6 +85,22 @@ export const API = {
   testLlm: (llm_type: "text" | "vision" = "text") =>
     api("post", `/admin/system-config/test-llm?llm_type=${llm_type}`),
   simulateKolSignal: (data: any) => api("post", "/admin/simulate-kol-signal", data),
+  listParserRegressionCases: (params?: { enabled?: boolean; q?: string; page?: number; page_size?: number }) =>
+    api("get", "/admin/parser-regression-cases", null, params),
+  createParserRegressionCase: (data: any) => api("post", "/admin/parser-regression-cases", data),
+  bulkImportParserRegressionCases: (data: { raw_text: string; enabled?: boolean; tag_prefix?: string; include_noise?: boolean; max_cases?: number }) =>
+    api("post", "/admin/parser-regression-cases/bulk-import", data),
+  updateParserRegressionCase: (id: number, data: any) => api("put", `/admin/parser-regression-cases/${id}`, data),
+  deleteParserRegressionCase: (id: number) => api("delete", `/admin/parser-regression-cases/${id}`),
+  bulkDeleteParserRegressionCases: (data: { mode: "filtered" | "drafts" | "all"; q?: string; enabled?: boolean; confirm?: string }) =>
+    api("post", "/admin/parser-regression-cases/bulk-delete", data),
+  listParserRegressionImportReports: () => api("get", "/admin/parser-regression-import-reports"),
+  saveParserRegressionImportReport: (data: { import_batch_id: string; source_file?: string; total_messages?: number; created_cases?: number; report: any }) =>
+    api("post", "/admin/parser-regression-import-reports", data),
+  refreshParserRegressionImportReport: (batchId: string) => api("post", `/admin/parser-regression-import-reports/${encodeURIComponent(batchId)}/refresh`),
+  deleteParserRegressionImportReport: (batchId: string) => api("delete", `/admin/parser-regression-import-reports/${encodeURIComponent(batchId)}`),
+  runParserRegression: (data: { ids?: number[]; enabled_only?: boolean }) =>
+    api("post", "/admin/parser-regression-run", data),
   // trading
   listKols: () => api("get", "/kols"),
   setFollows: (kol_settings: { kol_id: number; strategy_id: number | null; notional_usdt: number | null }[]) =>

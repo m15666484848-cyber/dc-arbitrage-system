@@ -122,6 +122,36 @@ async def _migrate_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_created_at ON parser_shadow_results(created_at)",
         "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_signal_received_at ON parser_shadow_results(signal_received_at)",
         "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_parse_version ON parser_shadow_results(parse_version)",
+        # 解析回归测试用例:管理页维护,只用于离线解析验证,不触发下单。
+        "CREATE TABLE IF NOT EXISTS parser_regression_cases ("
+        "id SERIAL PRIMARY KEY, "
+        "name VARCHAR(128) DEFAULT '', "
+        "raw_text TEXT DEFAULT '', "
+        "image_url VARCHAR(512) DEFAULT '', "
+        "expected JSONB DEFAULT '{}'::jsonb, "
+        "enabled BOOLEAN DEFAULT TRUE, "
+        "tags VARCHAR(256) DEFAULT '', "
+        "note TEXT DEFAULT '', "
+        "created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(), "
+        "updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS ix_parser_regression_cases_name ON parser_regression_cases(name)",
+        "CREATE INDEX IF NOT EXISTS ix_parser_regression_cases_enabled ON parser_regression_cases(enabled)",
+        "CREATE INDEX IF NOT EXISTS ix_parser_regression_cases_tags ON parser_regression_cases(tags)",
+        # 回归测试文件导入报告:按文件/批次保存整体诊断结果,便于回看和按批次清理。
+        "CREATE TABLE IF NOT EXISTS parser_regression_import_reports ("
+        "id SERIAL PRIMARY KEY, "
+        "import_batch_id VARCHAR(64) NOT NULL UNIQUE, "
+        "source_file VARCHAR(256) DEFAULT '', "
+        "total_messages INTEGER DEFAULT 0, "
+        "created_cases INTEGER DEFAULT 0, "
+        "high_risk INTEGER DEFAULT 0, "
+        "medium_risk INTEGER DEFAULT 0, "
+        "low_risk INTEGER DEFAULT 0, "
+        "report JSONB DEFAULT '{}'::jsonb, "
+        "created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(), "
+        "updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS ix_parser_regression_import_reports_batch ON parser_regression_import_reports(import_batch_id)",
+        "CREATE INDEX IF NOT EXISTS ix_parser_regression_import_reports_created_at ON parser_regression_import_reports(created_at)",
         "ALTER TABLE customers ADD COLUMN IF NOT EXISTS single_exchange_multi_api_limit INTEGER NOT NULL DEFAULT 2",
         # system_config:双 LLM 架构(新增 text_llm_* 和 vision_llm_*)
         # 保留旧 llm_* 字段不删,避免破坏数据

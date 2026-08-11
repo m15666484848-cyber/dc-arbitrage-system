@@ -362,7 +362,7 @@ async def _handle_message(
                 f"min_confidence={kol_llm_config.min_confidence}"
             )
 
-        # 查询该KOL最近3条有效信号，作为上下文注入LLM
+        # 查询该KOL最近10条有效信号，作为上下文注入LLM（含原始文本+时间+持仓）
         _llm_context = ""
         _recent_texts: list[str] = []
         try:
@@ -373,33 +373,85 @@ async def _handle_message(
                     Signal.status.in_(["received", "ordered", "rejected"]),
                 )
                 .order_by(Signal.received_at.desc())
-                .limit(3)
+                .limit(10)
             )
             hist_signals = (await db.execute(hist_stmt)).scalars().all()
             if hist_signals:
                 _recent_texts = [h.raw_text for h in reversed(hist_signals) if h.raw_text]
+                nums = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
                 lines = []
-                nums = ["①", "②", "③"]
                 for i, h in enumerate(reversed(hist_signals)):
                     parts = []
                     h_parsed = h.parsed or {}
-                    if h_parsed.get("side"):
-                        parts.append("做多" if h_parsed["side"] == "long" else "做空")
-                    if h.symbol:
-                        parts.append(h.symbol)
-                    if h_parsed.get("entry_price"):
-                        parts.append(f"进场{h_parsed['entry_price']}")
-                    if h_parsed.get("stop_loss"):
-                        parts.append(f"止损{h_parsed['stop_loss']}")
-                    if h_parsed.get("take_profits"):
-                        tps = h_parsed["take_profits"]
-                        if isinstance(tps, list) and tps:
-                            parts.append(f"止盈{','.join(str(t) for t in tps[:3])}")
+                    # 时间信息（让 LLM 知道信号是多久以前的）
+                    try:
+                        t_str = h.received_at.strftime("%m-%d %H:%M") if h.received_at else ""
+                    except Exception:
+                        t_str = ""
+                    # 结构化字段
                     if h_parsed.get("is_exit_signal"):
-                        parts = ["平仓", h.symbol or ""]
-                    lines.append(f"{nums[i]} {' '.join(parts)}")
+                        parts.append("平仓")
+                        if h.symbol:
+                            parts.append(h.symbol)
+                    else:
+                        if h_parsed.get("side"):
+                            parts.append("做多" if h_parsed["side"] == "long" else "做空")
+                        if h.symbol:
+                            parts.append(h.symbol)
+                        if h_parsed.get("entry_price"):
+                            parts.append(f"进场{h_parsed['entry_price']}")
+                        if h_parsed.get("stop_loss"):
+                            parts.append(f"止损{h_parsed['stop_loss']}")
+                        if h_parsed.get("take_profits"):
+                            tps = h_parsed["take_profits"]
+                            if isinstance(tps, list) and tps:
+                                parts.append(f"止盈{','.join(str(t) for t in tps[:3])}")
+                    # 信号状态（让 LLM 知道是否已成交）
+                    sig_status = h.status or ""
+                    if sig_status == "ordered":
+                        parts.append("[已成交]")
+                    elif sig_status == "rejected":
+                        parts.append("[已拒绝]")
+                    else:
+                        parts.append("[待处理]")
+                    # 原始文本前 120 字（让 LLM 看到 KOL 原话，关联口语化引用）
+                    raw_snippet = (h.raw_text or "").replace("\n", " ").strip()[:120]
+                    line = f"{nums[i] if i < len(nums) else f'({i+1})'} {' '.join(parts)}"
+                    if t_str:
+                        line += f" ({t_str})"
+                    if raw_snippet:
+                        line += f" 原文: {raw_snippet}"
+                    lines.append(line)
                 _llm_context = "[该KOL历史信号]\n" + "\n".join(lines)
-                logger.debug(f"KOL {kol.name} 注入历史上下文: {_llm_context[:100]}")
+
+                # 注入当前持仓状态（让 LLM 知道客户持有什么仓位）
+                try:
+                    from app.models.trading import Position
+                    pos_stmt = (
+                        select(Position)
+                        .where(
+                            Position.kol_id == kol.id,
+                            Position.status == "open",
+                        )
+                        .order_by(Position.opened_at.desc())
+                        .limit(10)
+                    )
+                    open_positions = (await db.execute(pos_stmt)).scalars().all()
+                    if open_positions:
+                        pos_lines = []
+                        for p in open_positions:
+                            p_side = "多" if p.side == "long" else "空"
+                            p_info = f"  {p.symbol} {p_side}仓 数量={p.qty} 开仓价={p.entry_price}"
+                            if p.sl:
+                                p_info += f" 止损={p.sl}"
+                            if p.leverage and p.leverage > 1:
+                                p_info += f" 杠杆={p.leverage}x"
+                            pos_lines.append(p_info)
+                        _llm_context += "\n[当前持仓]\n" + "\n".join(pos_lines)
+                except Exception as pos_e:
+                    logger.debug(f"获取持仓上下文失败: {pos_e}")
+
+                logger.debug(f"KOL {kol.name} 注入上下文(含原文+持仓): {_llm_context[:200]}")
         except Exception as e:
             logger.debug(f"获取历史信号上下文失败: {e}")
 
@@ -416,6 +468,7 @@ async def _handle_message(
         kol_config=kol_llm_config,
         kol_name=_kol_name,
         context=_llm_context,
+        recent_texts=_recent_texts,
     )
 
     # Phase 3: 创建信号记录并处理(使用新的 DB 会话)

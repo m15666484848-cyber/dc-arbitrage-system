@@ -414,6 +414,19 @@ async def _process_exit_signal(
 
     positions = (await db.execute(stmt)).scalars().all()
 
+    # 安全保护:平仓信号没有指定品种时,不能盲目平掉该 KOL 所有持仓。
+    # 只有该 KOL 当前在此账号下仅有一个持仓品种时才自动推断;多个品种则拒绝。
+    if positions and not parsed.symbol:
+        symbols = {p.symbol for p in positions}
+        if len(symbols) == 1:
+            inferred_symbol = next(iter(symbols))
+            parsed.symbol = inferred_symbol
+            logger.info(f"平仓信号自动推断 symbol={inferred_symbol}(该 KOL 唯一持仓)")
+        elif len(symbols) > 1:
+            reason = f"平仓信号未指定品种,且该 KOL 有 {len(symbols)} 个品种持仓,无法自动推断: {symbols}"
+            await _log_signal_status(db, signal, "rejected", reason, customer_id)
+            return {"ok": False, "reason": "未指定品种且存在多个持仓品种(歧义)"}
+
     # 容错:如果指定了 side 但找不到持仓,尝试不限方向查找该品种的所有持仓
 
     # (平仓信号 "ETH 平仓" 可能被误判方向,但用户意图是平掉 ETH 所有持仓)
@@ -509,7 +522,11 @@ async def _process_exit_signal(
 
         try:
 
-            result = await close_position(db, pos.id, pos.qty)
+            position_pct = float(getattr(parsed, "position_pct", 0.0) or 0.0)
+            close_qty = pos.qty
+            if 0 < position_pct < 100:
+                close_qty = round(pos.qty * position_pct / 100.0, 12)
+            result = await close_position(db, pos.id, close_qty)
 
             if result.get("ok"):
 
@@ -659,19 +676,23 @@ async def _process_update_signal(
 
     """
 
-    # 校验:至少有 TP 或 SL 之一
+    # 校验:至少有 TP 或 SL 之一。
+
+    # "注意保护利润" 这类只有保护提醒、没有具体价格的消息,不能当新开仓,
+
+    # 也不应算严重 rejected；记录为 ignored,等待后续明确止损/保本价。
 
     if not parsed.take_profits and parsed.stop_loss is None:
 
         await _log_signal_status(
 
-            db, signal, "rejected",
+            db, signal, "ignored",
 
-            "更新信号无 TP 和 SL,无法更新", customer_id,
+            "更新提示无具体 TP/SL 参数,已忽略等待明确价格", customer_id,
 
         )
 
-        return {"ok": False, "reason": "更新信号无 TP 和 SL"}
+        return {"ok": True, "reason": "更新提示无具体 TP/SL 参数,已忽略"}
 
     # 1. 获取交易所账号
 

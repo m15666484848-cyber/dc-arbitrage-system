@@ -214,7 +214,7 @@ SHORT_WORDS = {
 EXIT_WORDS = {
     # 明确平仓词
     "出局", "离场", "平仓", "平多", "平空", "全平", "关闭",
-    "清仓", "获利了结", "获利平仓",
+    "清仓", "减仓", "减半", "获利了结", "获利平仓",
     "close position", "close order", "close all", "close trade",
     "exit", "take profit", "tp hit",
 }
@@ -308,6 +308,8 @@ FUZZY_EXIT_PATTERNS = [
     r"暂时\s*(?:退出|离场|撤出)",
     # 保本/止损离场
     r"(?:保本\s*(?:走|出|撤|离场|平)|止损\s*(?:离场|出场|走))",
+    # 部分退出/减仓: 统一标记为退出类信号,后续可按仓位比例细化。
+    r"(?:减仓|减半|减掉|减去|减持|先减|部分止盈|部分平仓).{0,12}(?:一半|半仓|部分|[一二两三四五六七八九十\d]+成|[0-9]+%)?",
     # "这单/这波 + 动词"
     r"这(?:单|波|次)\s*(?:走|出|跑|撤|平|收|完)",
     # "出来了/走出去了" 等完成态(不匹配"走出区间/走出趋势"等)
@@ -709,6 +711,8 @@ POSITION_FOLLOW_UP_PATTERNS = [
     r"(?:没|未|还没|没有).{0,10}(?:进|入场|上车|跟|跟上|布局).{0,18}(?:可以|现在|现价|这里|直接)?.{0,10}(?:跟进|进|入场|上车|跟|补)",
     r"(?:可以|现在|现价|这里|直接).{0,10}(?:跟进|进场|入场|上车|跟上|补进)",
     r"(?:跟进|上车|进场|入场|补进)(?:即可|就行|吧)?\s*$",
+    r"(?:前面|之前|刚才|所长给的|给的).{0,24}(?:多单|空单|单子|策略).{0,24}(?:再开一次|再开|重新开|再次开|再进一次|重新进)",
+    r"(?:再开一次|再开|重新开|再次开|再进一次|重新进)(?:即可|就行|吧)?\s*$",
 ]
 
 
@@ -818,6 +822,18 @@ def apply_position_context_if_needed(
     context_text = ""
     for raw in reversed(recent_texts or []):
         context_signal = extract_position_context(raw)
+        if not context_signal:
+            # "再开一次"常引用前面完整策略单,而不是"当前持有"说明。
+            # 这里保守复用最近同 KOL 的明确开仓信号参数,补齐价格/止损/止盈。
+            candidate = parse_text(raw or "")
+            if (
+                candidate
+                and candidate.action in ("open_long", "open_short")
+                and candidate.symbol
+                and candidate.side in ("long", "short")
+                and (candidate.entry_price is not None or candidate.entry_prices)
+            ):
+                context_signal = candidate
         if context_signal:
             context_text = strip_analysis_sections(raw or "").strip()
             break
@@ -1010,7 +1026,9 @@ def extract_take_profits(text: str) -> list[float]:
 
     # 3.6. 中文编号目标: 目标1/目标2/目标3 (KOL 常用格式)
     for i in range(1, 6):
-        for m in re.finditer(rf"目标\s*{i}\s*[:：]?\s*{PRICE_RE}\s*(?:万)?", text):
+        # 避免把 "目标 150" 误识别为 "目标1: 50"。
+        # 编号目标要求数字编号后不能紧跟其它数字。
+        for m in re.finditer(rf"目标\s*{i}(?!\d)\s*[:：]?\s*{PRICE_RE}\s*(?:万)?", text):
             p = _to_float(m.group(1))
             if p and p > 0:
                 if "万" in m.group(0):
@@ -1177,6 +1195,7 @@ def extract_entry(text: str) -> tuple[float | None, list[float]]:
     # "点位" 放最后,避免优先匹配到 "止盈点位/止损点位" 的价格
     keywords = [
         r"进场点位", r"入场点位", r"进场", r"入场",
+        r"现价", r"当前价", r"市价",
         r"开仓", r"开仓价", r"建仓", r"建仓位", r"建仓价",
         r"挂单价", r"触发价", r"委托价",
         r"entry", r"enter\s*at", r"buy\s*@?", r"@\s*",
@@ -1342,6 +1361,23 @@ def extract_position_pct(text: str) -> float:
     m = re.search(r"position\s*[:：]?\s*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
     if m:
         return max(0.0, min(float(m.group(1)), 100.0))
+
+    # 部分平仓/部分止盈比例:
+    # "止盈80%"、"分批止盈80%"、"先出30%"、"减仓50%" 都是平仓比例,
+    # 不能被当作止盈价格 80。
+    partial_patterns = [
+        r"(?:止盈|止盈出|分批止盈|部分止盈|tp|take\s*profit).{0,8}?(\d+(?:\.\d+)?)\s*%",
+        r"(?:减仓|减持|先出|出掉|出|平掉|平仓|平).{0,8}?(\d+(?:\.\d+)?)\s*%",
+        r"(\d+(?:\.\d+)?)\s*%.{0,8}(?:止盈|减仓|先出|出掉|平掉|平仓)",
+    ]
+    for pat in partial_patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return max(0.0, min(float(m.group(1)), 100.0))
+
+    if re.search(r"(?:止盈|先出|出掉|减仓|平掉|平仓).{0,8}(?:一半|半仓|50%)|(?:减半|出一半|止盈一半)", text):
+        return 50.0
+
     # 中文口语仓位词:
     # - 半仓 = 50%
     # - 三成仓 / 3成仓 / 三成 = 30%
@@ -1613,9 +1649,12 @@ def parse_text(text: str) -> ParsedSignal:
 
     text = effective_text
 
-    # 0. 检查是否为"继续持有"类消息 (不是有效信号)
+    # 0. 检查是否为"继续持有"类消息 (不是有效信号)。
+    # 如果同时包含止盈/止损调整语义,优先按更新信号处理,避免
+    # "止损上移到成本价,继续持有" 被成本价/继续持有误拦截。
+    pre_is_update, _pre_update_reason = check_update_intent(text)
     _holding_match = any(re.search(p, text) for p in HOLDING_INDICATORS)
-    if _holding_match:
+    if _holding_match and not pre_is_update:
         logger.info(f"检测到持仓继续/维持消息,标记为非有效信号: {text[:80]}")
         return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="持仓继续/维持消息,非交易信号")
 
@@ -1667,12 +1706,16 @@ def parse_text(text: str) -> ParsedSignal:
     # 3. 如果是平仓信号
     if is_exit:
         logger.info(f"检测到平仓信号: {exit_reason}")
+        pos_pct = extract_position_pct(text)
+        if pos_pct <= 0:
+            pos_pct = 100.0
         # 平仓信号仍需提取品种和方向
         return ParsedSignal(
             symbol=symbol,
             side=side,
             raw_text=raw_text,
             confidence=0.7 if symbol else 0.3,  # 有品种信息时置信度较高
+            position_pct=pos_pct,
             is_exit_signal=True,
             exit_reason=exit_reason,
             actions=["close_position"],
@@ -1704,6 +1747,26 @@ def parse_text(text: str) -> ParsedSignal:
         if entry_prices:
             new_eps = [ep * 10000 if ep < 1000 else ep for ep in entry_prices]
             entry_prices = new_eps
+
+    # 5.4 部分止盈/分批止盈优先按部分平仓处理。
+    # 只在带百分比或明确"分批/部分止盈"时触发,避免把"止盈67200"误当平仓。
+    partial_exit_pct = extract_position_pct(text)
+    if (
+        partial_exit_pct > 0
+        and re.search(r"(?:止盈|分批|部分|先出|减仓|平掉|平仓|推保护|保护价)", text, re.IGNORECASE)
+        and not any(a.startswith("open_") for a in pre_actions)
+    ):
+        return ParsedSignal(
+            symbol=symbol,
+            side=side,
+            raw_text=raw_text,
+            confidence=0.7 if symbol else 0.5,
+            position_pct=partial_exit_pct,
+            is_exit_signal=True,
+            exit_reason=f"部分平仓/止盈比例命中: {partial_exit_pct}%",
+            actions=["close_position"],
+            action="close_position",
+        )
 
     # 5.5 止盈止损更新信号检测
     is_update, update_reason = check_update_intent(text)
@@ -1953,10 +2016,26 @@ async def parse_message(
                 )
                 llm_parsed.has_image = has_image
 
+                # ★ 撤单指令规则优先: 无论 LLM 返回什么结果(confidence 高低),
+                # 只要规则解析器明确检测到撤单指令且不包含"重新挂/再挂"等重开意图,
+                # 就以规则解析器的 cancel_order 结果为准。
+                # 这防止 LLM 将 "撤掉""撤单" 等指令误判为平仓/开仓/其他动作
+                rule_cancel_check = parse_text(combined_for_parse)
+                rule_cancel_check.raw_text = combined
+                rule_cancel_check.has_image = has_image
+                if rule_cancel_check.action == "cancel_order" or "cancel_order" in rule_cancel_check.actions:
+                    has_reopen = _has_any_pattern(combined_for_parse, REOPEN_AFTER_CANCEL_PATTERNS)
+                    if not has_reopen:
+                        logger.info(
+                            f"[{kol_name}] 规则解析器检测到撤单指令,优先于 LLM 结果: {rule_cancel_check.reason}"
+                        )
+                        return rule_cancel_check
+
                 # ★ 关键修复: LLM 判定为无效信号(confidence<=0)时,不运行后续补充检测
                 # 这防止叙事/故事类长文本被误判为平仓信号
                 # (例如: KOL 发了一篇生活感悟,文中出现"卖了"被模糊模式误匹配)
                 if llm_parsed.confidence <= 0:
+                    # 规则保底: 撤单已在上面统一处理,这里直接跳过补充检测
                     logger.info(
                         f"[{kol_name}] LLM 判定为无效信号(confidence={llm_parsed.confidence:.2f}),"
                         f"跳过平仓/更新信号补充检测"

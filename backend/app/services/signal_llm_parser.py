@@ -452,21 +452,23 @@ async def parse_with_llm(
         # 构建 ParsedSignal
         is_exit = _as_bool(result.get("is_exit_signal", False))
         position_pct = _as_float(result.get("position_pct"), 0.0)
-        if not is_exit and position_pct <= 0:
-            # LLM 有时不会返回仓位比例，使用规则解析兜底识别:
-            # "半仓"=50%, "三成仓"=30%, "轻仓"=30%, "重仓"=70%。
+        if position_pct <= 0:
+            # LLM 有时不会返回仓位/平仓比例，使用规则解析兜底识别。
             from app.services.signal_parser import extract_position_pct
             position_pct = extract_position_pct(stripped_text)
+        if is_exit and position_pct <= 0:
+            # 明确平仓但未说明比例时,默认全部平仓。
+            position_pct = 100.0
         parsed = ParsedSignal(
             symbol=_lazy_normalize_symbol(result.get("symbol", "")),  # 统一为 BTC/USDT 格式
-            side=_normalize_side(result.get("side", "")) if not is_exit else "",  # 平仓信号不带方向(平掉该品种所有方向持仓)
+            side=_normalize_side(result.get("side", "")),  # 平仓信号若明确多/空,保留方向以避免误平反向仓
             entry_price=None if is_exit else _as_optional_float(result.get("entry_price")),
             entry_prices=[] if is_exit else _as_float_list(result.get("entry_prices", [])),
             take_profits=[] if is_exit else _as_float_list(result.get("take_profits", [])),
             condition_price=None if is_exit else _as_optional_float(result.get("condition_price")),
             breakeven_after_tp=None if is_exit else _as_optional_float(result.get("breakeven_after_tp")),
             stop_loss=None if is_exit else _as_optional_float(result.get("stop_loss")),
-            position_pct=0.0 if is_exit else max(0.0, min(position_pct, 100.0)),
+            position_pct=max(0.0, min(position_pct, 100.0)),
             raw_text=text,
             confidence=max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0)),
             is_exit_signal=is_exit,
