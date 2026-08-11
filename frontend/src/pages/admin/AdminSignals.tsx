@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Radio, Send, Activity } from "lucide-react";
 import { API } from "@/api/client";
 import { useFetch } from "@/lib/useFetch";
+import { useDebouncedReload } from "@/lib/useDebouncedReload";
 import { useToast } from "@/components/ui/Toast";
 import { wsClient } from "@/api/ws";
 import { Card, CardTitle, Badge, Button, Empty, Select, Input, Field } from "@/components/ui";
@@ -10,22 +11,31 @@ import { fmtTime, fmtMoney, sideLabel, signalStatusLabel } from "@/lib/utils";
 
 export default function AdminSignals() {
   const [status, setStatus] = useState("");
-  const { data, reload } = useFetch(() => API.listSignals(1, 100, undefined, status || undefined), [status]);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
+  const { data, reload } = useFetch(() => API.listSignals(page, pageSize, undefined, status || undefined), [page, status]);
+  const debouncedReload = useDebouncedReload(reload, 600);
   const { data: kolsData } = useFetch(() => API.listAdminKols(), []);
   const { push } = useToast();
   const [inject, setInject] = useState(false);
   const [f, setF] = useState({ kol_id: "", raw_text: "$SOL long entry 150 TP 155 160 SL 145 lev 5x" });
 
   useEffect(() => {
-    const off = wsClient.on((event) => { if (event === "signal") reload(); });
+    setPage(1);
+  }, [status]);
+
+  useEffect(() => {
+    const off = wsClient.on((event) => { if (event === "signal") debouncedReload(); });
     return () => {
       off();
     };
-  }, [reload]);
+  }, [debouncedReload]);
 
   const kols: any[] = kolsData || [];
   const res: any = data || {};
   const items: any[] = res.items || [];
+  const hasPrev = page > 1;
+  const hasNext = items.length >= pageSize;
 
   const statusCounts = items.reduce((acc: any, sig: any) => {
     acc[sig.status] = (acc[sig.status] || 0) + 1;
@@ -57,6 +67,7 @@ export default function AdminSignals() {
             { k: "corrected", label: "已纠错" },
             { k: "rejected", label: "已拒绝" },
             { k: "filtered", label: "已过滤" },
+            { k: "no_followers", label: "未订阅" },
           ].map((s) => (
             <button
               key={s.k}
@@ -76,14 +87,27 @@ export default function AdminSignals() {
 
       {/* KPI 概览 */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="glass p-4"><div className="text-xs text-slate-500 mb-1">信号总数</div><div className="text-xl md:text-2xl font-bold font-mono text-slate-100">{items.length}</div></div>
+        <div className="glass p-4"><div className="text-xs text-slate-500 mb-1">本页信号</div><div className="text-xl md:text-2xl font-bold font-mono text-slate-100">{items.length}</div></div>
         <div className="glass p-4"><div className="text-xs text-slate-500 mb-1">已下单</div><div className="text-xl md:text-2xl font-bold font-mono text-profit">{statusCounts.ordered || 0}</div></div>
-        <div className="glass p-4"><div className="text-xs text-slate-500 mb-1">已拒绝/过滤</div><div className="text-xl md:text-2xl font-bold font-mono text-loss">{(statusCounts.rejected || 0) + (statusCounts.filtered || 0)}</div></div>
+        <div className="glass p-4"><div className="text-xs text-slate-500 mb-1">已拒绝/过滤/未订阅</div><div className="text-xl md:text-2xl font-bold font-mono text-loss">{(statusCounts.rejected || 0) + (statusCounts.filtered || 0) + (statusCounts.no_followers || 0)}</div></div>
         <div className="glass p-4"><div className="text-xs text-slate-500 mb-1">已纠错</div><div className="text-xl md:text-2xl font-bold font-mono text-warn">{statusCounts.corrected || 0}</div></div>
       </div>
 
       <Card>
-        <CardTitle action={<Badge tone="accent"><Activity size={12} className="animate-pulse" /> 实时</Badge>}>
+        <CardTitle
+          action={
+            <div className="flex items-center gap-2 flex-wrap justify-end">
+              <Badge tone="accent"><Activity size={12} className="animate-pulse" /> 实时</Badge>
+              <span className="text-xs text-slate-500 font-mono">第 {page} 页</span>
+              <Button variant="ghost" className="px-2 py-1 text-xs" disabled={!hasPrev} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                上一页
+              </Button>
+              <Button variant="ghost" className="px-2 py-1 text-xs" disabled={!hasNext} onClick={() => setPage((p) => p + 1)}>
+                下一页
+              </Button>
+            </div>
+          }
+        >
           信号流({items.length})
         </CardTitle>
         {items.length === 0 ? (
@@ -98,7 +122,7 @@ export default function AdminSignals() {
                     <span className="font-medium text-slate-100">{sig.kol_name}</span>
                     {p.symbol && <Badge tone="accent">{p.symbol}</Badge>}
                     {p.side && <Badge tone={p.side === "long" ? "profit" : "loss"}>{sideLabel(p.side)}</Badge>}
-                    <Badge tone={sig.status === "ordered" ? "profit" : sig.status === "rejected" ? "loss" : sig.corrected ? "warn" : "default"}>{signalStatusLabel(sig.status)}</Badge>
+                    <Badge tone={sig.status === "ordered" ? "profit" : sig.status === "rejected" ? "loss" : sig.status === "no_followers" ? "warn" : sig.corrected ? "warn" : "default"}>{signalStatusLabel(sig.status)}</Badge>
                     {sig.corrected && <Badge tone="warn">已纠错</Badge>}
                     <span className="text-xs text-slate-600 ml-auto">{fmtTime(sig.received_at)}</span>
                   </div>

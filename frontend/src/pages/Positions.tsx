@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { Wallet, ShieldCheck, TrendingUp, Network, ChevronDown, Briefcase, Layers, ClipboardList, Clock, XCircle, AlertTriangle, Target, ShieldAlert } from "lucide-react";
 import { API } from "@/api/client";
 import { useFetch } from "@/lib/useFetch";
+import { useDebouncedReload } from "@/lib/useDebouncedReload";
 import { useToast } from "@/components/ui/Toast";
 import { wsClient } from "@/api/ws";
 import { Card, CardTitle, Badge, Button, Empty, Input, SectionHeader, MetricCard } from "@/components/ui";
@@ -114,24 +115,27 @@ export default function PositionsPage() {
   const [stopModal, setStopModal] = useState<any>(null);
   const [stopForm, setStopForm] = useState({ sl: "", trailing_stop: false, trailing_callback: 0.01 });
   const [collapsedGroups, setCollapsedGroups] = useState<Set<number>>(new Set());
+  const reloadAllPositionData = useCallback(() => {
+    reload();
+    reloadPending();
+  }, [reload, reloadPending]);
+  const reloadLiveData = useDebouncedReload(reloadAllPositionData, 700);
 
   useEffect(() => {
     const off = wsClient.on((event) => {
       if (event === "position" || event === "order") {
-        reload();
-        reloadPending();
+        reloadLiveData();
       }
     });
-    // 轮询作为 WebSocket 的备份,间隔 30 秒避免不必要的 API 压力
+    // 轮询作为 WebSocket 的备份,统一走去抖刷新,避免和 WS 事件竞态。
     const t = setInterval(() => {
-      reload();
-      reloadPending();
+      reloadLiveData();
     }, 15000);
     return () => {
       off();
       clearInterval(t);
     };
-  }, [reload, reloadPending]);
+  }, [reloadLiveData]);
 
   const positions: any[] = data || [];
   const pendingOrders: any[] = Array.isArray(pendingData) ? pendingData : (pendingData?.items || []);

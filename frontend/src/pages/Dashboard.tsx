@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   TrendingDown,
   TrendingUp,
@@ -13,6 +13,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { useFetch } from "@/lib/useFetch";
+import { useDebouncedReload } from "@/lib/useDebouncedReload";
 import { API } from "@/api/client";
 import { wsClient } from "@/api/ws";
 import { Card, Empty, Badge, Button } from "@/components/ui";
@@ -95,26 +96,28 @@ export default function DashboardPage() {
   const { data: dashStats, reload: reloadDash } = useFetch(() => API.dashboard(accountId), [accountId]);
   const { data: kolsData, reload: reloadKols } = useFetch(() => API.listKols(), []);
   const [resumingKolId, setResumingKolId] = useState<number | null>(null);
+  const reloadAllDashboardData = useCallback(() => {
+    reloadPositions();
+    reloadDash();
+    reloadKols();
+  }, [reloadPositions, reloadDash, reloadKols]);
+  const reloadLiveData = useDebouncedReload(reloadAllDashboardData, 700);
 
-  // 实时刷新: WebSocket 事件 + 定时轮询
+  // 实时刷新: WebSocket 事件和轮询统一去抖,避免竞态重复请求。
   useEffect(() => {
     const off = wsClient.on((event) => {
       if (event === "position" || event === "order") {
-        reloadPositions();
-        reloadDash();
-        reloadKols();
+        reloadLiveData();
       }
     });
     const t = setInterval(() => {
-      reloadPositions();
-      reloadDash();
-      reloadKols();
+      reloadLiveData();
     }, 15000);
     return () => {
       off();
       clearInterval(t);
     };
-  }, [reloadPositions, reloadDash, reloadKols]);
+  }, [reloadLiveData]);
 
   const positions: any[] = positionsData || [];
   const trades: any[] = tradesData || [];

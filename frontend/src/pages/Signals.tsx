@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { Radio, Filter, AlertTriangle, CheckCircle2, XCircle, Clock } from "lucide-react";
 import { API } from "@/api/client";
 import { useFetch } from "@/lib/useFetch";
+import { useDebouncedReload } from "@/lib/useDebouncedReload";
 import { wsClient } from "@/api/ws";
-import { Card, CardTitle, Badge, Select, Empty } from "@/components/ui";
+import { Card, CardTitle, Badge, Button, Select, Empty } from "@/components/ui";
 import { fmtTime, fmtMoney, sideLabel, signalStatusLabel } from "@/lib/utils";
 
 const STATUS_TONE: Record<string, any> = {
@@ -14,6 +15,7 @@ const STATUS_TONE: Record<string, any> = {
   ordered: "profit",
   rejected: "loss",
   ignored: "default",
+  no_followers: "warn",
 };
 
 const STATUS_ICON: Record<string, any> = {
@@ -24,23 +26,33 @@ const STATUS_ICON: Record<string, any> = {
   received: Clock,
   parsed: Radio,
   ignored: Clock,
+  no_followers: AlertTriangle,
 };
 
 export default function SignalsPage() {
   const [status, setStatus] = useState("");
-  const { data, reload } = useFetch(() => API.listSignals(1, 100, undefined, status || undefined), [status]);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
+  const { data, reload } = useFetch(() => API.listSignals(page, pageSize, undefined, status || undefined), [page, status]);
+  const debouncedReload = useDebouncedReload(reload, 600);
+
+  useEffect(() => {
+    setPage(1);
+  }, [status]);
 
   useEffect(() => {
     const off = wsClient.on((event) => {
-      if (event === "signal") reload();
+      if (event === "signal") debouncedReload();
     });
     return () => {
       off();
     };
-  }, [reload]);
+  }, [debouncedReload]);
 
   const res: any = data || {};
   const items: any[] = res.items || [];
+  const hasPrev = page > 1;
+  const hasNext = items.length >= pageSize;
 
   return (
     <div className="space-y-4 md:space-y-6">
@@ -57,10 +69,26 @@ export default function SignalsPage() {
           <option value="filtered">已过滤</option>
           <option value="rejected">已拒绝</option>
           <option value="ignored">已忽略</option>
+          <option value="no_followers">未订阅</option>
         </Select>
       </div>
 
       <Card>
+        <CardTitle
+          action={
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <span className="font-mono">第 {page} 页</span>
+              <Button variant="ghost" className="px-2 py-1 text-xs" disabled={!hasPrev} onClick={() => setPage((p) => Math.max(1, p - 1))}>
+                上一页
+              </Button>
+              <Button variant="ghost" className="px-2 py-1 text-xs" disabled={!hasNext} onClick={() => setPage((p) => p + 1)}>
+                下一页
+              </Button>
+            </div>
+          }
+        >
+          信号列表
+        </CardTitle>
         {items.length === 0 ? (
           <Empty text="暂无信号" />
         ) : (
