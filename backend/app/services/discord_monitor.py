@@ -65,6 +65,7 @@ from app.models.kol import Kol, KolFollow
 
 
 from app.models.signal import Signal
+from app.models.trading import Position
 
 
 from app.services import order_manager, parser_shadow, signal_parser
@@ -701,8 +702,28 @@ async def _process_for_customer(signal_id: int, customer_id: int) -> None:
 
         parsed = ParsedSignal(**(signal.parsed or {}))
 
+        customer_positions = (
+            await db.execute(
+                select(Position).where(
+                    Position.customer_id == customer_id,
+                    Position.kol_id == signal.kol_id,
+                    Position.status == "open",
+                    Position.parent_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+        logger.info(
+            f"客户实际持仓快照: customer={customer_id} signal={signal_id} "
+            f"kol_id={signal.kol_id} positions={len(customer_positions)}"
+        )
 
-        await order_manager.process_signal(db, signal, parsed, customer_id)
+        await order_manager.process_signal(
+            db,
+            signal,
+            parsed,
+            customer_id,
+            customer_positions=customer_positions,
+        )
 
 
 

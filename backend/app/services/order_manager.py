@@ -342,6 +342,72 @@ def _is_add_position_signal(raw_text: str | None) -> bool:
 
     return any(keyword.lower() in low for keyword in keywords)
 
+
+def _filter_customer_positions(
+    positions: list[Position] | None,
+    *,
+    symbol: str | None = None,
+    side: str | None = None,
+    exchange_account_id: int | None = None,
+) -> list[Position]:
+    """从客户实际持仓快照中过滤当前信号相关仓位。"""
+    matched: list[Position] = []
+    for pos in positions or []:
+        if getattr(pos, "status", "") != "open":
+            continue
+        if exchange_account_id is not None and getattr(pos, "exchange_account_id", None) != exchange_account_id:
+            continue
+        if symbol and getattr(pos, "symbol", None) != symbol:
+            continue
+        if side and getattr(pos, "side", None) != side:
+            continue
+        matched.append(pos)
+    return matched
+
+
+def _has_customer_position_for_signal(
+    positions: list[Position] | None,
+    parsed: ParsedSignal,
+    *,
+    exchange_account_id: int | None = None,
+) -> bool:
+    """判断客户是否有当前平仓/更新信号可作用的实际持仓。"""
+    if not positions:
+        return False
+    if parsed.symbol:
+        return bool(
+            _filter_customer_positions(
+                positions,
+                symbol=parsed.symbol,
+                exchange_account_id=exchange_account_id,
+            )
+        )
+    return bool(_filter_customer_positions(positions, exchange_account_id=exchange_account_id))
+
+
+def _split_open_signal_positions(
+    positions: list[Position] | None,
+    parsed: ParsedSignal,
+    *,
+    exchange_account_id: int | None = None,
+) -> tuple[list[Position], list[Position]]:
+    """返回开仓信号对应的同向仓和反向仓。"""
+    same_side: list[Position] = []
+    opposite_side: list[Position] = []
+    if not parsed.symbol or parsed.side not in ("long", "short"):
+        return same_side, opposite_side
+    for pos in _filter_customer_positions(
+        positions,
+        symbol=parsed.symbol,
+        exchange_account_id=exchange_account_id,
+    ):
+        pos_side = getattr(pos, "side", "")
+        if pos_side == parsed.side:
+            same_side.append(pos)
+        elif pos_side in ("long", "short"):
+            opposite_side.append(pos)
+    return same_side, opposite_side
+
 async def _process_exit_signal(
 
     db: AsyncSession,
@@ -481,32 +547,15 @@ async def _process_exit_signal(
 
         await _log_signal_status(
 
-            db, signal, "rejected",
+            db, signal, "ignored",
 
-            f"无对应持仓可平（该 KOL 无持仓或已平仓）: {parsed.symbol or '全部'} {parsed.side or '全部方向'}",
+            f"平仓信号无客户实际持仓,已跳过不通知: {parsed.symbol or '全部'} {parsed.side or '全部方向'}",
 
             customer_id
 
         )
 
-        await notify(
-            "error",
-            "平仓未执行",
-            f"KOL: {kol_name}\n"
-            f"API账户: #{ex_acc.id}\n"
-            f"交易所: {exchange.upper()} {'测试网' if testnet else '实盘'}\n"
-            f"品种: {parsed.symbol or '全部'}\n"
-            f"方向: {parsed.side or '全部方向'}\n"
-            f"执行结果: 未平仓\n"
-            f"失败原因: 未找到该 KOL 对应的未平子仓位\n"
-            f"判断依据: 只匹配 customer={customer_id}, kol_id={signal.kol_id}, "
-            f"exchange={exchange}, symbol={parsed.symbol or '不限'}, side={parsed.side or '不限'} 的 open 子仓位；"
-            f"为避免误伤，不会自动平其他 KOL 或其他账号仓位",
-            customer_id,
-            source_text=signal.raw_text,
-        )
-
-        return {"ok": False, "reason": "无对应持仓"}
+        return {"ok": True, "reason": "平仓信号无客户实际持仓,已跳过"}
 
     # 执行平仓
 
@@ -786,15 +835,15 @@ async def _process_update_signal(
 
         await _log_signal_status(
 
-            db, signal, "rejected",
+            db, signal, "ignored",
 
-            f"无对应持仓可更新(该 KOL 无持仓或已平仓): {parsed.symbol or '全部'}",
+            f"更新信号无客户实际持仓,已跳过不通知: {parsed.symbol or '全部'}",
 
             customer_id,
 
         )
 
-        return {"ok": False, "reason": "无对应持仓"}
+        return {"ok": True, "reason": "更新信号无客户实际持仓,已跳过"}
 
     # 4. 加载策略默认参数(用于 _build_tp_levels 的 close_pcts 配置)
 
@@ -1454,6 +1503,8 @@ async def process_signal(
 
     customer_id: int,
 
+    customer_positions: list[Position] | None = None,
+
 ) -> dict:
 
     """对单个客户处理一条信号:风控→过滤→策略→下单。
@@ -1488,7 +1539,13 @@ async def process_signal(
 
                 try:
 
-                    one = await process_signal(db, signal, copy.deepcopy(parsed), customer_id)
+                    one = await process_signal(
+                        db,
+                        signal,
+                        copy.deepcopy(parsed),
+                        customer_id,
+                        customer_positions=customer_positions,
+                    )
 
                     one.update({
                         "exchange_account_id": acc.id,
@@ -1534,6 +1591,8 @@ async def process_signal(
     has_cancel_order = "cancel_order" in actions
     has_refresh_pending = "refresh_pending" in actions
     has_open_action = any(a in ("open_long", "open_short") for a in actions)
+    snapshot_account_id = _forced_exchange_account_id.get()
+    same_side_customer_positions: list[Position] = []
 
     # 撤挂单动作先执行。
     # - 纯 "撤不挂了/撤单":撤完即结束。
@@ -1551,6 +1610,28 @@ async def process_signal(
             parsed=parsed,
             customer_id=customer_id,
         )
+
+    # ---- 客户实际持仓前置检查 ----
+    # LLM 解析时只能看到 KOL 级上下文,真正执行前必须以客户自己的 open 子仓位为准。
+    if customer_positions is not None and parsed.is_exit_signal and not _has_customer_position_for_signal(
+        customer_positions,
+        parsed,
+        exchange_account_id=snapshot_account_id,
+    ):
+        reason = f"平仓信号无客户实际持仓,已跳过: {parsed.symbol or '全部'} {parsed.side or '全部方向'}"
+        logger.info(f"{reason} customer={customer_id} signal={signal.id}")
+        await _log_signal_status(db, signal, "ignored", reason, customer_id)
+        return {"ok": True, "reason": reason}
+
+    if customer_positions is not None and parsed.is_update_signal and not _has_customer_position_for_signal(
+        customer_positions,
+        parsed,
+        exchange_account_id=snapshot_account_id,
+    ):
+        reason = f"更新信号无客户实际持仓,已跳过: {parsed.symbol or '全部'}"
+        logger.info(f"{reason} customer={customer_id} signal={signal.id}")
+        await _log_signal_status(db, signal, "ignored", reason, customer_id)
+        return {"ok": True, "reason": reason}
 
     # ---- 第4层过滤: 急停开关 ----
 
@@ -1635,6 +1716,46 @@ async def process_signal(
         await notify("error", "信号已拒绝", f"KOL {kol_name}\n品种: {parsed.symbol}\n原因: 未识别交易方向(多/空)", customer_id, source_text=signal.raw_text)
 
         return {"ok": False, "reason": reason}
+
+    same_side_customer_positions, opposite_side_customer_positions = _split_open_signal_positions(
+        customer_positions,
+        parsed,
+        exchange_account_id=snapshot_account_id,
+    )
+    if opposite_side_customer_positions:
+        pos_lines = ", ".join(
+            f"#{p.id} {p.symbol} {p.side} qty={_fmt_value(getattr(p, 'qty', None))}"
+            for p in opposite_side_customer_positions[:5]
+        )
+        reason = (
+            f"客户已有反方向持仓,已暂停自动开仓等待确认: "
+            f"{parsed.symbol} 当前信号={parsed.side}, 反向持仓={pos_lines}"
+        )
+        logger.warning(f"{reason} customer={customer_id} signal={signal.id}")
+        await _log_signal_status(db, signal, "rejected", reason, customer_id)
+        await notify(
+            "risk",
+            "发现反向持仓,已暂停开仓",
+            f"KOL {kol_name}\n"
+            f"品种: {parsed.symbol}\n"
+            f"信号方向: {parsed.side}\n"
+            f"客户当前反向持仓: {pos_lines}\n"
+            f"处理结果: 未自动开新仓,请确认是否需要手动反手或先平旧仓",
+            customer_id,
+            source_text=signal.raw_text,
+        )
+        return {"ok": False, "reason": reason}
+
+    if same_side_customer_positions:
+        same_lines = ", ".join(
+            f"#{p.id} qty={_fmt_value(getattr(p, 'qty', None))}"
+            for p in same_side_customer_positions[:5]
+        )
+        logger.info(
+            f"客户已有同方向持仓,当前开仓信号标记为加仓: "
+            f"customer={customer_id} signal={signal.id} symbol={parsed.symbol} "
+            f"side={parsed.side} positions={same_lines}"
+        )
 
     # 0.9 入场价缺失时,后续会用 market_price 兜底,此处不直接拒绝
 
@@ -1797,7 +1918,7 @@ async def process_signal(
 
         return {"ok": False, "reason": kol_reason}
 
-    is_add_position = _is_add_position_signal(signal.raw_text)
+    is_add_position = _is_add_position_signal(signal.raw_text) or bool(same_side_customer_positions)
 
     # 5.5 1小时冷却检查: 同KOL + 同币种 + 同方向 1小时内已开过仓 → 普通新单跳过
 
