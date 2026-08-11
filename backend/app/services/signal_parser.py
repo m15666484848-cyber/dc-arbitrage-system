@@ -152,7 +152,12 @@ CN_COIN_NAMES = {
     "波卡": "DOT", "柴犬币": "SHIB", "柴犬": "SHIB", "狗币": "DOGE",
     "弗洛基": "FLOKI", "佩佩": "PEPE", "奥迪": "ORDI", "林克": "LINK",
     "萨维亚": "AVAX", "阿普": "APT", "泰波": "TIA", "修": "SEI",
+    "皇上": "BTC", "姨太": "ETH", "二饼": "ETH", "蛤蟆鬼": "PEPE",
+    "狗庄币": "DOGE", "辣条": "LTC", "太子": "BCH", "小姨太": "ETC",
     " pupper": "WIF",
+    # P1-6: 补充 KOL 俗称
+    "大阳": "BTC", "大阴": "BTC", "饼子": "BTC", "以太王": "ETH",
+    "芝麻开门": "SEI", "太阳": "SOL", "安银": "XMR",
 }
 
 
@@ -215,8 +220,16 @@ EXIT_WORDS = {
     # 明确平仓词
     "出局", "离场", "平仓", "平多", "平空", "全平", "关闭",
     "清仓", "减仓", "减半", "获利了结", "获利平仓",
+    "微利出局", "保本出局", "全部止盈出局", "止盈出局", "触发止损出局",
+    "全部出局", "全都出局", "止损出局", "打损出局", "成本出局",
+    "止损就离场", "止损直接出局", "可以平仓", "可以出来",
     "close position", "close order", "close all", "close trade",
     "exit", "take profit", "tp hit",
+    # P0-1: 英文平仓关键词
+    "stopped out", "triggered", "stopped", "flat", "flattened",
+    "close long", "close short", "exit position", "exit trade",
+    "square up", "out of position", "out of trade", "out of market",
+    "tp1", "tp2", "tp3",
 }
 
 # 复盘/分析语境关键词 (出现这些词时,不应判定为平仓信号)
@@ -258,6 +271,8 @@ HOLDING_INDICATORS = [
     r"继续拿(?:住|着)",
     r"拿着(?:就行|别动|不动)?",
     r"(?:目前|当前|现在|现|已经|已).{0,12}(?:持有|持仓|拿着|保留).{0,30}(?:多单|空单)",
+    r"(?:目前|当前|现在|现|已经|已).{0,12}[一二两三四五六七八九十\d]+\s*(?:个|笔|单|批)?\s*(?:多单|空单).{0,12}(?:在手|持有|持仓|拿着|保留)",
+    r"[一二两三四五六七八九十\d]+\s*(?:个|笔|单|批)?\s*(?:多单|空单).{0,12}(?:在手|持有|持仓|拿着|保留)",
     r"(?:持有|持仓|拿着|保留).{0,20}(?:[一二两三四五六七八九十\d]+)?\s*(?:个|笔|单|批)?\s*(?:多单|空单)",
     r"(?:多单|空单).{0,20}(?:持有|持仓|拿着|保留|还在)",
     r"持仓(?:没退|未退|还在|不动|别动|继续)",
@@ -277,6 +292,14 @@ HOLDING_INDICATORS = [
     r"略微浮盈",
     r"成本价附近",
     r"当前价格在成本",
+    # P0-1: 英文持仓描述/非信号模式
+    r"(?i)still\s+in\s+(?:the\s+)?(?:long|short|trade|position)",
+    r"(?i)not\s+(?:taken|taking)\s+(?:any\s+)?(?:longs?|shorts?|trades?)",
+    r"(?i)not\s+(?:longing|shorting|entering)\s+(?:it\s+)?yet",
+    r"(?i)(?:don'?t|do\s+not)\s+open\s+(?:second|another|a\s+new)\s+position",
+    r"(?i)shorting\s+isn'?t\s+wise",
+    r"(?i)(?:l|s)\s+or\s+(?:l|s)\s+now",  # "L or S now?"
+    r"(?i)na[, ]\s*not\s+taken",
 ]
 
 
@@ -302,6 +325,8 @@ FUZZY_EXIT_PATTERNS = [
     # 获利/止盈 + 离场
     r"(?:落袋|落袋为安|见好就收|收工|收摊)",
     r"(?:止盈|获利)\s*(?:离场|出场|走人|撤)",
+    r"(?:微利|小赚|小盈|保本|成本|全部止盈|止盈|触发止损|止损|打损)\s*(?:出局|离场|出场|走人|走|平|撤)",
+    r"(?:全部|全都|都|直接)?\s*(?:止盈|止损)\s*(?:出局|离场|走人|平仓)",
     # 不玩了/放弃
     r"(?:不玩了|不跟了|放弃|到此为止|到此结束)",
     # 暂时退出 (注意: "观望"单独出现不等于平仓,它表示"等待时机")
@@ -318,6 +343,14 @@ FUZZY_EXIT_PATTERNS = [
     r"先\s*(?:走|撤|跑|出)\s*(?:为敬|一步)",
     # "走一波/撤一波"
     r"(?:走|撤|跑)\s*(?:一波|一下)",
+    # P0-2: 触发止损直接出局/止损就离场/可以平仓出来
+    r"(?:触发止损|止损)\s*(?:直接|就)?\s*(?:出局|离场|出场)",
+    r"(?:止损)\s*(?:就)?\s*(?:离场|出场|走人|走)",
+    r"(?:可以)\s*(?:平仓|出来|出仓|走人|收)",
+    r"(?:平仓)\s*(?:出来|出|走)",
+    # 英文平仓关键词
+    r"(?i)\b(?:stopped\s+out|triggered|take\s+profit|tp\d?|close(?:d)?\s+(?:position|trade|long|short)|exit(?:ed)?\s+(?:position|trade|long|short))\b",
+    r"(?i)\b(?:flat(?:ten)?(?:ed)?|square(?:d)?\s+up|out\s+of\s+(?:the\s+)?(?:position|trade|market))\b",
 ]
 
 
@@ -347,11 +380,11 @@ def detect_side(text: str) -> str:
         # 保守单字方向: 只在"多/空"后面紧跟批次、建仓、入场、挂单或价格时启用。
         # 避免把"多空分界线/多空博弈"这类分析词误判为方向。
         single_long = re.search(
-            r"(?:^|[\s，,。:：])多(?!空)\s*(?=(?:第?\s*[一二两三四五六七八九十\d]+\s*(?:批|笔|次)|分批|建仓|入场|进场|挂单|开仓|\d))",
+            r"(?:^|[\s，,。:：])多(?!空)\s*(?=(?:第?\s*[一二两三四五六七八九十\d]+\s*(?:批|笔|次)|分批|建仓|入场|进场|挂单|开仓|止损|止盈|目标|\d))",
             text,
         )
         single_short = re.search(
-            r"(?:^|[\s，,。:：])空(?!单军头)\s*(?=(?:第?\s*[一二两三四五六七八九十\d]+\s*(?:批|笔|次)|分批|建仓|入场|进场|挂单|开仓|\d))",
+            r"(?:^|[\s，,。:：])空(?!单军头)\s*(?=(?:第?\s*[一二两三四五六七八九十\d]+\s*(?:批|笔|次)|分批|建仓|入场|进场|挂单|开仓|止损|止盈|目标|\d))",
             text,
         )
         if single_long and not single_short:
@@ -438,6 +471,7 @@ UPDATE_VERBS = r"(?:改为|改成|改到|调为|调到|调成|调整为|修改�
 
 UPDATE_KEYWORDS = [
     rf"修改\s*止盈", rf"调整\s*止盈", rf"止盈\s*{UPDATE_VERBS}",
+    rf"(?:止盈位|止盈点位|止盈价|目标位|目标价).{{0,12}}(?:重设|重置|重新设置|改为|改成|调为|调到|调整为|修改为|更新为)",
     rf"修改\s*止损", rf"调整\s*止损", rf"止损\s*{UPDATE_VERBS}",
     rf"(?:止损位|止损点位|止损价|止损线)\s*{UPDATE_VERBS}",
     rf"(?:止损|止损位|止损点位|止损价|止损线).{{0,12}}(?:重设|重置|重新设置)\s*(?:为|到)?",
@@ -448,6 +482,7 @@ UPDATE_KEYWORDS = [
     rf"移\s*止损", rf"移\s*止盈",
     rf"上移\s*止损", rf"下移\s*止损", rf"上移\s*止盈", rf"下移\s*止盈",
     rf"推\s*止损", rf"拉\s*止损", rf"止损\s*保护",
+    rf"推\s*保护价|推\s*保护|保护价(?:下来|上去|到|至)?|保护成本|保护利润",
     rf"保本(?:止损)?", rf"保护(?:利润|本金)",
     rf"止盈(?:先看|看到|看至|看向)",
     rf"\bTP\s*{UPDATE_VERBS}", rf"\bSL\s*{UPDATE_VERBS}",
@@ -473,12 +508,15 @@ def check_update_intent(text: str) -> tuple[bool, str]:
 CANCEL_ORDER_PATTERNS = [
     r"\bcancel\s+(?:order|orders|limit|limits)\b",
     r"\bcancel\s+pending\b",
+    r"(?i)\bcancel(?:led)?\s+(?:the\s+)?(?:order|trade|position|limit)\b",
+    r"(?i)\bb(?:order|trade)\s+cancel(?:led)?\b",
     r"^\s*撤[了掉]?\s*$",
     r"撤单",
     r"撤\s*不挂了",
     r"撤销(?:挂单|订单|委托)?",
     r"取消(?:挂单|订单|委托)",
     r"不挂了",
+    r"没必要挂了|没必要再挂|不必要挂了|无需挂了",
     r"别挂了|不用挂了|先不挂|暂不挂",
     r"(?:这单|这个单|这个订单|这个策略|订单|策略).{0,8}(?:不要了|作废|取消)",
     r"(?:多单|空单|多|空|单子|挂单|委托).{0,8}(?:撤了|撤掉|撤回|取消)",
@@ -501,12 +539,15 @@ PENDING_STATUS_PATTERNS = [
 EXPLICIT_OPEN_PATTERNS = [
     r"\b(?:buy|sell|long|short)\s+now\b",
     r"\b(?:go\s+long|go\s+short|enter|open)\b",
+    r"\b(?:longed|shorted|longing|shorting)\b",
+    r"\b(?:Short|Long)\s*#?\s*\d+\b",  # "Short #1" / "Long 1"
     r"开多|开空|进多|进空|做多|做空|买入|卖出",
     r"入场|进场|下单|建仓|上车|上车了|搞一波|搞一下|干一波",
     r"挂多|挂空|挂入|挂单|委托|埋伏|埋伏单|抄底单|摸顶单",
     r"挂(?:一个|个|一笔|一单)?(?:反弹|回踩)?",
     r"挂\s*\d+(?:\.\d+)?\s*(?:附近|一线|位置)?",
     r"重新挂|再挂|新挂|补挂|重新进|再次进",
+    r"换手\s*(?:做多|做空)",  # P1-5: "换手做多"短信号
 ]
 
 # 撤单消息里只有出现这些词,才允许"撤旧单后重新开/重新挂"。
@@ -514,6 +555,7 @@ EXPLICIT_OPEN_PATTERNS = [
 REOPEN_AFTER_CANCEL_PATTERNS = [
     r"重新挂|再挂|新挂|补挂",
     r"重新进|再次进|再开|重新开",
+    r"重新改(?:这个|一下|个)?",  # P0-4: "重新改这个"=新开仓,非更新
 ]
 
 # ---------- 场景分类与话术库 ----------
@@ -895,10 +937,13 @@ def detect_signal_actions(
         actions.append("close_position")
     elif is_update:
         actions.append("update_tp_sl")
-    elif side in ("long", "short") and has_pending_status and has_explicit_open and (not has_cancel or has_trade_block):
-        actions.append("refresh_pending")
-    elif side in ("long", "short") and has_explicit_open and (not has_cancel or has_reopen_after_cancel):
+    # P0-3/P0-4: 有明确开仓词+完整交易参数块时,优先判 open(即使同时有撤单)
+    # 这解决"撤，不挂了 + Btc方向：多 建仓：64700"混合信号和"方向：空 建仓：65600"被误判refresh_pending的问题
+    elif side in ("long", "short") and has_explicit_open and (has_trade_block or not has_cancel or has_reopen_after_cancel):
         actions.append(f"open_{side}")
+    # refresh_pending 仅用于:有挂单状态描述+开仓词,但无完整交易参数块(只是刷新旧单状态)
+    elif side in ("long", "short") and has_pending_status and has_explicit_open and not has_trade_block:
+        actions.append("refresh_pending")
     elif has_pending_status and not has_explicit_open and not has_cancel:
         actions.append("hold_pending")
 
@@ -1020,7 +1065,22 @@ def extract_take_profits(text: str) -> list[float]:
         return tps
 
     # 2. 通用 TP / take profit (英文格式)
-    tps = _extract_prices_after(text, [r"\btp\b", r"take\s*profit"])
+    tps = _extract_prices_after(text, [r"\btp\b", r"tp\s*位", r"take\s*profit"])
+    if tps:
+        return tps
+
+    # 2.2. 更新型止盈价: "止盈位重设为64900" / "目标价改为64900"。
+    reset_tp_patterns = [
+        rf"(?:止盈点位|止盈位|止盈价|止盈线|止盈|目标位|目标价|目标|\bTP\b).{{0,30}}(?:重设|重置|重新设置|设置|改为|改成|调为|调到|调整为|修改为|更新为)\s*(?:为|到)?\s*{PRICE_RE}\s*(?:万)?",
+        rf"(?:重设|重置|重新设置|设置|改为|改成|调为|调到|调整为|修改为|更新为)\s*(?:止盈点位|止盈位|止盈价|止盈线|止盈|目标位|目标价|目标|\bTP\b)\s*(?:为|到)?\s*{PRICE_RE}\s*(?:万)?",
+    ]
+    for pat in reset_tp_patterns:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            p = _to_float(m.group(1))
+            if p and p > 0:
+                if "万" in m.group(0):
+                    p *= 10000
+                tps.append(p)
     if tps:
         return tps
 
@@ -1083,7 +1143,7 @@ def extract_take_profits(text: str) -> list[float]:
 
     # 3. 止盈点位 / 止盈 / 目标 (中文格式,支持 KOL 多行格式)
     # 先检查是否为 "待定", "暂无" 等
-    tp_match = re.search(r"(?:止盈点位|止盈|目标)\s*[:：]?\s*(.*?)(?=\n|$|备注|提示)", text)
+    tp_match = re.search(r"(?:止盈点位|止盈位|止盈价|止盈|目标点位|目标位|目标价|目标)\s*[:：]?\s*(.*?)(?=\n|$|备注|提示)", text)
     if tp_match:
         tp_content = tp_match.group(1).strip()
         if re.search(r"(待定|暂无|无|空|未定|tbd|n/a|none)", tp_content, re.IGNORECASE):
@@ -1104,7 +1164,7 @@ def extract_take_profits(text: str) -> list[float]:
             return tps
 
     # 4. 通用中文止盈提取
-    tps = _extract_prices_after(text, [r"止盈点位", r"止盈价", r"止盈", r"目标价", r"目标位", r"目标", r"target\s*price", r"price\s*target"])
+    tps = _extract_prices_after(text, [r"止盈点位", r"止盈位", r"止盈价", r"止盈", r"目标点位", r"目标价", r"目标位", r"目标", r"target\s*price", r"price\s*target"])
     return tps
 
 
@@ -1120,7 +1180,7 @@ def extract_stop_loss(text: str) -> float | None:
     # 不能把中间的 "500点" 当成新的止损价。
     reset_sl_patterns = [
         rf"(?:止损点位|止损位|止损价|止损线|止损|\bSL\b).{{0,30}}(?:重设|重置|重新设置|设置|改为|改成|调为|调到|调整为|修改为|更新为)\s*(?:为|到)?\s*{PRICE_RE}\s*(?:万)?",
-        rf"(?:重设|重置|重新设置|设置|改为|改成|调为|调到|调整为|修改为|更新为)\s*(?:止损点位|止损位|止损价|止损线|止损|\bSL\b)?\s*(?:为|到)?\s*{PRICE_RE}\s*(?:万)?",
+        rf"(?:重设|重置|重新设置|设置|改为|改成|调为|调到|调整为|修改为|更新为)\s*(?:止损点位|止损位|止损价|止损线|止损|\bSL\b)\s*(?:为|到)?\s*{PRICE_RE}\s*(?:万)?",
     ]
     for pat in reset_sl_patterns:
         m = re.search(pat, text, re.IGNORECASE)
@@ -1297,9 +1357,9 @@ def extract_entry(text: str) -> tuple[float | None, list[float]]:
             if "止盈" not in bare_context and "止损" not in bare_context:
                 return p, [p]
 
-    # 特殊模式: "X做多" / "X开多" / "X买入" / "X做空" 等 (价格 + 方向动词)
-    # KOL 常写 "1870做多" "65000做空" 这种格式,前面没有入场关键词
-    price_action_pat = rf"(?<!止盈)(?<!止损)(?<!目标)(?<!止盈点位)(?<!止损点位){PRICE_RE}\s*(?:万)?\s*(?:做多|做空|开多|开空|买入|卖出|做多单|做空单|做多|做空)"
+    # 特殊模式: "X做多" / "X开多" / "X 多 止损..." / "X 空 目标..." 等 (价格 + 方向)
+    # KOL 常写 "1870做多" "65000 多 止损63000" 这种格式,前面没有入场关键词。
+    price_action_pat = rf"(?<!止盈)(?<!止损)(?<!目标)(?<!止盈点位)(?<!止损点位){PRICE_RE}\s*(?:万)?\s*(?:做多|做空|开多|开空|买入|卖出|做多单|做空单|做多|做空|多(?!空)|空(?!单军头))"
     m_pa = re.search(price_action_pat, text)
     if m_pa:
         p = _to_float(m_pa.group(1))
@@ -1355,10 +1415,10 @@ def extract_leverage(text: str) -> int:
 
 
 def extract_position_pct(text: str) -> float:
-    m = re.search(r"仓位\s*[:：]?\s*(\d+(?:\.\d+)?)\s*[%%]|(\d+(?:\.\d+)?)\s*%\s*仓位", text)
+    m = re.search(r"仓位\s*[:：]?\s*(\d+(?:\.\d+)?)\s*[%％]|(\d+(?:\.\d+)?)\s*[%％]\s*仓位", text)
     if m:
         return max(0.0, min(float(m.group(1) or m.group(2)), 100.0))
-    m = re.search(r"position\s*[:：]?\s*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
+    m = re.search(r"position\s*[:：]?\s*(\d+(?:\.\d+)?)\s*[%％]", text, re.IGNORECASE)
     if m:
         return max(0.0, min(float(m.group(1)), 100.0))
 
@@ -1366,16 +1426,16 @@ def extract_position_pct(text: str) -> float:
     # "止盈80%"、"分批止盈80%"、"先出30%"、"减仓50%" 都是平仓比例,
     # 不能被当作止盈价格 80。
     partial_patterns = [
-        r"(?:止盈|止盈出|分批止盈|部分止盈|tp|take\s*profit).{0,8}?(\d+(?:\.\d+)?)\s*%",
-        r"(?:减仓|减持|先出|出掉|出|平掉|平仓|平).{0,8}?(\d+(?:\.\d+)?)\s*%",
-        r"(\d+(?:\.\d+)?)\s*%.{0,8}(?:止盈|减仓|先出|出掉|平掉|平仓)",
+        r"(?:止盈|止盈出|分批止盈|部分止盈|tp|take\s*profit).{0,8}?(\d+(?:\.\d+)?)\s*[%％]",
+        r"(?:减仓|减持|先出|出掉|出|平掉|平仓|平).{0,8}?(\d+(?:\.\d+)?)\s*[%％]",
+        r"(\d+(?:\.\d+)?)\s*[%％].{0,8}(?:止盈|减仓|先出|出掉|平掉|平仓)",
     ]
     for pat in partial_patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             return max(0.0, min(float(m.group(1)), 100.0))
 
-    if re.search(r"(?:止盈|先出|出掉|减仓|平掉|平仓).{0,8}(?:一半|半仓|50%)|(?:减半|出一半|止盈一半)", text):
+    if re.search(r"(?:止盈|先出|出掉|减仓|平掉|平仓).{0,8}(?:一半|半仓|50[%％])|(?:减半|出一半|止盈一半)", text):
         return 50.0
 
     # 中文口语仓位词:

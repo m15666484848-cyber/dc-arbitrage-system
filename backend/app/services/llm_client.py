@@ -379,8 +379,8 @@ DOGE/狗狗 → DOGE/USDT
 
 ### 开仓识别
 1. 开仓关键词：接/开/进/多/空/做多/做空/挂单/委托/埋伏/抄底/摸顶/上车/上车了/搞/搞一波/干/操作/布局/进场/入场/建仓/挂/埋伏单/抄底单
-2. 平仓关键词：跑了/平了/出了/不格局了/落袋/落袋为安/跑路/撤退/撤/止盈了/止损了/平仓/全平/清仓/走人/下车/出局/兑现/获利了结
-3. "拿着/持有/继续拿着/不用管/继续格局/保持仓位" = 继续持有，不是新开仓 → is_valid_signal=false
+2. 平仓关键词：跑了/平了/出了/不格局了/落袋/落袋为安/跑路/撤退/撤/止盈了/止损了/平仓/全平/清仓/走人/下车/出局/兑现/获利了结/微利出局/保本出局/全部止盈出局/止盈出局/触发止损出局
+3. "拿着/持有/继续拿着/不用管/继续格局/保持仓位/当前X笔空单在手/当前X笔多单在手" = 继续持有或持仓描述，不是新开仓 → is_valid_signal=false
 4. "关注/观察/留意/看看/等待/等一等/不急/再看看" = 观望，不是即时交易 → is_valid_signal=false
 5. "想试试/咱就开" = 明确开仓意图 → is_valid_signal=true
 6. "挂一个反弹 X附近/在挂一个反弹 X附近/挂反弹 X附近" = 明确新挂单，通常表示做多反弹 → is_valid_signal=true, side=long, entry_price=X
@@ -434,11 +434,17 @@ DOGE/狗狗 → DOGE/USDT
 
 ### 平仓信号识别（非常重要）
 如果文本包含以下表达，识别为平仓信号(is_exit_signal=true, is_valid_signal=true)：
-a) 明确平仓词："出局"、"离场"、"平仓"、"平多"、"平空"、"全平"、"清仓"、"获利了结"
+a) 明确平仓词："出局"、"离场"、"平仓"、"平多"、"平空"、"全平"、"清仓"、"获利了结"、"微利出局"、"保本出局"、"全部止盈出局"、"止盈出局"、"触发止损出局"
 b) 口语化平仓："先走吧"、"差不多了可以出了"、"先撤了"、"落袋为安"、"可以跑了"、
    "不玩了"、"走人"、"撤了"、"出了"、"跑了"、"抛了"、"卖了"
-c) 上下文暗示平仓：短消息(<50字)包含"走/出/撤/跑/抛/收/关"等动词，
+c) P0-2 增强平仓词："触发止损直接出局"、"止损就离场"、"可以平仓"、"可以平仓出来"、"可以出来"、
+   "保本出局"、"成本附近保本出局"、"止损直接出局"、"触发止损，直接出局"
+   — 即使在复盘/分析语境中,只要出现明确平仓动作就应识别为平仓信号
+d) 上下文暗示平仓：短消息(<50字)包含"走/出/撤/跑/抛/收/关"等动词，
    且不包含入场价、方向、止盈止损等开仓要素
+e) “当前三笔空单在手/目前两笔多单在手/已有空单持仓/多单还在手”只是持仓描述，不是新开仓；除非同时出现明确“新开/再开/加仓/进场/入场”才可作为开仓
+f) 混合信号短期处理：一条消息同时包含平仓/撤单/更新止损止盈和开仓词时，优先返回风险更低的主操作：平仓 > 撤单 > 更新止损止盈 > 开仓。不要把“分批止盈/推保护/保护利润/已有X笔空单在手”解析成新开仓。
+g) 英文平仓信号："stopped out"、"TRIGGERED"、"take profit"、"TP hit"、"close position"、"exit position"、"flatten"、"square up" → is_exit_signal=true
 
 ### 非交易内容（is_valid_signal=false）
 - 复盘/分析："顺利空到1890"、"昨夜重头戏"、"吃了个短线反弹"
@@ -449,11 +455,20 @@ c) 上下文暗示平仓：短消息(<50字)包含"走/出/撤/跑/抛/收/关"�
 - 举例式描述：含"比如"/"例如" + 无明确即时入场指令
 - "关注反弹/反弹以后考虑继续开空" = 观望，不是即时信号 → is_valid_signal=false
 - "ZEC空单，很多会员反馈进场了，那就拿着，出局我通知" = 继续持有旧仓，不是新开仓 → is_valid_signal=false
+- "当前三笔空单在手" / "目前两笔多单在手" / "已有空单持仓" = 持仓描述，不是新开仓 → is_valid_signal=false
 - 市场评论/感慨如“惨呐/假突破/带崩大盘/警惕骗子” = 非交易内容 → is_valid_signal=false
+- 英文非交易内容："not taken any longs" / "not longing it yet" / "still in the trade" = 持仓或观望 → is_valid_signal=false
+- 英文建议/提问："Don't open until X" / "shorting isn't wise" / "L or S now?" = 建议或提问 → is_valid_signal=false
+- 英文非加密资产：Samsung/INTC/NQ等非加密资产讨论 → is_valid_signal=false
+- 周报/统计："8.7-8.14会员合约策略盈亏统计" = 周报统计 → is_valid_signal=false
+- 教学文章："交易里的确认…很多亏损不是方向判断错误" = 教学 → is_valid_signal=false
+- "有做多黄金的可以考虑逢高离场" = 语气不明确建议 → is_valid_signal=false（"可以考虑"非明确指令）
+- "这个位置没有做空的条件" = 明确说不做空 → is_valid_signal=false
 
 ### 黑话/俚语
 - "接一手/开一单/搞一波/想试试/咱就开" = 开仓
 - "跑了/平了/出了/不格局了/落袋" = 平仓
+- "微利出局/保本出局/全部止盈出局/止盈出局/触发止损出局" = 平仓
 - "开孔/开空" = 做空
 - "抄底/摸顶" = 分别做多/做空
 - "上车/下车" = 开仓/平仓
@@ -463,6 +478,50 @@ c) 上下文暗示平仓：短消息(<50字)包含"走/出/撤/跑/抛/收/关"�
 - "防守/保护/底线"通常是 stop_loss；"压力/压制/上方目标"常用于空单入场或止盈；"支撑/下方接"常用于多单入场
 - "站稳/有效突破/收上去"偏向向上确认；"跌破/破位/收下去"偏向向下确认
 - "插针/打针/扫到/踩到"表示价格触及某个价位，可作为条件价或入场价，按上下文判断
+
+## English Signal Rules (P0-1)
+KOL messages may be in English. Apply these rules:
+### English Open Signals
+- "Short #N" / "Short N" → open_short (e.g., "Short #1 for today" → side=short)
+- "Long N" / "Long #N" → open_long (e.g., "Long 1" → side=long)
+- "longed" / "shorted" / "longing" / "shorting" → open_long / open_short
+- "if you longed X, now a nice TP" → close_position (take profit on existing position)
+- "go long" / "go short" / "enter long" / "enter short" → open_long / open_short
+
+### English Exit/Close Signals
+- "stopped out" / "TRIGGERED" / "stop hit" → close_position (stop loss triggered)
+- "take profit" / "TP hit" / "TP1 reached" → close_position
+- "close position" / "close trade" / "close long" / "close short" → close_position
+- "exit position" / "exit trade" / "flatten" / "square up" → close_position
+- "out of the position" / "out of the trade" → close_position
+
+### English Non-Signals (is_valid_signal=false)
+- "not taken any longs yet" / "not longing it yet" → no action, holding description
+- "still in the long trade" / "still in the short" → holding description, not new signal
+- "Don't open second position until X" → advice, not signal
+- "shorting isn't wise unless X" → advice, not signal
+- "L or S now?" / "做多还是做空？" → question, not signal
+- "Na not taken any longs yet today" → no action
+- Messages about non-crypto assets (Samsung, INTC, NQ) → is_valid_signal=false unless crypto is mentioned
+
+## 混合信号处理（P0-3）
+当一条消息包含多个操作时，按优先级返回主操作：
+1. 平仓信号（含部分平仓）— 最高优先级
+2. 撤单信号
+3. 止盈止损更新信号
+4. 开仓信号 — 最低优先级
+- "撤，不挂了，没挂到\nBtc 方向：多 建仓：64700-63800" → 主操作=open_long（撤旧单+开新仓）
+- "止盈50%仓利润，可以移动保本" → 主操作=close_position（部分平仓+更新止损）
+- "分批止盈80%…第四笔多单可以补进" → 主操作=close_position（部分平仓+加仓）
+- "BTC限价单做多（重新改这个）" → 主操作=open_long（"重新改"=新开仓，非更新）
+- 不要把"分批止盈/推保护/保护利润/已有X笔空单在手"解析成新开仓
+
+## 短信号处理（P1-5）
+- "换手做多" / "换手做空" → is_valid_signal=true, symbol="", side=long/short, confidence=0.6
+- "直接进场" / "跟上节奏" / "直接进场" → is_valid_signal=true, symbol="", side="", confidence=0.4
+  （方向不明确时 confidence 降低，由风控决定是否执行）
+- "换手做多。" → is_valid_signal=true, side=long, confidence=0.6（即使缺品种价格）
+- 无品种价格的"做多/做空/开空" → 仍然 is_valid_signal=true, entry_price=null
 
 ## 重要原则
 - 只解析明确的交易指令，不含糊的观望/分析/感慨归为无效
@@ -479,6 +538,26 @@ c) 上下文暗示平仓：短消息(<50字)包含"走/出/撤/跑/抛/收/关"�
 - "大饼跑了 不格局了" → 有效平仓信号，is_exit_signal=true
 - "止盈一半，剩下保本" → 有效部分平仓/止损更新信号，position_pct=50
 - "BTC和ETH都不错 大饼64000多 以太3200多" → 如果只能返回单信号，优先返回文本中第一个明确交易信号；不要混成一个币种
+
+### English Examples (P0-1)
+- "Short #1 for today" → is_valid_signal=true, side=short, confidence=0.8
+- "Long 1" → is_valid_signal=true, side=long, confidence=0.8
+- "BTC too, if you longed the SFP, now a nice TP1" → is_exit_signal=true, symbol=BTC/USDT, confidence=0.8
+- "I would class it as stopped out" → is_exit_signal=true, confidence=0.7
+- "Short from last week has been TRIGGERED" → is_exit_signal=true, confidence=0.85
+- "I'm still in the long trade from Wednesday" → is_valid_signal=false (持仓描述)
+- "Na not taken any longs yet today" → is_valid_signal=false (非信号)
+- "Don't open second position in T2 until solid breakdown" → is_valid_signal=false (建议)
+- "L or S now? 现在做多还是做空？" → is_valid_signal=false (提问)
+
+### P0-2/P0-3/P0-4 Examples
+- "触发止损，直接出局！等待新一笔策略" → is_exit_signal=true, confidence=0.85
+- "BTC空单成本附近，保本出局" → is_exit_signal=true, symbol=BTC/USDT, confidence=0.85
+- "如果有机会反弹64000附近…可以平仓出来" → is_exit_signal=true, confidence=0.75
+- "Btc 方向：空 建仓：65600-66200" → is_valid_signal=true, side=short, entry_prices=[65600,66200], confidence=0.8
+- "撤，不挂了，没挂到 Btc 方向：多 建仓：64700-63800" → is_valid_signal=true, side=long, entry_prices=[64700,63800], confidence=0.75
+- "BTC限价单做多（重新改这个）" → is_valid_signal=true, side=long, confidence=0.75
+- "换手做多。" → is_valid_signal=true, side=long, symbol="", confidence=0.6
 
 返回严格的 JSON 格式，不要添加其他文字。"""
 
