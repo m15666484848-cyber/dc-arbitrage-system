@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -14,7 +14,7 @@ from app.models.audit import AuditLog
 from app.models.config import DiscordAccount
 from app.models.customer import Authorization, Customer
 from app.models.kol import Kol
-from app.models.signal import Signal
+from app.models.signal import ParserShadowResult, Signal
 from app.models.trading import Order
 from app.models.user import User
 from app.schemas.auth import (
@@ -138,6 +138,11 @@ class CustomerTypeUpdate(BaseModel):
     customer_type: Literal["normal", "internal"]
 
 
+class ShadowReviewRequest(BaseModel):
+    status: Literal["pending", "accepted", "rejected", "ignored"]
+    review_note: str = ""
+
+
 # ---------- 转发源状态 ----------
 @router.get("/source-status")
 async def get_forward_source_status(
@@ -167,6 +172,143 @@ async def get_forward_source_status(
     status["last_signal_symbol"] = last_signal.symbol if last_signal else ""
     status["heartbeat_interval"] = cfg.heartbeat_interval
     return ok(status)
+
+
+# ---------- 影子解析对比 ----------
+@router.get("/shadow-results")
+async def list_shadow_results(
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=50, ge=10, le=200, description="每页数量"),
+    hours: int = Query(default=168, ge=1, le=2160, description="回看最近多少小时"),
+    kol_id: int | None = Query(default=None, description="KOL ID"),
+    status: str | None = Query(default=None, description="审核状态"),
+    mismatch_only: bool = Query(default=False, description="只看有差异的结果"),
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    """查询影子解析结果。只读接口，不影响真实下单。"""
+    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+    base_stmt = select(ParserShadowResult).where(
+        ParserShadowResult.created_at >= since
+    )
+    if kol_id:
+        base_stmt = base_stmt.where(ParserShadowResult.kol_id == kol_id)
+    if status:
+        base_stmt = base_stmt.where(ParserShadowResult.status == status)
+    if mismatch_only:
+        base_stmt = base_stmt.where(func.jsonb_array_length(ParserShadowResult.mismatch_fields) > 0)
+
+    total = await db.scalar(select(func.count()).select_from(base_stmt.order_by(None).subquery()))
+    pending_total = await db.scalar(
+        select(func.count()).select_from(
+            base_stmt.order_by(None)
+            .where(ParserShadowResult.status == "pending")
+            .subquery()
+        )
+    )
+    mismatch_total = await db.scalar(
+        select(func.count()).select_from(
+            base_stmt.order_by(None)
+            .where(func.jsonb_array_length(ParserShadowResult.mismatch_fields) > 0)
+            .subquery()
+        )
+    )
+
+    rows = (
+        await db.execute(
+            base_stmt.order_by(ParserShadowResult.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    ).scalars().all()
+
+    kol_ids = {r.kol_id for r in rows if r.kol_id}
+    kol_map: dict[int, str] = {}
+    if kol_ids:
+        kols = (
+            await db.execute(select(Kol.id, Kol.name).where(Kol.id.in_(kol_ids)))
+        ).all()
+        kol_map = {k.id: k.name for k in kols}
+
+    def row_out(r: ParserShadowResult) -> dict:
+        return {
+            "id": r.id,
+            "signal_id": r.signal_id,
+            "kol_id": r.kol_id,
+            "kol_name": kol_map.get(r.kol_id or 0, ""),
+            "discord_message_id": r.discord_message_id,
+            "raw_text": r.raw_text,
+            "image_url": r.image_url,
+            "source": r.source,
+            "parse_version": r.parse_version,
+            "old_parsed": r.old_parsed or {},
+            "new_parsed": r.new_parsed or {},
+            "diff": r.diff or {},
+            "mismatch_fields": r.mismatch_fields or [],
+            "old_status": r.old_status,
+            "new_status": r.new_status,
+            "old_symbol": r.old_symbol,
+            "new_symbol": r.new_symbol,
+            "old_side": r.old_side,
+            "new_side": r.new_side,
+            "old_entry_price": r.old_entry_price,
+            "new_entry_price": r.new_entry_price,
+            "old_stop_loss": r.old_stop_loss,
+            "new_stop_loss": r.new_stop_loss,
+            "status": r.status,
+            "review_note": r.review_note,
+            "reviewer_id": r.reviewer_id,
+            "reviewed_at": r.reviewed_at,
+            "signal_received_at": r.signal_received_at,
+            "created_at": r.created_at,
+        }
+
+    return ok({
+        "total": total or 0,
+        "page": page,
+        "page_size": page_size,
+        "items": [row_out(r) for r in rows],
+        "summary": {
+            "pending": pending_total or 0,
+            "mismatch": mismatch_total or 0,
+            "matched": max((total or 0) - (mismatch_total or 0), 0),
+        },
+        "filters": {
+            "hours": hours,
+            "kol_id": kol_id,
+            "status": status,
+            "mismatch_only": mismatch_only,
+        },
+    })
+
+
+@router.post("/shadow-results/{result_id}/review")
+async def review_shadow_result(
+    result_id: int,
+    body: ShadowReviewRequest,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(require_admin),
+):
+    """人工审核影子解析结果。只更新影子表状态。"""
+    row = (
+        await db.execute(
+            select(ParserShadowResult).where(ParserShadowResult.id == result_id)
+        )
+    ).scalar_one_or_none()
+    if not row:
+        raise HTTPException(404, "影子解析结果不存在")
+    row.status = body.status
+    row.review_note = body.review_note.strip()
+    row.reviewer_id = admin.id
+    row.reviewed_at = datetime.now(timezone.utc)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("审核影子解析结果失败")
+        raise HTTPException(500, "审核失败,请稍后重试")
+    await _audit(db, admin.id, "review_shadow_result", str(result_id), f"status={body.status}")
+    return ok({"id": row.id, "status": row.status, "review_note": row.review_note})
 
 
 # ---------- 跟单诊断 ----------

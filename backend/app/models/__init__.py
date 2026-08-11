@@ -2,7 +2,7 @@
 from app.models.user import User
 from app.models.customer import Authorization, Customer
 from app.models.kol import Kol, KolFollow
-from app.models.signal import Signal
+from app.models.signal import ParserShadowResult, Signal
 from app.models.trading import Order, Position, Trade
 from app.models.pending_order import PendingOrder
 from app.models.strategy import Strategy
@@ -25,6 +25,7 @@ __all__ = [
     "Authorization",
     "Kol",
     "KolFollow",
+    "ParserShadowResult",
     "Signal",
     "Order",
     "Position",

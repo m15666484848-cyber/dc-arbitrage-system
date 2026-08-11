@@ -37,3 +37,43 @@ class Signal(Base, TimestampMixin):
     side: Mapped[str] = mapped_column(String(16), default="")  # long|short
     entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
+
+
+class ParserShadowResult(Base, TimestampMixin):
+    """影子解析结果。
+
+    只记录新旧解析对比和人工审核状态，不参与真实下单链路。
+    """
+
+    __tablename__ = "parser_shadow_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id", ondelete="SET NULL"), nullable=True, index=True)
+    kol_id: Mapped[int | None] = mapped_column(ForeignKey("kols.id", ondelete="SET NULL"), nullable=True, index=True)
+    discord_message_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    raw_text: Mapped[str] = mapped_column(Text, default="")
+    image_url: Mapped[str] = mapped_column(String(512), default="")
+    source: Mapped[str] = mapped_column(String(32), default="live", index=True)
+    parse_version: Mapped[str] = mapped_column(String(64), default="", index=True)
+
+    old_parsed: Mapped[dict] = mapped_column(JSONB, default=dict)
+    new_parsed: Mapped[dict] = mapped_column(JSONB, default=dict)
+    diff: Mapped[dict] = mapped_column(JSONB, default=dict)
+    mismatch_fields: Mapped[list] = mapped_column(JSONB, default=list)
+
+    old_status: Mapped[str] = mapped_column(String(32), default="")
+    new_status: Mapped[str] = mapped_column(String(32), default="")
+    old_symbol: Mapped[str] = mapped_column(String(64), default="", index=True)
+    new_symbol: Mapped[str] = mapped_column(String(64), default="", index=True)
+    old_side: Mapped[str] = mapped_column(String(16), default="")
+    new_side: Mapped[str] = mapped_column(String(16), default="")
+    old_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    new_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    old_stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    new_stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    review_note: Mapped[str] = mapped_column(Text, default="")
+    reviewer_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    signal_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)

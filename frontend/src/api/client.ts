@@ -69,6 +69,16 @@ export const API = {
     kol_id?: number;
   }) => api("get", "/admin/diagnosis", null, params),
   getSourceStatus: () => api("get", "/admin/source-status"),
+  listShadowResults: (params: {
+    page?: number;
+    page_size?: number;
+    hours?: number;
+    kol_id?: number;
+    status?: string;
+    mismatch_only?: boolean;
+  }) => api("get", "/admin/shadow-results", null, params),
+  reviewShadowResult: (id: number, data: { status: string; review_note?: string }) =>
+    api("post", `/admin/shadow-results/${id}/review`, data),
   // 系统配置(LLM + Discord)
   getSystemConfig: () => api("get", "/admin/system-config"),
   updateSystemConfig: (data: any) => api("put", "/admin/system-config", data),

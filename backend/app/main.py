@@ -85,6 +85,43 @@ async def _migrate_schema(conn) -> None:
     from sqlalchemy import text
 
     migrations = [
+        # 影子解析对比:只记录新旧解析差异,不参与真实下单链路。
+        "CREATE TABLE IF NOT EXISTS parser_shadow_results ("
+        "id SERIAL PRIMARY KEY, "
+        "signal_id INTEGER REFERENCES signals(id) ON DELETE SET NULL, "
+        "kol_id INTEGER REFERENCES kols(id) ON DELETE SET NULL, "
+        "discord_message_id VARCHAR(64) DEFAULT '', "
+        "raw_text TEXT DEFAULT '', "
+        "image_url VARCHAR(512) DEFAULT '', "
+        "source VARCHAR(32) DEFAULT 'live', "
+        "parse_version VARCHAR(64) DEFAULT '', "
+        "old_parsed JSONB DEFAULT '{}'::jsonb, "
+        "new_parsed JSONB DEFAULT '{}'::jsonb, "
+        "diff JSONB DEFAULT '{}'::jsonb, "
+        "mismatch_fields JSONB DEFAULT '[]'::jsonb, "
+        "old_status VARCHAR(32) DEFAULT '', "
+        "new_status VARCHAR(32) DEFAULT '', "
+        "old_symbol VARCHAR(64) DEFAULT '', "
+        "new_symbol VARCHAR(64) DEFAULT '', "
+        "old_side VARCHAR(16) DEFAULT '', "
+        "new_side VARCHAR(16) DEFAULT '', "
+        "old_entry_price FLOAT, "
+        "new_entry_price FLOAT, "
+        "old_stop_loss FLOAT, "
+        "new_stop_loss FLOAT, "
+        "status VARCHAR(32) DEFAULT 'pending', "
+        "review_note TEXT DEFAULT '', "
+        "reviewer_id INTEGER REFERENCES users(id) ON DELETE SET NULL, "
+        "reviewed_at TIMESTAMP WITH TIME ZONE, "
+        "signal_received_at TIMESTAMP WITH TIME ZONE, "
+        "created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(), "
+        "updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now())",
+        "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_signal_id ON parser_shadow_results(signal_id)",
+        "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_kol_id ON parser_shadow_results(kol_id)",
+        "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_status ON parser_shadow_results(status)",
+        "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_created_at ON parser_shadow_results(created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_signal_received_at ON parser_shadow_results(signal_received_at)",
+        "CREATE INDEX IF NOT EXISTS ix_parser_shadow_results_parse_version ON parser_shadow_results(parse_version)",
         "ALTER TABLE customers ADD COLUMN IF NOT EXISTS single_exchange_multi_api_limit INTEGER NOT NULL DEFAULT 2",
         # system_config:双 LLM 架构(新增 text_llm_* 和 vision_llm_*)
         # 保留旧 llm_* 字段不删,避免破坏数据
