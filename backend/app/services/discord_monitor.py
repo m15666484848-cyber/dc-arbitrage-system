@@ -67,7 +67,7 @@ from app.models.kol import Kol, KolFollow
 from app.models.signal import Signal
 
 
-from app.services import order_manager, signal_parser
+from app.services import order_manager, parser_shadow, signal_parser
 
 
 from app.services.signal_parser import KolLLMConfig
@@ -364,6 +364,7 @@ async def _handle_message(
 
         # 查询该KOL最近3条有效信号，作为上下文注入LLM
         _llm_context = ""
+        _recent_texts: list[str] = []
         try:
             hist_stmt = (
                 select(Signal)
@@ -376,6 +377,7 @@ async def _handle_message(
             )
             hist_signals = (await db.execute(hist_stmt)).scalars().all()
             if hist_signals:
+                _recent_texts = [h.raw_text for h in reversed(hist_signals) if h.raw_text]
                 lines = []
                 nums = ["①", "②", "③"]
                 for i, h in enumerate(reversed(hist_signals)):
@@ -441,6 +443,20 @@ async def _handle_message(
         db.add(signal)
         await db.commit()
         await db.refresh(signal)
+
+        # 影子解析:旁路记录新旧解析差异,不参与真实下单决策。
+        await parser_shadow.record_shadow_parse(
+            db,
+            signal,
+            parsed,
+            kol_id=_kol_id,
+            discord_message_id=message_id,
+            raw_text=content,
+            image_url=image_url,
+            source="discord",
+            recent_texts=_recent_texts,
+            signal_received_at=now,
+        )
 
         # 广播信号事件(管理员/前端可见)
         await bus.publish("admin", "signal", {
