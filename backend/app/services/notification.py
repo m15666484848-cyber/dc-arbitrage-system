@@ -178,6 +178,13 @@ async def notify(
     }
     flag_col = flag_map.get(event)
 
+    if customer_id is not None and not isinstance(customer_id, int):
+        try:
+            customer_id = int(customer_id)
+        except (TypeError, ValueError):
+            logger.warning("告警 customer_id 非法,已按全局告警处理: %r", customer_id)
+            customer_id = None
+
     # 内容指纹用于去重(与配置 id 组合)。必须在追加时间戳前计算,否则每次内容都不同。
     stable_content_for_hash = content
     if source_text:

@@ -2592,19 +2592,27 @@ async def process_signal(
 
     side_cn = "做多(long)" if parsed.side == "long" else "做空(short)" if parsed.side == "short" else parsed.side
 
+    success_title = "\u5e02\u4ef7\u8fdb\u573a\u6210\u529f"
+    success_basis = "\u5165\u573a\u4ef7\u63a5\u8fd1\u5e02\u4ef7\uff0c\u672a\u521b\u5efa\u5f85\u89e6\u53d1\u5355\uff0c\u76f4\u63a5\u6309\u5e02\u4ef7\u5355\u6267\u884c"
+
     await notify(
 
-        "order", "市价进场成功",
-
-        f"KOL: {kol_name}\n品种: {parsed.symbol}\n方向: {side_cn}\n"
-        f"{_order_success_lines(action='市价进场成功', order=result.get('order'), requested_entry=parsed.entry_price, market_price=market_price, notional_usdt=decision.notional_usdt, account_id=result.get('exchange_account_id') or exchange_account_id, basis='入场价接近市价，未创建待触发单，直接按市价单执行')}\n"
-        f"入场: {parsed.entry_price}\n"
-        f"杠杆: {parsed.leverage}x",
-        f"止盈:\n{tp_str}\n止损: {sl_str}\n"
-
-        f"杠杆: {parsed.leverage}x\n名义价值: {decision.notional_usdt} USDT",
-
+        "order",
+        success_title,
+        f"KOL: {kol_name}\n"
+        f"\u54c1\u79cd: {parsed.symbol}\n"
+        f"\u65b9\u5411: {side_cn}\n"
+        f"{_order_success_lines(action=success_title, order=result.get('order'), requested_entry=parsed.entry_price, market_price=market_price, notional_usdt=decision.notional_usdt, account_id=result.get('exchange_account_id') or exchange_account_id, basis=success_basis)}\n"
+        f"\u5165\u573a: {parsed.entry_price}\n"
+        f"\u6b62\u76c8:\n{tp_str}\n"
+        f"\u6b62\u635f: {sl_str}\n"
+        f"\u6760\u6746: {parsed.leverage}x\n"
+        f"\u540d\u4e49\u4ef7\u503c: {decision.notional_usdt} USDT",
+        customer_id,
+        source_text=signal.raw_text,
+        kol_name=kol_name,
     )
+
 
     return {"ok": True, "order_id": result.get("order_id"), "position_id": result.get("position_id")}
 
