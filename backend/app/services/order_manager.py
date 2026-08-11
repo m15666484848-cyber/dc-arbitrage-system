@@ -1594,6 +1594,73 @@ async def process_signal(
     snapshot_account_id = _forced_exchange_account_id.get()
     same_side_customer_positions: list[Position] = []
 
+    # 第8步: 多动作执行与结果回写。
+    # parsed.actions 已由解析器按优先级排序。这里拆成单动作复用现有执行链路,
+    # 避免只执行主 action 导致 "撤单+开仓" / "部分平仓+更新止损" 漏执行。
+    actionable_actions = [
+        a for a in actions
+        if a in ("close_position", "cancel_order", "update_tp_sl", "open_long", "open_short")
+    ]
+    if len(actionable_actions) > 1:
+        results: list[dict] = []
+        any_ok = False
+        hard_failed = False
+        for action in actionable_actions:
+            action_parsed = copy.deepcopy(parsed)
+            action_parsed.actions = [action]
+            action_parsed.action = action
+            action_parsed.is_exit_signal = action == "close_position"
+            action_parsed.is_update_signal = action == "update_tp_sl"
+            if action == "open_long":
+                action_parsed.side = "long"
+            elif action == "open_short":
+                action_parsed.side = "short"
+            elif action in ("close_position", "cancel_order", "update_tp_sl"):
+                # 对非开仓动作,避免后续开仓路径误触发。
+                if action != "close_position" and action_parsed.action != "open_long" and action_parsed.action != "open_short":
+                    pass
+            try:
+                one = await process_signal(
+                    db,
+                    signal,
+                    action_parsed,
+                    customer_id,
+                    customer_positions=customer_positions,
+                )
+            except Exception as e:
+                logger.exception(
+                    f"多动作信号执行异常: customer={customer_id} signal={signal.id} action={action}"
+                )
+                one = {"ok": False, "reason": str(e)}
+            one["action"] = action
+            results.append(one)
+            ok = bool(one.get("ok"))
+            any_ok = any_ok or ok
+            if not ok:
+                hard_failed = True
+
+        summary = "; ".join(
+            f"{r.get('action')}={'OK' if r.get('ok') else 'FAIL'}:{str(r.get('reason') or r.get('status') or '')[:80]}"
+            for r in results
+        )
+        final_status = "ordered" if any_ok else "rejected"
+        if any_ok and hard_failed:
+            final_note = f"多动作信号部分完成: {summary}"
+        elif any_ok:
+            final_note = f"多动作信号执行完成: {summary}"
+        else:
+            final_note = f"多动作信号全部失败: {summary}"
+        await _log_signal_status(db, signal, final_status, final_note, customer_id)
+        return {
+            "ok": any_ok,
+            "multi_action": True,
+            "total": len(results),
+            "success": sum(1 for r in results if r.get("ok")),
+            "failed": sum(1 for r in results if not r.get("ok")),
+            "results": results,
+            "reason": final_note,
+        }
+
     # 撤挂单动作先执行。
     # - 纯 "撤不挂了/撤单":撤完即结束。
     # - "撤单后重新挂多/开空":先撤旧挂单,再继续走后续开仓流程。
@@ -3251,6 +3318,8 @@ async def _place_entry(
                 qty=amount,
 
                 price=entry_price,
+
+                notional_usdt=decision.notional_usdt,
 
                 leverage=parsed.leverage,
 
