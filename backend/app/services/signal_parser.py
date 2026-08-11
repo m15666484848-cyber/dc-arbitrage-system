@@ -373,6 +373,45 @@ FUZZY_EXIT_PATTERNS = [
 ]
 
 
+def _detect_cn_direction_priority(text: str) -> str:
+    """中文方向词最高优先级，用于避免 short-term/stop loss 等英文片段干扰方向。"""
+    if not text:
+        return ""
+
+    patterns: list[tuple[str, str]] = [
+        ("short", r"反弹\s*(?:到|至)?\s*阻力\s*(?:位|附近)?\s*(?:空|做空|开空)?"),
+        ("short", r"阻力\s*(?:位|附近)?.{0,8}(?:空|做空|开空)"),
+        ("long", r"做多\s*(?:go\s*long)?"),
+        ("short", r"做空\s*(?:go\s*short)?"),
+        ("long", r"(?:方向\s*[:：]?\s*)?(?:1\s*倍\s*)?(?:多|做多|开多|进多|接多|挂多|多单|低多|低吸|逢低做多|逢低接|抄底)"),
+        ("short", r"(?:方向\s*[:：]?\s*)?(?:1\s*倍\s*)?(?:空|做空|开空|进空|接空|挂空|空单|高空|逢高做空|反弹空|阻力空)"),
+    ]
+    hits: list[tuple[int, str]] = []
+    for side, pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            hits.append((match.start(), side))
+    if not hits:
+        return ""
+    hits.sort(key=lambda item: item[0])
+    return hits[-1][1]
+
+
+def _apply_cn_direction_override(text: str, parsed: ParsedSignal) -> ParsedSignal:
+    """LLM 返回后按中文明确方向词修正方向，避免做多 go long 被误判为空。"""
+    if parsed.is_exit_signal or parsed.is_update_signal:
+        return parsed
+    forced_side = _detect_cn_direction_priority(text)
+    if forced_side in ("long", "short") and parsed.side and parsed.side != forced_side:
+        logger.warning(
+            f"中文方向优先覆盖 LLM 方向: {parsed.side} -> {forced_side}, text={text[:80]}"
+        )
+        parsed.side = forced_side
+        parsed.reason = (parsed.reason + "; " if parsed.reason else "") + "中文方向词优先覆盖"
+        parsed.actions = [f"open_{forced_side}"]
+        parsed.action = parsed.actions[0]
+    return parsed
+
+
 def detect_side(text: str) -> str:
     """识别交易方向(long/short)。
 
@@ -381,6 +420,10 @@ def detect_side(text: str) -> str:
     2. LONG 和 SHORT 同时检查,取更精确的匹配(词组优先于单词)
     3. 如果同时匹配到多和空,取最后出现的方向(通常"建议空单"中空单是最终建议)
     """
+    forced_side = _detect_cn_direction_priority(text)
+    if forced_side:
+        return forced_side
+
     low = text.lower()
 
     # 收集所有匹配到的方向词及其位置
@@ -2477,6 +2520,7 @@ async def parse_message(
                         llm_parsed.entry_prices = []
                         logger.info(f"[{kol_name}] LLM 结果补充标记为更新信号: {update_reason}")
                 llm_parsed.raw_text = combined
+                llm_parsed = _apply_cn_direction_override(combined_for_parse, llm_parsed)
                 llm_parsed = apply_actions_to_parsed(combined_for_parse, llm_parsed)
                 if llm_parsed.actions == ["hold_pending"]:
                     llm_parsed.confidence = 0.0
