@@ -779,7 +779,7 @@ function RegressionPanel() {
                   </div>
                 );
               })()}
-              {/* 第一层：总消息数 = 有效信息 + 噪音/聊天 */}
+              {/* 第一层：总消息数 = 有效信息 + 未执行 + 噪音/聊天 */}
               <div className="glass-soft p-3">
                 <div className="text-xs text-text-muted mb-2">第一层：消息总数拆分</div>
                 <div className="flex items-center gap-3 flex-wrap text-sm">
@@ -788,34 +788,40 @@ function RegressionPanel() {
                   <span className="text-text-muted">=</span>
                   <span className="text-accent font-mono">有效信息 {importReport.summary?.strategy_count || 0}</span>
                   <span className="text-text-muted">+</span>
+                  <span className="text-warn font-mono">未执行 {importReport.summary?.not_executed_count || 0}</span>
+                  <span className="text-text-muted">+</span>
                   <span className="text-text-tertiary font-mono">噪音/聊天 {importReport.summary?.noise_count || 0}</span>
                 </div>
+                <div className="text-xs text-text-muted mt-1">"未执行"指解析器未识别出有效交易动作但并非噪音的消息（可能是漏掉的有效信号）</div>
               </div>
-              {/* 第二层：有效信息 = 有效可执行 + 未执行 */}
+              {/* 第二层：有效信息 = 正常执行 + 告警样本 + 风险样本 */}
               <div className="glass-soft p-3">
-                <div className="text-xs text-text-muted mb-2">第二层：有效信息拆分（只看策略消息，噪音不算）</div>
+                <div className="text-xs text-text-muted mb-2">第二层：有效信息拆分（只看解析器识别出交易动作的消息）</div>
                 <div className="flex items-center gap-3 flex-wrap text-sm">
                   <span className="text-text-muted">有效信息</span>
                   <span className="text-lg font-mono font-bold text-accent">{importReport.summary?.strategy_count || 0}</span>
                   <span className="text-text-muted">=</span>
-                  <span className="text-profit font-mono">有效可执行 {importReport.summary?.effective_executable_count || 0}</span>
+                  <span className="text-profit font-mono">正常执行 {importReport.summary?.normal_execution_count || 0}</span>
                   <span className="text-text-muted">+</span>
-                  <span className="text-text-tertiary font-mono">未执行 {importReport.summary?.not_executed_count || 0}</span>
+                  <span className="text-warn font-mono">告警样本 {importReport.summary?.warning_count || 0}</span>
+                  <span className="text-text-muted">+</span>
+                  <span className="text-loss font-mono">风险样本 {((importReport.summary?.high_risk || 0) + (importReport.summary?.medium_risk || 0))}</span>
                 </div>
                 <div className="text-xs text-text-muted mt-2">
-                  其中"正常执行"（无任何风险、可直接执行）<span className="text-profit font-mono">{importReport.summary?.normal_execution_count || 0}</span> 条，"告警样本"（有低风险提醒）<span className="text-warn font-mono">{importReport.summary?.warning_count || 0}</span> 条
+                  "正常执行"（无任何风险、可直接执行）<span className="text-profit font-mono">{importReport.summary?.normal_execution_count || 0}</span> 条，"告警样本"（有低风险提醒）<span className="text-warn font-mono">{importReport.summary?.warning_count || 0}</span> 条，"风险样本"（P0高+P1中）<span className="text-loss font-mono">{((importReport.summary?.high_risk || 0) + (importReport.summary?.medium_risk || 0))}</span> 条
                 </div>
               </div>
-              {/* 第三层：成功率公式 */}
+              {/* 第三层：成功率公式 = 正常执行 / 有效信息 */}
               <div className="glass-soft p-3 border border-profit/20">
                 <div className="text-xs text-text-muted mb-2">第三层：成功率计算</div>
                 <div className="flex items-center gap-3 flex-wrap text-sm">
                   <span className="text-profit font-mono font-bold text-lg">{importReport.summary?.execution_success_rate || 0}%</span>
                   <span className="text-text-muted">=</span>
-                  <span className="text-profit font-mono">有效可执行 {importReport.summary?.effective_executable_count || 0}</span>
+                  <span className="text-profit font-mono">正常执行 {importReport.summary?.normal_execution_count || 0}</span>
                   <span className="text-text-muted">/</span>
                   <span className="text-accent font-mono">有效信息 {importReport.summary?.strategy_count || 0}</span>
                 </div>
+                <div className="text-xs text-text-muted mt-1">成功率 = 正常执行 ÷ 有效信息（噪音和未执行不计入分母）</div>
               </div>
               {/* 风险概览 */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">

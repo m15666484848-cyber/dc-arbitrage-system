@@ -1470,6 +1470,7 @@ def _build_parser_import_report(items: list[dict], total_messages: int, skipped_
     category_counts: dict[str, int] = {}
     strategy_count = 0
     noise_count = 0
+    not_executed_count = 0
 
     for item in items:
         risk_counts[item["risk_level"]] = risk_counts.get(item["risk_level"], 0) + 1
@@ -1477,8 +1478,12 @@ def _build_parser_import_report(items: list[dict], total_messages: int, skipped_
         action_counts[action] = action_counts.get(action, 0) + 1
         category = item.get("category") or "其他"
         category_counts[category] = category_counts.get(category, 0) + 1
-        if action == "ignored" or category == "无用信息":
+        # 三分类: 噪音/聊天 / 未执行(漏掉) / 有效信息(解析器识别出交易动作)
+        if category == "无用信息":
             noise_count += 1
+        elif action in (None, "", "ignored"):
+            # 解析器未识别出有效交易动作, 但并非明确噪音 → 漏掉/未执行
+            not_executed_count += 1
         else:
             strategy_count += 1
 
@@ -1503,13 +1508,21 @@ def _build_parser_import_report(items: list[dict], total_messages: int, skipped_
         and i.get("title") == "解析看起来正常"
         and ((i.get("actual") or {}).get("action") not in (None, "", "ignored"))
     ]
-    noise_items = [i for i in items if i.get("category") == "无用信息" or ((i.get("actual") or {}).get("action") == "ignored")]
+    # 噪音 = 明确无用信息
+    noise_items = [i for i in items if i.get("category") == "无用信息"]
+    # 未执行 = 解析器返回 ignored/空, 但非噪音(可能是漏掉的有效信号)
+    missed_items = [
+        i for i in items
+        if i.get("category") != "无用信息"
+        and ((i.get("actual") or {}).get("action") in (None, "", "ignored"))
+    ]
     warning_items = [
         i for i in items
         if i not in high_items
         and i not in medium_items
         and i not in normal_items
         and i not in noise_items
+        and i not in missed_items
     ]
     high_risk_count = len(high_items)
     medium_risk_count = len(medium_items)
@@ -1520,6 +1533,7 @@ def _build_parser_import_report(items: list[dict], total_messages: int, skipped_
         if i not in high_items
         and i not in medium_items
         and i not in noise_items
+        and i not in missed_items
         and ((i.get("actual") or {}).get("action") not in (None, "", "ignored"))
     ]
     effective_executable_count = len(effective_executable_items)
@@ -1527,8 +1541,6 @@ def _build_parser_import_report(items: list[dict], total_messages: int, skipped_
     warning_count = len(warning_items)
     failed_count = 0
     success_count = len(items)
-    # 未执行 = 有效信息总数(策略消息) - 有效可执行数；噪音/聊天不算在分母里
-    not_executed_count = max(strategy_count - effective_executable_count, 0)
 
     fix_suggestions: list[str] = []
     if high_risk_count:
@@ -1537,34 +1549,39 @@ def _build_parser_import_report(items: list[dict], total_messages: int, skipped_
         fix_suggestions.append("复查 P1 中风险样本，补齐方向、交易对、入场价、止损止盈等关键字段。")
     if warning_count:
         fix_suggestions.append("清理或修正低风险告警样本，减少字段缺失、低置信度和规则边界问题。")
+    if not_executed_count:
+        fix_suggestions.append(f"有 {not_executed_count} 条消息解析器未识别出有效动作(未执行),需检查是否为漏掉的有效信号。")
     if noise_count + skipped_noise:
         fix_suggestions.append("将聊天、通知、行情闲聊等无用信息沉淀为噪音样本，避免后续误触发策略解析。")
     if not fix_suggestions:
         fix_suggestions.append("本次导入整体质量较好，可抽查少量样本后进入回归测试。")
 
     success_rate = round((success_count / total_messages) * 100, 2) if total_messages else 0
-    # 成功率 = 有效可执行 / 有效信息总数(策略消息数)；噪音/聊天不应计入分母
-    execution_success_rate = round((effective_executable_count / strategy_count) * 100, 2) if strategy_count else 0
+    # 成功率 = 正常执行 / 有效信息(解析器识别出交易动作的消息); 噪音和未执行不计入分母
+    execution_success_rate = round((normal_execution_count / strategy_count) * 100, 2) if strategy_count else 0
     normal_rate = round((normal_execution_count / total_messages) * 100, 2) if total_messages else 0
     if high_risk_count:
         overall_analysis = (
-            f"本次共分析 {total_messages} 条消息，有效可执行 {effective_executable_count} 条，未执行 {not_executed_count} 条，"
-            f"执行成功率 {execution_success_rate}%（有效信息 {strategy_count} 条中可执行 {effective_executable_count} 条）。其中正常执行 {normal_execution_count} 条，存在 {high_risk_count} 条高风险样本，需要优先修复后再启用相关回归用例。"
+            f"本次共分析 {total_messages} 条消息，有效信息 {strategy_count} 条，未执行 {not_executed_count} 条，噪音 {noise_count + skipped_noise} 条。"
+            f"成功率 {execution_success_rate}%（正常执行 {normal_execution_count} / 有效信息 {strategy_count}）。"
+            f"存在 {high_risk_count} 条高风险样本，需要优先修复后再启用相关回归用例。"
         )
     elif risk_count:
         overall_analysis = (
-            f"本次共分析 {total_messages} 条消息，有效可执行 {effective_executable_count} 条，未执行 {not_executed_count} 条，"
-            f"执行成功率 {execution_success_rate}%（有效信息 {strategy_count} 条中可执行 {effective_executable_count} 条）。其中正常执行 {normal_execution_count} 条，未发现 P0 高风险，但仍有 {risk_count} 条风险样本建议复查。"
+            f"本次共分析 {total_messages} 条消息，有效信息 {strategy_count} 条，未执行 {not_executed_count} 条，噪音 {noise_count + skipped_noise} 条。"
+            f"成功率 {execution_success_rate}%（正常执行 {normal_execution_count} / 有效信息 {strategy_count}）。"
+            f"未发现 P0 高风险，但仍有 {risk_count} 条风险样本建议复查。"
         )
     elif warning_count:
         overall_analysis = (
-            f"本次共分析 {total_messages} 条消息，有效可执行 {effective_executable_count} 条，未执行 {not_executed_count} 条，"
-            f"执行成功率 {execution_success_rate}%（有效信息 {strategy_count} 条中可执行 {effective_executable_count} 条）。其中正常执行 {normal_execution_count} 条，整体可用，但有 {warning_count} 条低风险告警建议抽查。"
+            f"本次共分析 {total_messages} 条消息，有效信息 {strategy_count} 条，未执行 {not_executed_count} 条，噪音 {noise_count + skipped_noise} 条。"
+            f"成功率 {execution_success_rate}%（正常执行 {normal_execution_count} / 有效信息 {strategy_count}）。"
+            f"整体可用，但有 {warning_count} 条低风险告警建议抽查。"
         )
     else:
         overall_analysis = (
-            f"本次共分析 {total_messages} 条消息，有效可执行 {effective_executable_count} 条，未执行 {not_executed_count} 条，"
-            f"执行成功率 {execution_success_rate}%（有效信息 {strategy_count} 条中可执行 {effective_executable_count} 条），正常执行 {normal_execution_count} 条，未发现明显风险。"
+            f"本次共分析 {total_messages} 条消息，有效信息 {strategy_count} 条，未执行 {not_executed_count} 条，噪音 {noise_count + skipped_noise} 条。"
+            f"成功率 {execution_success_rate}%（正常执行 {normal_execution_count} / 有效信息 {strategy_count}），未发现明显风险。"
         )
 
     return {

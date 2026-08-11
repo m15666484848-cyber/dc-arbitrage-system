@@ -133,6 +133,7 @@ SYMBOL_ALIASES = {
     # 常见错别字/大小写修正
     "SOl": "SOL", "s0l": "SOL", "ETHH": "ETH", "BTCC": "BTC",
     "PEPEE": "PEPE", "SHIBB": "SHIB", "WIFW": "WIF",
+    "GOLD": "XAU", "XAUUSD": "XAU",
 }
 
 # 中文币种名映射(按优先级排序,避免子串误匹配)
@@ -144,6 +145,7 @@ CN_COIN_NAMES = {
     "瑞波": "XRP", "艾达币": "ADA", "艾达": "ADA", "波场": "TRX",
     "抹茶": "MX", "柚子": "EOS", "莱特币": "LTC", "莱特": "LTC",
     "比特币现金": "BCH", "比特现金": "BCH", "门罗币": "XMR",
+    "黄金": "XAU",
     "恒星币": "XLM", "恒星": "XLM", "eos": "EOS", "以太经典": "ETC",
     "经典币": "ETC", "小蚁": "NEO", "本体": "ONT", "量子": "QTUM",
     "小蚁币": "NEO", "本体币": "ONT", "量子币": "QTUM",
@@ -223,6 +225,7 @@ EXIT_WORDS = {
     "微利出局", "保本出局", "全部止盈出局", "止盈出局", "触发止损出局",
     "全部出局", "全都出局", "止损出局", "打损出局", "成本出局",
     "止损就离场", "止损直接出局", "可以平仓", "可以出来",
+    "可以平仓出来", "触发止损价直接出局",  # Round 3: 补充平仓变体
     "close position", "close order", "close all", "close trade",
     "exit", "take profit", "tp hit",
     # P0-1: 英文平仓关键词
@@ -290,8 +293,22 @@ HOLDING_INDICATORS = [
     r"浮盈.*继续",
     r"略微浮亏",
     r"略微浮盈",
+    # 第5步: 持仓状态汇报/收益汇报,不是交易指令
+    r"(?:当前|目前|现目前|现在).{0,12}(?:[一二两三四五六七八九十\d]+)\s*(?:个|笔|单|批)?\s*(?:多单|空单).{0,20}(?:在手|持仓|持有)",
+    r"(?:持仓)?收益(?:分别)?(?:为|是|达到|到了)?.{0,20}(?:%|％|个点|点)",
+    r"(?:现目前|目前|当前|现在).{0,12}(?:分别)?(?:盈利|获利|浮盈).{0,20}(?:%|％|个点|点)",
+    r"(?:多单|空单).{0,30}(?:分别)?(?:盈利|获利|浮盈).{0,20}(?:%|％|个点|点)",
     r"成本价附近",
     r"当前价格在成本",
+    # Round 2: "持仓过夜"+"设置好止盈止损"是提醒性质,非新指令
+    r"持仓过夜",
+    r"过夜单",
+    # Round 3: "持仓观察"/"持仓观望"是建议非指令,即使含"设置好止盈止损"也优先忽略
+    r"持仓观察",
+    r"持仓观望",
+    r"先持仓",
+    # Round 3: "均价拉到X"是持仓描述非新开仓
+    r"均价(?:应该)?(?:都)?拉到",
     # P0-1: 英文持仓描述/非信号模式
     r"(?i)still\s+in\s+(?:the\s+)?(?:long|short|trade|position)",
     r"(?i)not\s+(?:taken|taking)\s+(?:any\s+)?(?:longs?|shorts?|trades?)",
@@ -344,7 +361,9 @@ FUZZY_EXIT_PATTERNS = [
     # "走一波/撤一波"
     r"(?:走|撤|跑)\s*(?:一波|一下)",
     # P0-2: 触发止损直接出局/止损就离场/可以平仓出来
-    r"(?:触发止损|止损)\s*(?:直接|就)?\s*(?:出局|离场|出场)",
+    # Round 2: 修复逗号/emoji间隔变体 "触发止损，直接出局"
+    r"(?:触发止损|止损)[,，\s]*(?:直接|就)?[,，\s]*(?:出局|离场|出场)",
+    r"(?:触发止损价)[,，\s]*直接?(?:出局|离场|出场)",
     r"(?:止损)\s*(?:就)?\s*(?:离场|出场|走人|走)",
     r"(?:可以)\s*(?:平仓|出来|出仓|走人|收)",
     r"(?:平仓)\s*(?:出来|出|走)",
@@ -418,6 +437,30 @@ def check_exit_intent(text: str) -> tuple[bool, str]:
     """
     low = text.lower()
 
+    # Round 5: 已触及 TP 后让剩余仓位继续持有，是持仓描述/复盘，不是新的平仓指令。
+    if re.search(r"(?i)\bi\s+hit\s+tp\s*1?\b.{0,80}\blet\s+the\s+rest\b", text):
+        return False, "Round5英文TP1持仓描述: let the rest"
+    # Round 5 标注修正: 上周挂单/策略已触发 + 今日另一个方向仍有效，是历史触发描述，不是新平仓。
+    if re.search(r"(?i)\bshort\s+from\s+last\s+week\b.{0,80}\btriggered\b.{0,80}\blong\s+is\s+still\s+valid\b", text):
+        return False, "Round5英文历史触发描述: last week triggered"
+
+    # Round 4: 明确平仓/部分止盈动作不受复盘、恭喜、收益汇报语气影响。
+    # 例如“恭喜...止盈出局”“获利1540点...止盈离场”“移动止盈30%”
+    # 都是对已有仓位的实际退出/减仓指令，不能被 REVIEW_INDICATORS 误过滤。
+    round4_forced_exit_patterns = [
+        r"止盈\s*出局",
+        r"止盈\s*离场",
+        r"止损\s*出局",
+        r"触发\s*止损价?\s*直接\s*出局",
+        r"移动\s*止盈\s*\d+(?:\.\d+)?\s*[%％]",
+        r"(?:^|[，,。\n\s])止盈\s*\d+(?:\.\d+)?\s*[%％]",
+        r"剩余\s*持仓\s*止盈\s*(?:还是)?\s*看\s*\d",
+        r"止盈\s*\d+(?:\.\d+)?\s*[%％].{0,40}止损位\s*(?:移至|移动至|移到|移)",
+    ]
+    for pattern in round4_forced_exit_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            return True, f"Round4明确平仓/部分止盈命中: {pattern}"
+
     # 第零层:复盘/分析语境排除 (优先级最高)
     # 如果文本包含复盘/回顾性表达,则不视为平仓信号
     for pattern in REVIEW_INDICATORS:
@@ -486,6 +529,13 @@ UPDATE_KEYWORDS = [
     rf"保本(?:止损)?", rf"保护(?:利润|本金)",
     rf"止盈(?:先看|看到|看至|看向)",
     rf"\bTP\s*{UPDATE_VERBS}", rf"\bSL\s*{UPDATE_VERBS}",
+    # Round 2: 补充更新信号变体
+    rf"移动\s*止损", rf"移动\s*止盈",  # "移动止损至开仓价"
+    rf"设置好?\s*止损", rf"设置好?\s*止盈",  # "设置好止损价：1830"
+    rf"止损\s*(?:至|到)\s*开仓价",  # "止损至开仓价"=保本止损
+    # Round 3: "止损，我改成X" / "止损改为X" / "止损位下移X点，重设为Y"
+    rf"止损\s*[,，]\s*(?:我)?\s*(?:改成|改为|改到)",  # "止损，我改成0.506"
+    rf"止损位\s*下移.*重设",  # "止损位下移500点，重设为63300"
 ]
 
 
@@ -504,6 +554,29 @@ def check_update_intent(text: str) -> tuple[bool, str]:
 
 
 # ---------- 多动作识别 ----------
+# 第7步: 信号分类与优先级排序。
+# 说明: 一条 KOL 消息可能同时包含平仓/撤单/更新/开仓。
+# 主操作按风险从高到低处理,避免把风险更高的退出/撤单类信号误排到开仓后面。
+ACTION_PRIORITY = {
+    "close_position": 10,
+    "cancel_order": 20,
+    "update_tp_sl": 30,
+    "refresh_pending": 40,
+    "hold_pending": 50,
+    "open_short": 60,
+    "open_long": 60,
+}
+
+
+def _sort_signal_actions(actions: list[str]) -> list[str]:
+    """按统一动作优先级排序并去重,保证 parsed.action 是最高优先级主操作。"""
+    deduped: list[str] = []
+    for action in actions:
+        if action and action not in deduped:
+            deduped.append(action)
+    return sorted(deduped, key=lambda a: ACTION_PRIORITY.get(a, 999))
+
+
 # 撤挂单关键词: 只代表取消未成交挂单,不等于反向开仓。
 CANCEL_ORDER_PATTERNS = [
     r"\bcancel\s+(?:order|orders|limit|limits)\b",
@@ -625,13 +698,14 @@ NON_TRADE_NARRATIVE_PATTERNS = [
 
 
 def _has_trade_param_block(text: str) -> bool:
-    """是否包含完整交易参数块:方向 + 建仓/入场 + 风控字段。"""
+    """是否包含交易参数块:方向 + 建仓/入场 + 风控字段或明确价格。"""
     if not text:
         return False
     has_side = bool(re.search(r"方向\s*[:：]\s*(?:多|空)|做多|做空|开多|开空|多单|空单|long|short", text, re.IGNORECASE))
     has_entry = bool(re.search(r"建仓|入场|进场|挂单|entry|buy\s*zone|sell\s*zone", text, re.IGNORECASE))
     has_risk = bool(re.search(r"止损|止盈|\bSL\b|\bTP\b", text, re.IGNORECASE))
-    return has_side and has_entry and has_risk
+    has_price = bool(re.search(r"\d+(?:[.,]\d+)?(?:\s*[-~—至到]\s*\d+(?:[.,]\d+)?)?", text))
+    return has_side and has_entry and (has_risk or has_price)
 
 
 def strip_analysis_sections(text: str) -> str:
@@ -661,6 +735,23 @@ def classify_signal_scene(text: str) -> tuple[str, str]:
     """粗分类当前文本场景,用于先挡掉非交易内容。"""
     if not text:
         return "noise", "empty"
+    if re.search(r"(?i)\bfrom\s+last\s+week\b.{0,100}\btriggered\b.{0,100}\bstill\s+valid\b", text):
+        return "analysis", "Round5历史触发/旧策略仍有效描述"
+    # Round 4: 文章标题/新闻评论类内容优先过滤，避免“交易思路/能否幸免”
+    # 这类分析文中出现“多/空/突破/支撑”等词被误当成开仓。
+    if re.search(r"(?:交易思路|盘面分析|行情分析|走势分析)", text) and re.search(
+        r"(?:\d+\s*月\s*\d+\s*日|4小时级别|上升通道|箱体震荡|盘面分析|交易思路)",
+        text,
+        re.IGNORECASE,
+    ):
+        if not re.search(r"(?:建仓|进场|入场|委托|挂单|现价\s*(?:做多|做空)|直接\s*(?:做多|做空|进场))", text):
+            return "analysis", "Round4分析文章标题/盘面分析过滤"
+    if re.search(r"(?:能否幸免|咱们来看下|大炮一响|华尔街晚上即将开盘|美股盘前|黄金.*涨到)", text):
+        if not re.search(r"(?:建仓|进场|入场|委托|挂单|现价\s*(?:做多|做空)|直接\s*(?:做多|做空|进场))", text):
+            return "analysis", "Round4新闻评论/宏观分析过滤"
+    if re.search(r"[A-Za-z]{2,12}|[\u4e00-\u9fff]{1,12}", text) and re.search(r"一个不错的做(?:多|空)时机", text):
+        if not re.search(r"(?:建仓|进场|入场|委托|挂单|止盈|止损|\d{2,})", text):
+            return "analysis", "Round5做多/做空时机观点过滤"
     has_trade_block = _has_trade_param_block(text)
     if _has_any_pattern(text, NON_TRADE_NARRATIVE_PATTERNS) and not has_trade_block:
         return "narrative", "生活吐槽/叙事内容"
@@ -927,32 +1018,33 @@ def detect_signal_actions(
     has_reopen_after_cancel = _has_any_pattern(text, REOPEN_AFTER_CANCEL_PATTERNS)
     has_trade_block = _has_trade_param_block(text)
 
-    # 撤挂单优先级高于模糊平仓。"多单撤了/空单撤了"是取消未成交挂单,不是平仓。
+    # 撤挂单语境下,"多单撤了/空单撤了"通常是取消未成交挂单,不是平仓。
+    # 但如果文本同时有明确平仓词,仍允许 close_position 通过后续优先级排序成为主操作。
     if has_cancel:
-        is_exit = False
+        explicit_exit, _ = check_exit_intent(text)
+        if not explicit_exit:
+            is_exit = False
 
     if has_cancel:
         actions.append("cancel_order")
     if is_exit:
         actions.append("close_position")
-    elif is_update:
+    if is_update:
         actions.append("update_tp_sl")
     # P0-3/P0-4: 有明确开仓词+完整交易参数块时,优先判 open(即使同时有撤单)
     # 这解决"撤，不挂了 + Btc方向：多 建仓：64700"混合信号和"方向：空 建仓：65600"被误判refresh_pending的问题
-    elif side in ("long", "short") and has_explicit_open and (has_trade_block or not has_cancel or has_reopen_after_cancel):
+    if side in ("long", "short") and (
+        (has_explicit_open and (has_trade_block or not has_cancel or has_reopen_after_cancel))
+        or (has_cancel and has_trade_block)
+    ):
         actions.append(f"open_{side}")
     # refresh_pending 仅用于:有挂单状态描述+开仓词,但无完整交易参数块(只是刷新旧单状态)
-    elif side in ("long", "short") and has_pending_status and has_explicit_open and not has_trade_block:
+    elif not actions and side in ("long", "short") and has_pending_status and has_explicit_open and not has_trade_block:
         actions.append("refresh_pending")
-    elif has_pending_status and not has_explicit_open and not has_cancel:
+    elif not actions and has_pending_status and not has_explicit_open and not has_cancel:
         actions.append("hold_pending")
 
-    # 去重并保持顺序
-    out: list[str] = []
-    for action in actions:
-        if action not in out:
-            out.append(action)
-    return out
+    return _sort_signal_actions(actions)
 
 
 def apply_actions_to_parsed(text: str, parsed: ParsedSignal) -> ParsedSignal:
@@ -970,6 +1062,7 @@ def apply_actions_to_parsed(text: str, parsed: ParsedSignal) -> ParsedSignal:
             actions = ["update_tp_sl"]
         elif parsed.symbol and parsed.side in ("long", "short"):
             actions = [f"open_{parsed.side}"]
+    actions = _sort_signal_actions(actions)
     parsed.actions = actions
     parsed.action = actions[0] if actions else ""
     return parsed
@@ -1541,6 +1634,7 @@ def extract_symbol(text: str) -> str:
         "LINK", "LTC", "AVAX", "UNI", "ATOM", "ETC", "BCH", "FIL", "APT",
         "ARB", "OP", "DYDX", "AAVE", "MKR", "COMP", "CRV", "SNX", "INJ",
         "SUI", "TIA", "SEI", "ORDI", "PEPE", "WIF", "FLOKI", "JUP", "BONK",
+        "XAU",
     ]
     for coin in common_coins:
         # 匹配: 前面是中文/标点/空格/边界,后面是中文/标点/空格/边界
@@ -1691,15 +1785,201 @@ async def ocr_image(image_url: str) -> str:
 
 
 # ---------- 主解析入口 ----------
+def _is_pure_discord_cdn_url(text: str) -> bool:
+    """Round 7: 纯 Discord/CDN 附件 URL 不是交易信号。"""
+    if not text:
+        return False
+    stripped = text.strip()
+    if not re.fullmatch(r"https?://\S+", stripped, re.IGNORECASE):
+        return False
+    return bool(re.search(
+        r"(?:cdn\.discordapp\.com|media\.discordapp\.net|discord(?:app)?\.com/(?:attachments|channels))",
+        stripped,
+        re.IGNORECASE,
+    ))
+
+
+def _parse_round7_english_sl_be(text: str, raw_text: str) -> ParsedSignal | None:
+    """Round 7: 英文 SL/BE 止损保本与止盈/保本选择。"""
+    if not text:
+        return None
+    if re.search(r"(?i)\b(?:take|book)\b.{0,30}\bor\b.{0,30}\bmove\s+sl\s+to\s+be\b", text):
+        return ParsedSignal(
+            raw_text=raw_text,
+            confidence=0.75,
+            is_exit_signal=True,
+            exit_reason="Round7 English Take or move SL to BE",
+            actions=["close_position", "update_tp_sl"],
+            action="close_position",
+        )
+    if re.search(r"(?i)\b(?:sl|stop\s*loss)\s+to\s+(?:be|breakeven)\b|\bmove\s+sl\s+(?:to\s+be|to\s+breakeven|up)\b|\bsl\s+to\s+be\s+please\b", text):
+        return ParsedSignal(
+            raw_text=raw_text,
+            confidence=0.75,
+            is_update_signal=True,
+            update_reason="Round7 English SL moved to breakeven",
+            actions=["update_tp_sl"],
+            action="update_tp_sl",
+        )
+    if re.search(r"(?i)\bsl\s+to\s+be\s+or\s+book\b", text):
+        return ParsedSignal(
+            raw_text=raw_text,
+            confidence=0.75,
+            is_update_signal=True,
+            update_reason="Round7 English SL to BE or Book",
+            actions=["update_tp_sl"],
+            action="update_tp_sl",
+        )
+    return None
+
+
+def _extract_round7_open_entry(text: str) -> tuple[float | None, list[float]]:
+    """Round 7: 提取英文/中英混合开仓短句中的入场价。"""
+    patterns = [
+        rf"(?i)\bentry\s*[:：]?\s*{PRICE_RE}(?:\s*[-~至到]\s*{PRICE_RE})?",
+        rf"(?i)go\s+(?:long|short)\s*[:：]?\s*{PRICE_RE}(?:\s*[-~至到]\s*{PRICE_RE})?",
+        rf"(?i)\bready\s+to\s+short\b.*?{PRICE_RE}",
+        rf"{PRICE_RE}\s*(?:直接空|直接多)",
+        rf"(?i){PRICE_RE}\s*break\s*down\s*=?\s*ready\s+to\s+short",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if not m:
+            continue
+        matched = m.group(0)
+        prices: list[float] = []
+        for pm in re.finditer(PRICE_RE, matched):
+            p = _to_float(pm.group(1))
+            if p and p > 0:
+                if "万" in matched:
+                    p *= 10000
+                if p not in prices:
+                    prices.append(p)
+        if prices:
+            return prices[0], prices
+    return extract_entry(text)
+
+
+def _parse_round7_open_priority(text: str, raw_text: str) -> ParsedSignal | None:
+    """Round 7: 开仓结构优先于止盈/止损/TP 等平仓词。"""
+    if not text:
+        return None
+    has_entry_structure = bool(re.search(r"(?i)\bentry\b|go\s+(?:long|short)|swing\s+movement|进场点位|入场点位|建仓|直接空|直接多|ready\s+to\s+short|break\s*down", text))
+    has_risk_params = bool(re.search(r"(?i)\btp\b|\bsl\b|take\s*profit|stop\s*loss|止盈|止损", text))
+    has_direction = bool(re.search(r"(?i)go\s+short|\bready\s+to\s+short\b|\bshort\b|做空|直接空|空单|做多|直接多|go\s+long|\blong\b|swing\s+movement", text))
+    if not (has_entry_structure and has_direction and (has_risk_params or re.search(PRICE_RE, text))):
+        return None
+
+    side = detect_side(text)
+    if not side:
+        if re.search(r"(?i)\bshort\b|做空|直接空|ready\s+to\s+short|break\s*down", text):
+            side = "short"
+        elif re.search(r"(?i)\blong\b|go\s+long|做多|直接多|swing\s+movement", text):
+            side = "long"
+    if side not in ("long", "short"):
+        return None
+
+    entry, entry_prices = _extract_round7_open_entry(text)
+    if entry is None and not entry_prices:
+        return None
+    symbol = extract_symbol(text)
+    if symbol == "BREAK/USDT" and re.search(r"(?i)break\s*down|ready\s+to\s+short", text):
+        symbol = ""
+    tps = extract_take_profits(text)
+    sl = extract_stop_loss(text)
+    confidence = 0.75
+    if symbol:
+        confidence += 0.1
+    if sl or tps:
+        confidence += 0.1
+    return ParsedSignal(
+        symbol=symbol,
+        side=side,
+        entry_price=entry,
+        entry_prices=entry_prices,
+        take_profits=tps,
+        stop_loss=sl,
+        raw_text=raw_text,
+        confidence=min(confidence, 0.95),
+        actions=[f"open_{side}"],
+        action=f"open_{side}",
+        reason="Round7开仓结构优先于TP/SL平仓词",
+    )
+
+
+def _parse_round4_add_more(text: str, raw_text: str) -> ParsedSignal | None:
+    """Round 4: 处理英文 Add more / 加仓短消息。
+
+    规则:
+    - "#XXX Add more" + TP/SL 目标: 加仓后的止盈止损目标,不是平仓。
+    - "#XXX Add more / 继续加仓": 明确继续加仓,默认按做多加仓。
+    - "#XXX ADD MORE" 但无价格、无方向、无 TP/SL: 信息不足,忽略。
+    """
+    if not re.search(r"(?i)\badd\s+more\b|继续加仓|加仓更多", text):
+        return None
+
+    tag_match = re.search(r"#\s*([A-Za-z0-9]{2,20})\b", text)
+    if not tag_match:
+        return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="Add more 无明确品种名")
+
+    symbol = normalize_symbol(tag_match.group(1))
+    has_tp_sl = bool(re.search(r"(?i)\b(?:tp|sl)\s*\d*\s*[:：]?\s*\d", text)) or bool(re.search(r"(?:止盈|止损)\s*\d", text))
+    has_price = bool(re.search(PRICE_RE, re.sub(r"#\s*[A-Za-z0-9]{2,20}\b", "", text)))
+    has_explicit_continue = bool(re.search(r"继续加仓", text))
+    has_side = bool(re.search(r"(?i)\b(?:long|buy|short|sell|bullish|bearish)\b|做多|做空|多单|空单|看涨|看跌", text))
+
+    # "#AKE ADD MORE / 加仓更多" 这类只有加仓口号,没有价格/方向/TP/SL,不可执行。
+    if not (has_tp_sl or has_price or has_explicit_continue or has_side):
+        return ParsedSignal(
+            symbol=symbol,
+            raw_text=raw_text,
+            confidence=0.0,
+            reason="Add more 缺少方向、价格或 TP/SL,信息不足",
+        )
+
+    side = detect_side(text) or "long"
+    entry, entry_prices = extract_entry(text)
+    tps = extract_take_profits(text)
+    sl = extract_stop_loss(text)
+    return ParsedSignal(
+        symbol=symbol,
+        side=side,
+        entry_price=entry,
+        entry_prices=entry_prices,
+        take_profits=tps,
+        stop_loss=sl,
+        raw_text=raw_text,
+        confidence=0.75 if has_tp_sl or has_explicit_continue else 0.65,
+        actions=[f"open_{side}"],
+        action=f"open_{side}",
+        reason="Round4 Add more 加仓规则",
+    )
+
+
 def parse_text(text: str) -> ParsedSignal:
     text = (text or "").strip()
     if not text:
         return ParsedSignal()
     raw_text = text
+    if _is_pure_discord_cdn_url(text):
+        return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="Round7纯Discord/CDN链接")
+    add_more_parsed = _parse_round4_add_more(text, raw_text)
+    if add_more_parsed is not None:
+        return add_more_parsed
+    sl_be_parsed = _parse_round7_english_sl_be(text, raw_text)
+    if sl_be_parsed is not None:
+        return sl_be_parsed
+    open_priority_parsed = _parse_round7_open_priority(text, raw_text)
+    if open_priority_parsed is not None:
+        return open_priority_parsed
     effective_text = strip_analysis_sections(text).strip()
     scene, scene_reason = classify_signal_scene(effective_text)
+    # Round 2: 明确平仓信号优先于“等待/观望”类场景判断。
+    # 例如“触发止损，直接出局！等待新一笔策略”中后半句有“等待”，
+    # 但前半句已明确要求出局，不能被 conditional_observe 误拦截。
+    pre_scene_exit, _pre_scene_exit_reason = check_exit_intent(effective_text)
 
-    if scene in ("analysis", "conditional_observe", "narrative", "noise"):
+    if scene in ("analysis", "conditional_observe", "narrative", "noise") and not pre_scene_exit:
         logger.info(f"检测到非交易场景({scene}),标记为忽略: {scene_reason}")
         return ParsedSignal(
             raw_text=raw_text,
@@ -1714,12 +1994,37 @@ def parse_text(text: str) -> ParsedSignal:
     # "止损上移到成本价,继续持有" 被成本价/继续持有误拦截。
     pre_is_update, _pre_update_reason = check_update_intent(text)
     _holding_match = any(re.search(p, text) for p in HOLDING_INDICATORS)
-    if _holding_match and not pre_is_update:
+    # Round 5: “当前三笔空单在手 + 分别盈利/持仓收益分别 + 分批止盈/推保护”
+    # 是对已有仓位状态和已执行管理动作的描述，不是新的平仓指令。
+    if re.search(r"(?:当前|目前|现目前|现在).{0,20}[一二两三四五六七八九十\d]+\s*(?:个|笔|单|批)?\s*(?:多单|空单).{0,12}(?:在手|持仓|持有)", text) and re.search(r"(?:分别盈利|分别获利|持仓收益分别|现目前分别盈利)", text):
+        logger.info(f"检测到已有仓位收益汇报,标记为非有效信号: {text[:80]}")
+        return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="已有仓位收益汇报,非新的平仓指令")
+    # Round 2: “持仓过夜/过夜单 + 设置好/注意 + 止盈止损”是持仓提醒，
+    # 不是新的止盈止损更新指令；只有“改为/移动/上移/下移/调整至”等才按更新处理。
+    if _holding_match and re.search(r"(?:持仓过夜|过夜单)", text) and re.search(r"(?:设置好|注意).{0,20}(?:止盈|止损)", text):
+        logger.info(f"检测到持仓过夜提醒,标记为非有效信号: {text[:80]}")
+        return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="持仓过夜提醒,非新的止盈止损更新")
+    if _holding_match and not pre_is_update and not pre_scene_exit:
         logger.info(f"检测到持仓继续/维持消息,标记为非有效信号: {text[:80]}")
         return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="持仓继续/维持消息,非交易信号")
 
+    # Round 3: "持仓观察/持仓观望/先持仓"是建议语气,即使含"设置好止盈止损"也优先忽略
+    if re.search(r"(?:持仓观察|持仓观望|先持仓)", text):
+        logger.info(f"检测到持仓观察建议,标记为非有效信号: {text[:80]}")
+        return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="持仓观察建议,非交易信号")
+    # Round 3: "均价拉到X"是持仓描述非新开仓
+    if re.search(r"均价(?:应该)?(?:都)?拉到", text):
+        logger.info(f"检测到持仓均价描述,标记为非有效信号: {text[:80]}")
+        return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="持仓均价描述,非新开仓信号")
+    # Round 3: "可以移动止损...防止/防"是建议语气非更新指令
+    if re.search(r"可以移动止损.*(?:防止|防|以防)", text):
+        logger.info(f"检测到建议语气(可以移动止损+防止),标记为非有效信号: {text[:80]}")
+        return ParsedSignal(raw_text=raw_text, confidence=0.0, reason="建议语气,非更新指令")
+
     # 1. 检查是否为平仓信号
-    is_exit, exit_reason = check_exit_intent(text)
+    is_exit, exit_reason = pre_scene_exit, _pre_scene_exit_reason
+    if not is_exit:
+        is_exit, exit_reason = check_exit_intent(text)
 
     # 2. 提取基本信息
     symbol = extract_symbol(text)
@@ -1916,6 +2221,10 @@ async def parse_message(
     parsed = ParsedSignal()
     has_image = bool(image_url or image_base64)
 
+    if _is_pure_discord_cdn_url(combined):
+        logger.info(f"[{kol_name}] 纯 Discord/CDN 链接,标记为非交易信号")
+        return ParsedSignal(raw_text=combined, confidence=0.0, reason="Round7纯Discord/CDN链接")
+
     # 自动检测: 如果没有显式传入 image_url,但 raw_text 中包含图片 URL,
     # 自动提取作为 image_url (KOL 有时只发图片链接,Discord 不总是将其放入 attachments)
     if not image_url and not image_base64 and combined:
@@ -1959,8 +2268,19 @@ async def parse_message(
     # ============ 阶段 0: 持仓继续/维持消息检测 ============
     # 检查是否为"继续持有"类消息 (不是有效信号,无需告警)
     if combined:
+        round4_add_more = _parse_round4_add_more(combined, combined)
+        if round4_add_more is not None:
+            return round4_add_more
+        round7_sl_be = _parse_round7_english_sl_be(combined, combined)
+        if round7_sl_be is not None:
+            return round7_sl_be
+        round7_open = _parse_round7_open_priority(combined, combined)
+        if round7_open is not None:
+            return round7_open
+        pre_hold_exit, _ = check_exit_intent(combined)
+        pre_hold_update, _ = check_update_intent(combined)
         _holding_match = any(re.search(p, combined) for p in HOLDING_INDICATORS)
-        if _holding_match:
+        if _holding_match and not pre_hold_exit and not pre_hold_update:
             logger.info(f"[{kol_name}] 检测到持仓继续/维持消息,标记为非有效信号")
             return ParsedSignal(raw_text=combined, confidence=0.0, reason="持仓继续/维持消息,非交易信号")
 
@@ -2019,7 +2339,8 @@ async def parse_message(
     # ============ 阶段 1.8: 场景分类 + 分析段过滤 ============
     combined_for_parse = strip_analysis_sections(combined).strip()
     scene, scene_reason = classify_signal_scene(combined_for_parse)
-    if scene in ("analysis", "conditional_observe", "narrative", "noise"):
+    pre_scene_exit, _pre_scene_exit_reason = check_exit_intent(combined_for_parse)
+    if scene in ("analysis", "conditional_observe", "narrative", "noise") and not pre_scene_exit:
         logger.info(f"[{kol_name}] 检测到非交易场景({scene}),跳过: {scene_reason}")
         return ParsedSignal(raw_text=combined, confidence=0.0, reason=scene_reason)
     if combined_for_parse and combined_for_parse != combined:

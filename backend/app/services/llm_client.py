@@ -367,6 +367,7 @@ BTC/比特币/大饼/皇上 → BTC/USDT
 ETH/以太/以太坊 → ETH/USDT
 SOL/索尔 → SOL/USDT
 DOGE/狗狗 → DOGE/USDT
+黄金/XAU → XAU/USDT
 其他代币: XXX → XXX/USDT
 如果消息中没有明确币种名称或代号，symbol设为空 → 不要猜测
 
@@ -381,6 +382,7 @@ DOGE/狗狗 → DOGE/USDT
 1. 开仓关键词：接/开/进/多/空/做多/做空/挂单/委托/埋伏/抄底/摸顶/上车/上车了/搞/搞一波/干/操作/布局/进场/入场/建仓/挂/埋伏单/抄底单
 2. 平仓关键词：跑了/平了/出了/不格局了/落袋/落袋为安/跑路/撤退/撤/止盈了/止损了/平仓/全平/清仓/走人/下车/出局/兑现/获利了结/微利出局/保本出局/全部止盈出局/止盈出局/触发止损出局
 3. "拿着/持有/继续拿着/不用管/继续格局/保持仓位/当前X笔空单在手/当前X笔多单在手" = 继续持有或持仓描述，不是新开仓 → is_valid_signal=false
+   第5步持仓描述过滤：即使包含多个成本价、方向词、盈利点数，也不是新交易指令。
 4. "关注/观察/留意/看看/等待/等一等/不急/再看看" = 观望，不是即时交易 → is_valid_signal=false
 5. "想试试/咱就开" = 明确开仓意图 → is_valid_signal=true
 6. "挂一个反弹 X附近/在挂一个反弹 X附近/挂反弹 X附近" = 明确新挂单，通常表示做多反弹 → is_valid_signal=true, side=long, entry_price=X
@@ -410,6 +412,8 @@ DOGE/狗狗 → DOGE/USDT
 - 多个入场价如“64000/63500/63000 分批接” → entry_prices=[64000,63500,63000], entry_price取第一个入场价
 - 范围价如“63850-63250附近 做多” → entry_prices=[63850,63250], entry_price=63850；做多从高价到低价分批接
 - 范围价如“64500-65000附近 做空” → entry_prices=[64500,65000], entry_price=64500；做空从低价到高价分批空
+- “入场：4480-4510附近” / “入场:X-Y附近” → 分批建仓 entry_prices=[X,Y], entry_price取第一个价格；如果方向为做空，side=short
+- “黄金 方向：做空 入场：4480-4510附近 止盈：点位1：4350附近 点位2：4200” → open_short, symbol=XAU/USDT, entry_prices=[4480,4510], take_profits=[4350,4200]
 - “半仓/五成仓” → position_pct=50；“三成/轻仓” → position_pct=30；“重仓/七成” → position_pct=70
 - “减半/出一半/先出30%/止盈一半/减仓50%”属于部分平仓信号，is_exit_signal=true，并在 position_pct 中返回平仓比例
 
@@ -445,6 +449,12 @@ d) 上下文暗示平仓：短消息(<50字)包含"走/出/撤/跑/抛/收/关"�
 e) “当前三笔空单在手/目前两笔多单在手/已有空单持仓/多单还在手”只是持仓描述，不是新开仓；除非同时出现明确“新开/再开/加仓/进场/入场”才可作为开仓
 f) 混合信号短期处理：一条消息同时包含平仓/撤单/更新止损止盈和开仓词时，优先返回风险更低的主操作：平仓 > 撤单 > 更新止损止盈 > 开仓。不要把“分批止盈/推保护/保护利润/已有X笔空单在手”解析成新开仓。
 g) 英文平仓信号："stopped out"、"TRIGGERED"、"take profit"、"TP hit"、"close position"、"exit position"、"flatten"、"square up" → is_exit_signal=true
+h) Round 4 平仓优先规则：以下即使出现在复盘、庆祝、收益汇报语境中，也必须识别为平仓/部分平仓：
+   - "止盈出局" / "止盈离场" / "止盈出局【X收益点】"
+   - "获利X点…止盈离场" / "完美到达止盈位…止盈离场"
+   - "移动止盈X%" / "止盈X%"（明确百分比=部分平仓，position_pct=X）
+   - "剩余持仓止盈还是看X"（剩余仓位止盈目标，属于平仓意图）
+   - "止盈50%…剩余仓位止损位移至X"（部分平仓+更新止损，主操作 close_position）
 
 ### 非交易内容（is_valid_signal=false）
 - 复盘/分析："顺利空到1890"、"昨夜重头戏"、"吃了个短线反弹"
@@ -456,6 +466,9 @@ g) 英文平仓信号："stopped out"、"TRIGGERED"、"take profit"、"TP hit"�
 - "关注反弹/反弹以后考虑继续开空" = 观望，不是即时信号 → is_valid_signal=false
 - "ZEC空单，很多会员反馈进场了，那就拿着，出局我通知" = 继续持有旧仓，不是新开仓 → is_valid_signal=false
 - "当前三笔空单在手" / "目前两笔多单在手" / "已有空单持仓" = 持仓描述，不是新开仓 → is_valid_signal=false
+- "🔥当前三笔空单在手：1914+1913+1923的空单！" = 持仓状态汇报，is_valid_signal=false
+- "持仓收益分别为X%" / "现目前分别盈利X个点" / "多单分别盈利X%" = 持仓收益汇报，is_valid_signal=false
+- 如果文本只是在汇报已有多单/空单数量、成本、收益、浮盈浮亏，没有“新开/再开/加仓/进场/入场/平仓/止损改为”等明确动作 → is_valid_signal=false
 - 市场评论/感慨如“惨呐/假突破/带崩大盘/警惕骗子” = 非交易内容 → is_valid_signal=false
 - 英文非交易内容："not taken any longs" / "not longing it yet" / "still in the trade" = 持仓或观望 → is_valid_signal=false
 - 英文建议/提问："Don't open until X" / "shorting isn't wise" / "L or S now?" = 建议或提问 → is_valid_signal=false
@@ -487,6 +500,8 @@ KOL messages may be in English. Apply these rules:
 - "longed" / "shorted" / "longing" / "shorting" → open_long / open_short
 - "if you longed X, now a nice TP" → close_position (take profit on existing position)
 - "go long" / "go short" / "enter long" / "enter short" → open_long / open_short
+- "Swing movement" / "Entry X" / "Entry X TP:Y SL:Z" → open, TP/SL 是开仓配套参数，不是平仓
+- "BREAK DOWN" / "READY TO SHORT" / "1922 BREAK DOWN= READY TO SHORT" → open_short
 
 ### English Exit/Close Signals
 - "stopped out" / "TRIGGERED" / "stop hit" → close_position (stop loss triggered)
@@ -498,23 +513,87 @@ KOL messages may be in English. Apply these rules:
 ### English Non-Signals (is_valid_signal=false)
 - "not taken any longs yet" / "not longing it yet" → no action, holding description
 - "still in the long trade" / "still in the short" → holding description, not new signal
+- "I HIT TP1 and now let the rest sizzle" / "I HIT TP" + "let the rest" → 已触及止盈后让剩余仓位继续持有，is_valid_signal=false
+- "Short from last week has been TRIGGERED and this long is still valid" → 历史挂单触发/旧策略状态描述，is_valid_signal=false
 - "Don't open second position until X" → advice, not signal
 - "shorting isn't wise unless X" → advice, not signal
 - "L or S now?" / "做多还是做空？" → question, not signal
 - "Na not taken any longs yet today" → no action
 - Messages about non-crypto assets (Samsung, INTC, NQ) → is_valid_signal=false unless crypto is mentioned
 
-## 混合信号处理（P0-3）
-当一条消息包含多个操作时，按优先级返回主操作：
-1. 平仓信号（含部分平仓）— 最高优先级
-2. 撤单信号
-3. 止盈止损更新信号
-4. 开仓信号 — 最低优先级
-- "撤，不挂了，没挂到\nBtc 方向：多 建仓：64700-63800" → 主操作=open_long（撤旧单+开新仓）
-- "止盈50%仓利润，可以移动保本" → 主操作=close_position（部分平仓+更新止损）
+### English SL/BE operations
+- "SL to BE" / "sl to breakeven" / "move sl to BE" / "move sl up" / "SL to BE please" → update_tp_sl (is_update_signal=true, update_reason="止损移至保本")
+- "Take or move sl to BE" → close_position 或 update_tp_sl；含 "Take" 时主操作优先 close_position
+- "Sl to BE or Book" → update_tp_sl（Book=止盈，但 "or" 表示选择，归为止损保本更新）
+
+### English Non-Signal Rules (DO NOT trade) — Round 2 回归修复
+以下英文表述不是交易指令，is_valid_signal=false：
+1. 持仓描述："these are fresh longs" / "I've taken a scalp" / "I've taken a quick" / "Ive taken"
+   → 描述已有持仓，不是新指令
+2. 情绪标签："BULLISH" / "BEARISH" 单独出现或带emoji（如 "#PRL BULLISH"）
+   → 看涨/看跌情绪，无具体操作
+3. 更新记录："Updated SL X$" / "New sl X$" + "impact"
+   → 已发生的止损更新描述，非新指令
+4. 条件单："if the double top" / "CDW if..." / "if breaks" / "Short N: X if Y"
+   → 条件触发性挂单，非即时市价信号
+5. 复盘语气："Make that now a X% bounce" / "a great Take Profit" / "now a nice TP"
+   → 描述已发生的盈利，回顾语气（注意区分："if you longed...now TP1"是止盈提示=close_position）
+6. "Add more" 无明确品种名 → is_valid_signal=false（方向不明确，无法执行）
+
+### English "Add more" = 加仓规则（Round 3 修正）
+- "Add more" / "继续加仓" + 明确品种名（#BANK/#EUL 等 #XXX 格式）→ open（加仓，方向同已有持仓）
+  例: "#BANK Add more / 继续加仓" → is_valid_signal=true, side=long（加仓做多）
+  例: "#EUL Add more TP1: 9$ TP2: 90$" → is_valid_signal=true, side=long, take_profits=[9,90]
+- "#XXX BULLISH" 单独出现 → is_valid_signal=false；但 "#XXX BULLISH + Add more/ADD MORE" → open_long（BULLISH=看多方向，加仓动作明确）
+- "Add more" + 品种名 + TP/SL 但无方向 → open_long（默认做多加仓）
+- "Add more" + "TP1: X" 格式不是平仓，TP1/TP2 是加仓后的止盈目标
+- "Add more" + 品种名 + 无价格、无方向、无 TP/SL → is_valid_signal=false（信息不足）
+- "Add more" 无品种名 → is_valid_signal=false
+
+## 混合信号处理（P0-3 + Round 3 增强）
+当一条消息包含多个操作时，按标准分类与优先级排序：
+1. close_position 平仓信号（含部分平仓）— 最高优先级
+2. cancel_order 撤单信号
+3. update_tp_sl 止盈止损更新信号
+4. open_long/open_short 开仓信号 — 最低优先级
+如果返回 actions 数组，必须按以上优先级排序；主 action 取 actions[0]。
+- "撤，不挂了，没挂到\nBtc 方向：多 建仓：64700-63800" → actions=[cancel_order, open_long]（先撤旧单，再识别新挂单）
+- "止盈50%仓利润，可以移动保本" → 主操作=close_position（部分平仓+更新止损），position_pct=50
 - "分批止盈80%…第四笔多单可以补进" → 主操作=close_position（部分平仓+加仓）
 - "BTC限价单做多（重新改这个）" → 主操作=open_long（"重新改"=新开仓，非更新）
+- "重新改这个" / "改挂" / "重新挂" → 新开仓（is_update_signal=false）
 - 不要把"分批止盈/推保护/保护利润/已有X笔空单在手"解析成新开仓
+
+## 开仓 vs 平仓优先级规则（Round 7）
+当消息同时含"开仓词"和"平仓词"时，按以下优先级判断：
+1. 含明确方向词（做空/go short/go long/做多/多/空）+ 入场价/建仓价/现价/Entry → 开仓（open）
+   即使后面跟了"止盈/止损/TP/SL/take profit"，这些是开仓配套参数，不是平仓指令
+2. "Swing movement" / "Entry X" / "进场点位X" + TP + SL → 开仓
+3. "做空 X 直接空" / "做多 X 直接多" → open_short/open_long（非 update）
+4. 仅当消息只有平仓词（出局/离场/平仓/止盈出局）且无开仓词、无入场价时 → 平仓
+
+## 建议语气过滤（Round 3 新增）
+以下表述是建议/提醒性质，is_valid_signal=false；但不能覆盖上面的明确平仓/部分止盈规则：
+1. "可以移动止损到成本附近，防止插针" → 建议语气，非更新指令
+2. "先持仓观察" / "持仓观察一下行情波动" / "持仓观望" → 持仓建议，非指令
+3. "均价应该都拉到X了" + "止损设X" → 持仓描述，非新开仓
+4. "如果有…看看，要不要" → 假设性建议，非指令
+
+## 持仓描述识别（Round 5 + Round 8 增强）
+- "三笔空单在手" / "X笔多单持有" + "分别盈利/持仓收益分别/盈利X点" → 持仓状态描述，is_valid_signal=false
+- "X笔空单/多单在手" + "盈利X+X+X个点"（多个点数用+连接）+ 无出局/离场/平仓词 → 持仓状态描述，is_valid_signal=false
+  例: "三笔空单在手…盈利44+43+53个点" → 纯持仓收益汇报，无平仓动作词，is_valid_signal=false
+- 关键区分：平仓需要明确动作词（出局/离场/平仓/止盈出局）；只有"在手/持有/盈利X点/盈利X+X+X个点/收益分别"是状态汇报
+- 即使文本含多个成本价、方向词、盈利点数，只要无明确平仓动作词（出局/离场/平仓/止盈出局），就不是平仓信号
+
+## 盘面分析过滤（Round 4 + Round 8 增强）
+- "交易思路" / "盘面分析" / "X月X日交易思路" → 分析文章标题，is_valid_signal=false，除非同段有明确建仓/进场/委托指令
+- "能否幸免" / "咱们来看下" / "大炮一响" / 美股黄金新闻评论 → is_valid_signal=false
+- 含"4小时级别"+"上升通道"+"箱体震荡"等技术分析术语且无明确开仓指令 → is_valid_signal=false
+- "X一个不错的做多时机" / "X一个不错的做空时机" 且缺少明确入场价、止损、止盈 → 分析建议，is_valid_signal=false
+- "即将到位" / "涨到头了" / "准备跑路~" / "大火箭" + 无入场价/止损/止盈 → 市场情绪评论，is_valid_signal=false
+  例: "空空空！大火箭SPCX即将到位…Sol涨到头了" → 情绪化评论，无具体交易参数，is_valid_signal=false
+- "空空空！" / "多多多！" 连续重复方向词 + 无入场价/止损/止盈 → 情绪呐喊，is_valid_signal=false
 
 ## 短信号处理（P1-5）
 - "换手做多" / "换手做空" → is_valid_signal=true, symbol="", side=long/short, confidence=0.6
@@ -522,6 +601,28 @@ KOL messages may be in English. Apply these rules:
   （方向不明确时 confidence 降低，由风控决定是否执行）
 - "换手做多。" → is_valid_signal=true, side=long, confidence=0.6（即使缺品种价格）
 - 无品种价格的"做多/做空/开空" → 仍然 is_valid_signal=true, entry_price=null
+
+## KOL 术语扩展与更新信号（Round 2 + Round 3 补充）
+### KOL 术语扩展
+- "借到多单" / "借多单" = 做多（open_long）
+- "可以平仓出来" / "可以平仓" = 平仓（close_position）
+- "直接进场" / "跟上节奏" + 无品种价格 → is_valid_signal=true, symbol="", confidence=0.4
+
+### 更新信号变体（update_tp_sl）
+- "移动止损至开仓价" / "止损至开仓价" = 保本止损（update_tp_sl），即使目标价是"开仓价"也识别为更新
+- "移动止损至X" / "移动止盈至X" = 更新止损/止盈（update_tp_sl）
+- "设置好止损价：X" / "设置好止盈价：X" / "设置止损X" / "止损价设为X" = 更新止损/止盈（update_tp_sl）
+- "持仓过夜" + "设置好止盈止损" = 持仓提醒，非新指令 → is_valid_signal=false（除非明确说"止损改为X"）
+- Round 3 新增：
+  - "止损位下移X点，重设为Y" → update_tp_sl, stop_loss=Y
+  - "止损，我改成X" / "止损改为X" / "止损改成X" → update_tp_sl
+  - "XRP止损，我改成0.506" → update_tp_sl, symbol=XRP/USDT, stop_loss=0.506
+
+### 平仓信号变体（Round 3 补充）
+- "保本出局" / "成本附近保本出局" → is_exit_signal=true（明确平仓动作）
+- "触发止损价直接出局" / "触发止损价，直接出局" → is_exit_signal=true
+- "触发止损价直接出局…空仓观望" → is_exit_signal=true，不要因后续“复盘/观望”过滤
+- "可以平仓出来" / "可以平仓" → is_exit_signal=true
 
 ## 重要原则
 - 只解析明确的交易指令，不含糊的观望/分析/感慨归为无效

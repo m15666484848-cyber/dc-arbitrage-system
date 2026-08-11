@@ -38,7 +38,7 @@ import json
 import os
 
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 
 
@@ -98,6 +98,8 @@ _message_semaphore = asyncio.Semaphore(20)  # MESSAGE_CREATE 并发限制
 _customer_locks: dict[int, asyncio.Lock] = {}
 _pending_tasks: set[asyncio.Task] = set()  # 防止 task 被 GC 回收
 MAX_RECONNECT_ATTEMPTS = 20
+RAW_TEXT_DEDUP_WINDOW = timedelta(minutes=5)
+_recent_raw_text_seen: dict[tuple[int, str], datetime] = {}
 
 
 _SOURCE_STATUS: dict = {
@@ -134,6 +136,44 @@ def get_source_status() -> dict:
     out = dict(_SOURCE_STATUS)
     out["healthy"] = bool(out.get("configured") and out.get("connected") and out.get("last_heartbeat_ack_at"))
     return out
+
+
+def _is_duplicate_raw_text(kol_id: int, raw_text: str, now: datetime) -> bool:
+    """5 分钟内同一 KOL 的相同原文只处理一次,避免重复入库/重复下单。"""
+    normalized = (raw_text or "").strip()
+    if not normalized:
+        return False
+    expire_before = now - RAW_TEXT_DEDUP_WINDOW
+    for key, seen_at in list(_recent_raw_text_seen.items()):
+        if seen_at < expire_before:
+            _recent_raw_text_seen.pop(key, None)
+    key = (kol_id, normalized)
+    last_seen = _recent_raw_text_seen.get(key)
+    if last_seen and last_seen >= expire_before:
+        return True
+    _recent_raw_text_seen[key] = now
+    return False
+
+
+async def _has_recent_duplicate_raw_text_in_db(db, kol_id: int, raw_text: str, now: datetime) -> bool:
+    """数据库层去重: 防止进程重启后内存去重失效,导致异常/重复信号重复入库。"""
+    normalized = (raw_text or "").strip()
+    if not normalized:
+        return False
+    expire_before = now - RAW_TEXT_DEDUP_WINDOW
+    existing = (
+        await db.execute(
+            select(Signal.id)
+            .where(
+                Signal.kol_id == kol_id,
+                Signal.raw_text == normalized,
+                Signal.received_at >= expire_before,
+            )
+            .order_by(Signal.received_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return existing is not None
 
 
 def _write_parser_diff_log(
@@ -339,6 +379,11 @@ async def _handle_message(
                     flags=re.IGNORECASE
                 ).strip()
 
+        now = datetime.now(timezone.utc)
+        if _is_duplicate_raw_text(kol.id, content, now):
+            logger.info(f"5分钟内重复 KOL 消息已跳过: kol={kol.name} message_id={message_id} text={content[:120]}")
+            return
+
         # message_id 去重:Discord RESUME/重连后会重放事件,同一 message_id 不能重复入库
         # (否则会重复下单)。检查是否已存在该消息。
         if message_id:
@@ -350,6 +395,15 @@ async def _handle_message(
             if existing:
                 logger.debug(f"Discord 消息已处理过,跳过: message_id={message_id}")
                 return
+
+        # raw_text 数据库窗口去重:防止服务重启/重连后内存去重丢失,
+        # 或 Discord 转发机器人使用不同 message_id 重复投递同一异常信号。
+        if await _has_recent_duplicate_raw_text_in_db(db, kol.id, content, now):
+            logger.info(
+                f"5分钟内数据库已有相同 KOL 原文,跳过重复信号: "
+                f"kol={kol.name} message_id={message_id} text={content[:120]}"
+            )
+            return
 
         # 获取 KOL 级别 LLM 配置
         kol_llm_config = KolLLMConfig.from_kol(kol)
