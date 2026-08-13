@@ -82,6 +82,29 @@ function num(value: any, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function formatTpLevels(tpLevels?: any[] | null) {
+  const levels = Array.isArray(tpLevels) ? tpLevels : [];
+  if (!levels.length) return "未设置";
+  return levels
+    .slice(0, 3)
+    .map((tp: any, index: number) => {
+      const level = tp?.level ?? index + 1;
+      const price = tp?.price ? fmtMoney(tp.price) : "—";
+      const pct = Number(tp?.pct);
+      const pctText = Number.isFinite(pct) && pct > 0 ? `/${Math.round(pct * 100)}%` : "";
+      const status = tp?.status === "hit" ? "✓" : "";
+      return `TP${level} ${price}${pctText}${status}`;
+    })
+    .join(" · ");
+}
+
+function getProtectionLabel(position: any) {
+  if (position?.breakeven_moved) return "成本保护已触发";
+  if (position?.cost_protection) return "成本保护开启";
+  if (position?.trailing_stop) return "追踪止损开启";
+  return "成本保护待触发";
+}
+
 function getPositionRoi(position: any, totalPnl: number, notional: number) {
   const backendRoi = position?.net_pnl_pct ?? position?.pnl_pct ?? position?.roi_pct;
   const parsed = Number(backendRoi);
@@ -95,6 +118,7 @@ export default function DashboardPage() {
   const { data: tradesData } = useFetch(() => API.listTrades(accountId), [accountId]);
   const { data: dashStats, reload: reloadDash } = useFetch(() => API.dashboard(accountId), [accountId]);
   const { data: kolsData, reload: reloadKols } = useFetch(() => API.listKols(), []);
+  const { data: strategiesData } = useFetch(() => API.listStrategies(), []);
   const [resumingKolId, setResumingKolId] = useState<number | null>(null);
   const reloadAllDashboardData = useCallback(() => {
     reloadPositions();
@@ -123,6 +147,7 @@ export default function DashboardPage() {
   const trades: any[] = tradesData || [];
   const s: any = dashStats || {};
   const allKols: any[] = kolsData || [];
+  const strategies: any[] = strategiesData || [];
 
   const openPnl = useMemo(
     () => positions.reduce((sum: number, p: any) => sum + (p.unrealized_pnl || 0), 0),
@@ -161,6 +186,13 @@ export default function DashboardPage() {
     k.follow_status || k.follow_settings?.follow_status || { status: "active", label: "正常", can_resume: false };
   const statusTone = (status: string) =>
     status === "paused" ? "loss" : status === "cooldown" ? "warn" : "profit";
+  const strategyNameById = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const strategy of strategies) {
+      map.set(strategy.id, strategy.name);
+    }
+    return map;
+  }, [strategies]);
 
   // 分批建仓: 按 parent_id 分组子仓位
   const subsByParent = useMemo(() => {
@@ -189,10 +221,12 @@ export default function DashboardPage() {
         const totalQty = num(master.qty);
         const totalPnl = num(master.net_unrealized_pnl ?? master.unrealized_pnl);
         const notional = Math.abs(num(master.entry_price) * totalQty);
+        const siblingBatches = master.parent_id ? (subsByParent.get(master.parent_id) || []) : [];
+        const batchCount = Math.max(num(master.batch_no, 1), siblingBatches.length || 1);
         return {
           ...master,
-          is_batch: false,
-          batch_count: 1,
+          is_batch: Boolean(master.parent_id) || batchCount > 1,
+          batch_count: batchCount,
           total_qty: totalQty,
           total_pnl: totalPnl,
           roi_pct: getPositionRoi(master, totalPnl, notional),
@@ -345,16 +379,20 @@ export default function DashboardPage() {
                 {aggregatedPositions.map((p: any) => (
                   <div key={p.id} className="position-row">
                     <div className="position-row-symbol">
-                      <span className="font-mono text-base font-bold text-text">{p.symbol}</span>
-                        {p.exchange_account_name && <Badge tone="default" className="text-[10px]">{p.exchange_account_name}</Badge>}
-                      <Badge tone={p.side === "long" ? "profit" : "loss"} className="text-[10px]">
-                        {p.side === "long" ? "多" : "空"}
-                      </Badge>
-                      {p.is_batch && (
-                        <Badge tone="accent" className="text-[10px] gap-0.5 px-1.5 py-0">
-                          <Layers size={10} />
-                          {p.batch_count}批
+                      <div className="position-row-symbol-main">
+                        <span className="font-mono text-base font-bold text-text">{p.symbol}</span>
+                        <Badge tone={p.side === "long" ? "profit" : "loss"} className="text-[10px]">
+                          {p.side === "long" ? "多" : "空"}
                         </Badge>
+                        {p.is_batch && (
+                          <Badge tone="accent" className="text-[10px] gap-0.5 px-1.5 py-0">
+                            <Layers size={10} />
+                            {p.batch_count}批
+                          </Badge>
+                        )}
+                      </div>
+                      {p.exchange_account_name && (
+                        <div className="position-row-symbol-account">{p.exchange_account_name}</div>
                       )}
                     </div>
                     <div className="position-row-details">
@@ -382,9 +420,28 @@ export default function DashboardPage() {
                         <span className="detail-label">持仓</span>
                         <span className="detail-value">{formatHoldingDuration(p.opened_at)}</span>
                       </span>
+                      <span className="position-row-detail min-w-0">
+                        <span className="detail-label">止盈</span>
+                        <span className="detail-value-text truncate" title={formatTpLevels(p.tp_levels)}>{formatTpLevels(p.tp_levels)}</span>
+                      </span>
+                      <span className="position-row-detail">
+                        <span className="detail-label">止损</span>
+                        <span className="detail-value">{p.sl ? fmtMoney(p.sl) : "未设置"}</span>
+                      </span>
+                      <span className="position-row-detail">
+                        <span className="detail-label">批次</span>
+                        <span className="detail-value-text">
+                          {p.is_batch ? `分批 · 第${p.batch_no || 1}/${p.batch_count || 1}批` : "单笔"}
+                        </span>
+                      </span>
+                      <span className="position-row-detail">
+                        <span className="detail-label">保护</span>
+                        <span className={p.breakeven_moved || p.cost_protection || p.trailing_stop ? "detail-value-text text-profit" : "detail-value-text text-text-tertiary"}>
+                          {getProtectionLabel(p)}
+                        </span>
+                      </span>
                     </div>
                     <div className="position-row-profit">
-                      <div className="text-[10px] text-text-tertiary mb-0.5">未盈亏</div>
                       <div className={`position-row-pnl ${(p.total_pnl || 0) >= 0 ? "text-profit" : "text-loss"}`}>
                         {fmtMoney(p.total_pnl || 0)}
                       </div>
@@ -417,7 +474,6 @@ export default function DashboardPage() {
                         <div className="text-xs text-text-tertiary mt-1 truncate">{p.kol_name || "—"}</div>
                       </div>
                       <div className="text-right shrink-0">
-                        <div className="text-[10px] text-text-tertiary mb-0.5">未盈亏</div>
                         <div className={`text-base font-bold font-mono ${(p.total_pnl || 0) >= 0 ? "text-profit" : "text-loss"}`}>
                           {fmtMoney(p.total_pnl || 0)}
                         </div>
@@ -443,6 +499,28 @@ export default function DashboardPage() {
                         <div className="text-text-tertiary">数量</div>
                         <div className="font-mono text-text-secondary">{fmtMoney(p.total_qty, 4)}</div>
                       </div>
+                      <div>
+                        <div className="text-text-tertiary">止盈</div>
+                        <div className="font-mono text-text-secondary truncate" title={formatTpLevels(p.tp_levels)}>
+                          {formatTpLevels(p.tp_levels)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-text-tertiary">止损</div>
+                        <div className="font-mono text-text-secondary">{p.sl ? fmtMoney(p.sl) : "未设置"}</div>
+                      </div>
+                      <div>
+                        <div className="text-text-tertiary">批次</div>
+                        <div className="font-mono text-text-secondary">
+                          {p.is_batch ? `分批 第${p.batch_no || 1}/${p.batch_count || 1}` : "单笔"}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-text-tertiary">保护</div>
+                        <div className={p.breakeven_moved || p.cost_protection || p.trailing_stop ? "font-mono text-profit" : "font-mono text-text-tertiary"}>
+                          {getProtectionLabel(p)}
+                        </div>
+                      </div>
                     </div>
                     <div className="text-[11px] text-text-tertiary mt-2">
                       持仓 {formatHoldingDuration(p.opened_at)} · 开仓 {fmtTime(p.opened_at)}
@@ -457,64 +535,83 @@ export default function DashboardPage() {
         </div>
 
         <div className="glass-premium p-4 md:p-5 h-full">
-          <PanelTitle icon={Crown} title="当前订阅 KOL" subtitle="跟单对象与默认下单金额" count={followedKols.length} tone="gold" />
+          <PanelTitle icon={Crown} title="当前订阅 KOL" subtitle="策略、金额与 KOL 表现一屏确认" count={followedKols.length} tone="gold" />
           {followedKols.length ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 gap-3">
               {followedKols.map((k: any) => {
                 const status = getKolStatus(k);
                 const kolId = k.kol_id || k.id;
                 const canResume = status.can_resume || status.status === "paused" || status.status === "cooldown";
+                const followSettings = k.follow_settings || {};
+                const notional = k.notional_usdt || followSettings.notional_usdt;
+                const notionalSource = k.notional_source || followSettings.notional_source;
+                const strategyId = k.strategy_id || followSettings.strategy_id;
+                const strategyName = strategyId ? strategyNameById.get(strategyId) || `策略 #${strategyId}` : "默认策略";
+                const winRate = num(k.cached_win_rate, 0);
+                const signalCount = num(k.cached_signal_count, 0);
+                const kolPnl = num(k.cached_pnl, 0);
+                const sourceLabel =
+                  notionalSource === "strategy" ? "策略金额" :
+                    notionalSource === "custom" ? "自定义金额" :
+                      "系统默认";
                 return (
                   <div
                     key={kolId}
-                    className="flex items-center gap-3 p-3 rounded-xl glass-soft card-hover group"
+                    className="p-2.5 rounded-xl glass-soft card-hover group"
                   >
-                    <div className="w-9 h-9 rounded-full kol-avatar flex items-center justify-center shrink-0 transition-all">
-                      <span className="text-sm font-bold text-gold">
-                        {(k.kol_name || k.name || "?").charAt(0)}
-                      </span>
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div className="text-sm font-medium text-text truncate">
-                          {k.kol_name || k.name}
-                        </div>
-                        <Badge tone={statusTone(status.status) as any} className="!py-0 !px-1.5 !text-[10px] shrink-0">
-                          {status.label || "正常"}
-                        </Badge>
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-full kol-avatar flex items-center justify-center shrink-0 transition-all">
+                        <span className="text-sm font-bold text-gold">
+                          {(k.kol_name || k.name || "?").charAt(0)}
+                        </span>
                       </div>
-                      <div className="text-[11px] text-text-tertiary truncate">
-                        {k.notional_usdt || k.follow_settings?.notional_usdt
-                          ? `${fmtMoney(k.notional_usdt || k.follow_settings?.notional_usdt, 0)} USDT`
-                          : "100 USDT (默认)"}
-                        {k.notional_source === "strategy" || k.follow_settings?.notional_source === "strategy"
-                          ? <span className="text-text-muted ml-1">· 策略默认</span>
-                          : k.notional_source === "default" || k.follow_settings?.notional_source === "default"
-                            ? <span className="text-text-muted ml-1">· 系统默认</span>
-                            : null}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="text-sm font-medium text-text truncate">
+                            {k.kol_name || k.name}
+                          </div>
+                          <Badge tone={statusTone(status.status) as any} className="!py-0 !px-1.5 !text-[10px] shrink-0">
+                            {status.label || "正常"}
+                          </Badge>
+                        </div>
+                        <div className="text-[11px] text-text-tertiary truncate">
+                          {notional ? `${fmtMoney(notional, 0)} USDT` : "100 USDT"}
+                          <span className="text-text-muted ml-1">· {sourceLabel}</span>
+                        </div>
                       </div>
-                      {status.status === "paused" && status.paused_until && (
-                        <div className="text-[10px] text-loss mt-0.5">暂停至 {fmtTime(status.paused_until)}</div>
-                      )}
-                      {status.status === "cooldown" && status.cooldown_until && (
-                        <div className="text-[10px] text-warn mt-0.5">
-                          {status.cooldown_symbol || "最近下单"} 冷却至 {fmtTime(status.cooldown_until)}
+                      <div className="flex items-center gap-2 text-[10px] shrink-0 min-w-0">
+                        <span className="max-w-[72px] truncate text-text-secondary" title={strategyName}>{strategyName}</span>
+                        <span className={winRate >= 60 ? "text-profit font-mono" : winRate > 0 ? "text-gold font-mono" : "text-text-tertiary font-mono"}>
+                          胜{winRate.toFixed(1)}%
+                        </span>
+                        <span className="text-text-tertiary font-mono">信{signalCount}</span>
+                        <span className={kolPnl >= 0 ? "text-profit font-mono" : "text-loss font-mono"}>{fmtMoney(kolPnl, 0)}</span>
+                      </div>
+                      {canResume ? (
+                        <Button
+                          variant="ghost"
+                          className="px-2 py-1 text-xs gap-1 shrink-0"
+                          onClick={() => resumeKol(kolId)}
+                          disabled={resumingKolId === kolId}
+                          title="恢复跟随并重置冷却"
+                        >
+                          <RotateCcw size={13} />
+                          {resumingKolId === kolId ? "恢复中" : "恢复"}
+                        </Button>
+                      ) : (
+                        <div className="hidden sm:flex items-center gap-1 text-[10px] text-gold/80 shrink-0">
+                          <ArrowUpRight size={13} />
+                          跟单中
                         </div>
                       )}
                     </div>
-                    {canResume ? (
-                      <Button
-                        variant="ghost"
-                        className="px-2 py-1 text-xs gap-1 shrink-0"
-                        onClick={() => resumeKol(kolId)}
-                        disabled={resumingKolId === kolId}
-                        title="恢复跟随并重置冷却"
-                      >
-                        <RotateCcw size={13} />
-                        {resumingKolId === kolId ? "恢复中" : "恢复"}
-                      </Button>
-                    ) : (
-                      <ArrowUpRight size={15} className="text-text-muted shrink-0" />
+                    {status.status === "paused" && status.paused_until && (
+                      <div className="text-[10px] text-loss mt-2">暂停至 {fmtTime(status.paused_until)}</div>
+                    )}
+                    {status.status === "cooldown" && status.cooldown_until && (
+                      <div className="text-[10px] text-warn mt-2">
+                        {status.cooldown_symbol || "最近下单"} 冷却至 {fmtTime(status.cooldown_until)}
+                      </div>
                     )}
                   </div>
                 );

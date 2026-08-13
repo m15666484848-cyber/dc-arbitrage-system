@@ -44,44 +44,56 @@ async def websocket_endpoint(ws: WebSocket):
         return
     # 回显客户端请求的子协议以完成握手;无子协议时为 None
     await ws.accept(subprotocol=client_sp or None)
+    # M12修复: 将accept后的WebSocket交互放入try/except,防止客户端提前断开导致未处理异常
     try:
-        payload = decode_token(token)
-    except Exception:
-        await ws.send_text('{"event":"error","data":"token无效"}')
-        await ws.close()
-        return
+        try:
+            payload = decode_token(token)
+        except Exception:
+            await ws.send_text('{"event":"error","data":"token无效"}')
+            await ws.close()
+            return
 
-    role = payload.get("role")
-    sub = payload.get("sub")
-    # Validate required payload fields
-    if not role or not sub:
-        await ws.send_text('{"event":"error","data":"token载荷无效"}')
-        await ws.close()
+        role = payload.get("role")
+        sub = payload.get("sub")
+        # Validate required payload fields
+        if not role or not sub:
+            await ws.send_text('{"event":"error","data":"token载荷无效"}')
+            await ws.close()
+            return
+
+        # 客户连接时检查激活状态,未激活的客户不允许建立 WebSocket 连接
+        if role == "customer":
+            customer_id = payload.get("customer_id", sub)
+            if not str(customer_id).isdigit():
+                customer_id = None
+            if customer_id:
+                try:
+                    async with AsyncSessionLocal() as db:
+                        cust = (await db.execute(
+                            select(Customer).where(Customer.id == int(customer_id))
+                        )).scalar_one_or_none()
+                        if not cust or not cust.is_active:
+                            await ws.send_text('{"event":"error","data":"账户未激活"}')
+                            await ws.close()
+                            return
+                except Exception as e:
+                    # M3修复: 鉴权相关检查失败时拒绝连接,不允许降级放行
+                    logger.warning(f"客户激活状态检查失败,拒绝连接: {e}")
+                    await ws.send_text('{"event":"error","data":"账户状态检查失败,请稍后重试"}')
+                    await ws.close()
+                    return
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        logger.warning(f"WebSocket握手阶段异常: {e}")
         return
     
-    # 客户连接时检查激活状态,未激活的客户不允许建立 WebSocket 连接
-    if role == "customer":
-        customer_id = payload.get("customer_id", sub)
-        if customer_id:
-            try:
-                async with AsyncSessionLocal() as db:
-                    cust = (await db.execute(
-                        select(Customer).where(Customer.id == int(customer_id))
-                    )).scalar_one_or_none()
-                    if not cust or not cust.is_active:
-                        await ws.send_text('{"event":"error","data":"账户未激活"}')
-                        await ws.close()
-                        return
-            except Exception:
-                # 数据库查询失败时不阻断连接(降级策略)
-                pass
-    
-    topic = "admin" if role == "admin" else f"customer:{payload.get('customer_id', sub)}"
-    q = bus.subscribe(topic)
-    await ws.send_text(f'{{"event":"connected","data":"{topic}"}}')
-
+    topic = "admin" if role == "admin" else f"customer:{payload.get('customer_id', sub)}"
     last_heartbeat = time.time()
+    q = None
     try:
+        q = bus.subscribe(topic)
+        await ws.send_text(f'{{"event":"connected","data":"{topic}"}}')
         while True:
             try:
                 msg = await asyncio.wait_for(q.get(), timeout=1.0)
@@ -111,4 +123,5 @@ async def websocket_endpoint(ws: WebSocket):
     except Exception as e:
         logger.warning(f"WebSocket 主循环异常: {e}")
     finally:
-        bus.unsubscribe(topic, q)
+        if q is not None:
+            bus.unsubscribe(topic, q)

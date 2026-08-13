@@ -490,7 +490,7 @@ async def get_follow_diagnosis(
     failed_orders = [
         order_out(o)
         for o in orders
-        if o.status == "failed" or bool(o.error_msg) or order_status
+        if o.status == "failed" or bool(o.error_msg)
     ]
 
     summary = {
@@ -542,6 +542,7 @@ async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db), admi
     exists = (await db.execute(select(User).where(User.username == body.username))).scalar_one_or_none()
     if exists:
         raise HTTPException(400, "用户名已存在")
+    _validate_password_strength(body.password)
     user = User(username=body.username, password_hash=hash_password(body.password))
     db.add(user)
     try:
@@ -582,6 +583,7 @@ async def create_customer(body: CustomerCreate, db: AsyncSession = Depends(get_d
     exists = (await db.execute(select(Customer).where(Customer.username == body.username))).scalar_one_or_none()
     if exists:
         raise HTTPException(400, "用户名已存在")
+    _validate_password_strength(body.password)
     cust = Customer(
         username=body.username,
         password_hash=hash_password(body.password),
@@ -607,6 +609,8 @@ async def update_customer(cid: int, body: CustomerUpdate, db: AsyncSession = Dep
     if body.display_name is not None:
         cust.display_name = body.display_name
     if body.password:
+        # L-6修复: 统一使用 _validate_password_strength,避免验证规则不一致
+        _validate_password_strength(body.password)
         cust.password_hash = hash_password(body.password)
     if body.status is not None:
         cust.status = body.status
@@ -618,7 +622,7 @@ async def update_customer(cid: int, body: CustomerUpdate, db: AsyncSession = Dep
     if body.single_exchange_multi_api_allowed is not None:
         cust.single_exchange_multi_api_allowed = body.single_exchange_multi_api_allowed
     if body.single_exchange_multi_api_limit is not None:
-        limit = int(body.single_exchange_multi_api_limit or 1)
+        limit = int(body.single_exchange_multi_api_limit)
         if limit < 1:
             raise HTTPException(400, "单交易所多 API 数量至少为 1")
         if limit > 20:
@@ -627,6 +631,8 @@ async def update_customer(cid: int, body: CustomerUpdate, db: AsyncSession = Dep
     if body.multi_exchange_allowed is not None:
         cust.multi_exchange_allowed = body.multi_exchange_allowed
     if body.max_order_usdt is not None:
+        if body.max_order_usdt < 0:
+            raise HTTPException(400, "最大下单金额不能为负数")
         cust.max_order_usdt = body.max_order_usdt
     if body.show_signal_summary is not None:
         cust.show_signal_summary = body.show_signal_summary
@@ -648,6 +654,24 @@ async def delete_customer(cid: int, db: AsyncSession = Depends(get_db), admin=De
     if not cust:
         raise HTTPException(404, "客户不存在")
     cust_name = cust.username
+
+    # S11修复: 删除前检查是否有未平仓持仓,防止交易所残留孤儿持仓
+    from app.models.trading import Position
+    open_positions = (
+        await db.execute(
+            select(Position)
+            .where(Position.customer_id == cid)
+            .where(Position.status == "open")
+        )
+    ).scalars().all()
+    if open_positions:
+        symbols = ", ".join(f"{p.symbol}({p.side})" for p in open_positions[:5])
+        raise HTTPException(
+            400,
+            f"客户有 {len(open_positions)} 个未平仓持仓,请先平仓后再删除。"
+            f"前5个: {symbols}",
+        )
+
     await db.delete(cust)
     try:
         await db.commit()
@@ -2321,7 +2345,7 @@ async def simulate_kol_signal(payload: SimulateKolSignalRequest, _: Customer = D
                     "无需补全",
                 )
 
-    ref_entry = parsed.entry_price or payload.market_price
+    ref_entry = parsed.entry_price if parsed.entry_price is not None else payload.market_price
     tp_preview = []
     if parsed.symbol and parsed.side and ref_entry and ref_entry > 0:
         try:
@@ -2564,7 +2588,8 @@ async def create_customer_alert(cid: int, body: CustomerAlertCreate, _=Depends(r
         await db.commit()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(400, f"创建失败: {e}")
+        logger.exception("创建告警配置失败")
+        raise HTTPException(400, "创建失败,请检查参数或联系管理员")
     return ok({"id": cfg.id, "message": "告警配置已创建"})
 
 
@@ -2588,7 +2613,8 @@ async def update_customer_alert(cid: int, aid: int, body: CustomerAlertUpdate, _
         await db.commit()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(400, f"更新失败: {e}")
+        logger.exception("更新告警配置失败")
+        raise HTTPException(400, "更新失败,请检查参数或联系管理员")
     return ok({"message": "告警配置已更新"})
 
 
@@ -2606,7 +2632,8 @@ async def delete_customer_alert(cid: int, aid: int, _=Depends(require_admin), db
         await db.commit()
     except Exception as e:
         await db.rollback()
-        raise HTTPException(400, f"删除失败: {e}")
+        logger.exception("删除告警配置失败")
+        raise HTTPException(400, "删除失败,请稍后重试")
     return ok({"message": "告警配置已删除"})
 
 
@@ -2702,6 +2729,8 @@ async def profit_stats_export(
         raise HTTPException(400, "start_date 不能晚于 end_date")
     if customer_type and customer_type not in ("normal", "internal"):
         raise HTTPException(400, "customer_type 只能是 normal 或 internal")
+    if profit_percentage is not None and (profit_percentage < 0 or profit_percentage > 100):
+        raise HTTPException(400, "利润分成百分比必须在0-100之间")
 
     pct = float(profit_percentage) if profit_percentage else 0.0
 
@@ -2710,7 +2739,8 @@ async def profit_stats_export(
     try:
         from openpyxl import Workbook
     except ImportError as e:
-        raise HTTPException(500, f"服务端缺少 openpyxl 依赖: {e}")
+        logger.exception("导出利润统计失败:缺少openpyxl依赖")
+        raise HTTPException(500, "服务端缺少必要依赖,请联系管理员")
 
     wb = Workbook()
     ws = wb.active

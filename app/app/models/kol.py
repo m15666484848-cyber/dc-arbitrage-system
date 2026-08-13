@@ -1,5 +1,7 @@
 """KOL 档案与客户关注关系。"""
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import Numeric, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -13,6 +15,12 @@ class Kol(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(128), index=True)
+    discord_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("discord_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+        default=None,
+    )
     discord_channel_id: Mapped[str] = mapped_column(String(64), index=True)
     discord_user_id: Mapped[str] = mapped_column(String(64), default="")  # 空则监听频道所有人
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -27,7 +35,7 @@ class Kol(Base, TimestampMixin):
     # 规则解析失败时是否降级到 LLM
     llm_fallback: Mapped[bool] = mapped_column(Boolean, default=True)
     # 最低置信度阈值（低于此值才触发 LLM 兜底）
-    llm_min_confidence: Mapped[float] = mapped_column(Float, default=0.4)
+    llm_min_confidence: Mapped[float] = mapped_column(default=0.4)
 
     # ============ 历史统计 ============
     # 历史胜率/统计缓存(由 analytics 定期刷新)
@@ -43,6 +51,9 @@ class Kol(Base, TimestampMixin):
     follows: Mapped[list["KolFollow"]] = relationship(
         back_populates="kol", cascade="all, delete-orphan"
     )
+    discord_account: Mapped["DiscordAccount | None"] = relationship(
+        "DiscordAccount", back_populates="kols"
+    )
 
 
 class KolFollow(Base, TimestampMixin):
@@ -53,11 +64,15 @@ class KolFollow(Base, TimestampMixin):
 
     __tablename__ = "kol_follows"
 
+    __table_args__ = (UniqueConstraint("customer_id", "kol_id", name="uq_kol_follow_customer_kol"),)
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
     kol_id: Mapped[int] = mapped_column(ForeignKey("kols.id", ondelete="CASCADE"), index=True)
     strategy_id: Mapped[int | None] = mapped_column(ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True)
-    followed_notional_usdt: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    followed_notional_usdt: Mapped[float | None] = mapped_column(nullable=True, default=None)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+    cooldown_reset_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
 
     kol: Mapped["Kol"] = relationship(back_populates="follows")

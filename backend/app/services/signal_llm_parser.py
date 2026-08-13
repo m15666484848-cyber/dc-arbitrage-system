@@ -15,10 +15,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from loguru import logger
 
 from app.schemas.signal import ParsedSignal
@@ -87,7 +90,7 @@ def _check_reset_degradation() -> None:
     在每次 parse_with_llm() 调用开始时执行。
     """
     global _model_degraded, _degraded_date
-    today = time.strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if _model_degraded and _degraded_date != today:
         logger.info("跨天重置模型降级状态,恢复使用主模型")
         _model_degraded = False
@@ -98,7 +101,7 @@ def _mark_degraded() -> None:
     """标记主模型降级,当天剩余时间均使用备用模型。"""
     global _model_degraded, _degraded_date
     _model_degraded = True
-    _degraded_date = time.strftime("%Y-%m-%d")
+    _degraded_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     logger.warning(f"主模型已降级,当天将使用备用模型: {_FALLBACK_MODEL}")
 
 
@@ -152,6 +155,7 @@ async def _call_llm_with_retry(
     timeout: int | None = None,
     max_retries: int = _MAX_RETRIES,
     retry_delays: list[int] | None = None,
+    kol_name: str = "",
 ) -> dict[str, Any]:
     """带重试机制的 LLM 调用。
 
@@ -187,6 +191,7 @@ async def _call_llm_with_retry(
                         text,
                         image_urls=image_urls,
                         image_base64_list=image_base64_list,
+                        kol_name=kol_name,
                     ),
                     timeout=timeout,
                 )
@@ -195,6 +200,7 @@ async def _call_llm_with_retry(
                     text,
                     image_urls=image_urls,
                     image_base64_list=image_base64_list,
+                    kol_name=kol_name,
                 )
             return result
         except asyncio.TimeoutError:
@@ -226,6 +232,7 @@ async def _call_llm_with_retry(
 async def _call_with_degradation(
     primary_client: LLMClient,
     text: str,
+    kol_name: str = "",
 ) -> dict[str, Any]:
     """Three-tier LLM degradation."""
     # Tier 1: primary model (deepseek-v4-flash, thinking disabled)
@@ -236,8 +243,10 @@ async def _call_with_degradation(
                 timeout=_PRIMARY_TIMEOUT,
                 max_retries=_MAX_RETRIES,
                 retry_delays=_RETRY_DELAYS,
+                kol_name=kol_name,
             )
-        except (asyncio.TimeoutError, Exception) as e:
+        except (asyncio.TimeoutError, httpx.HTTPError, ConnectionError, OSError,
+                json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
             logger.warning(
                 f"primary model failed (retried {_MAX_RETRIES}x): {e}, "
                 f"switching to fallback and marking degraded"
@@ -253,6 +262,7 @@ async def _call_with_degradation(
             timeout=_FALLBACK_TIMEOUT,
             max_retries=_MAX_RETRIES,
             retry_delays=_RETRY_DELAYS,
+            kol_name=kol_name,
         )
     except Exception as e:
         logger.warning(f"fallback model failed: {e}, trying GLM disaster recovery")
@@ -265,6 +275,7 @@ async def _call_with_degradation(
             timeout=_FALLBACK_TIMEOUT,
             max_retries=_MAX_RETRIES,
             retry_delays=_RETRY_DELAYS,
+            kol_name=kol_name,
         )
 
     raise Exception("All LLM models (primary/fallback/GLM) unavailable")
@@ -326,6 +337,23 @@ def _as_bool(value: Any) -> bool:
         return value.strip().lower() in ("1", "true", "yes", "y", "是", "有效", "valid")
     return False
 
+
+def _detect_468_update_fallback(text: str) -> tuple[bool, str]:
+    """468 复查兜底：识别 LLM 容易漏掉的保本/止损更新表达。"""
+    raw = text or ""
+    patterns = [
+        (r"止损\s*(?:放|移|改|设|设置|推|拉).{0,10}(?:开仓价|开仓|成本价|成本|保本)", "止损放开仓价/成本价"),
+        (r"(?:放开仓|放成本|放保本|推保护|打保护|做保护)", "保本/成本保护更新"),
+        (r"成本保护.{0,12}(?:入场价|开仓价|修改|改到|统一修改)", "成本保护修改"),
+        (r"#[A-Za-z0-9_\-]+.{0,12}止损\s*放\s*\d+(?:\.\d+)?", "#标签止损放价"),
+        (r"止损\s*放\s*\d+(?:\.\d+)?", "止损放价"),
+        (r"(?:浮盈|盈利).{0,16}(?:移动止损|改为开仓价|止损改到开仓价)", "浮盈后移动止损"),
+    ]
+    for pattern, reason in patterns:
+        if re.search(pattern, raw, re.IGNORECASE):
+            return True, reason
+    return False, ""
+
 def _normalize_side(raw: Any) -> str:
     """将 LLM 返回的方向统一为 long/short。
 
@@ -358,6 +386,7 @@ async def parse_with_llm(
     llm_client: LLMClient | None = None,
     context: str = "",
     min_confidence: float = _DEFAULT_MIN_CONFIDENCE,
+    kol_name: str = "",
 ) -> tuple[ParsedSignal | None, dict[str, Any]]:
     """
     使用文本 LLM 解析交易信号(DeepSeek V3)。
@@ -423,7 +452,7 @@ async def parse_with_llm(
         #    - 已降级:直接备用模型 deepseek-v4-pro
         #    - 有效信号但置信度低于阈值:额外重试 2 次,取最后一次返回
         for low_conf_attempt in range(_LOW_CONFIDENCE_RETRY_COUNT + 1):
-            response = await _call_with_degradation(primary_client, final_text)
+            response = await _call_with_degradation(primary_client, final_text, kol_name=kol_name)
             result = response.get("result", {})
             usage = response.get("usage", {})
 
@@ -451,6 +480,12 @@ async def parse_with_llm(
 
         # 构建 ParsedSignal
         is_exit = _as_bool(result.get("is_exit_signal", False))
+        is_update = _as_bool(result.get("is_update_signal", False))
+        update_reason = str(result.get("reasoning", "") or "")
+        fallback_update, fallback_update_reason = _detect_468_update_fallback(stripped_text)
+        if fallback_update and not is_exit:
+            is_update = True
+            update_reason = fallback_update_reason
         position_pct = _as_float(result.get("position_pct"), 0.0)
         if position_pct <= 0:
             # LLM 有时不会返回仓位/平仓比例，使用规则解析兜底识别。
@@ -469,12 +504,32 @@ async def parse_with_llm(
             breakeven_after_tp=None if is_exit else _as_optional_float(result.get("breakeven_after_tp")),
             stop_loss=None if is_exit else _as_optional_float(result.get("stop_loss")),
             position_pct=max(0.0, min(position_pct, 100.0)),
-            raw_text=text,
+            raw_text="",
             confidence=max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0)),
             is_exit_signal=is_exit,
             exit_reason=result.get("reasoning", ""),
+            is_update_signal=is_update,
+            update_reason=update_reason,
             has_image=False,
         )
+
+        if is_exit:
+            parsed.actions = ["close_position"]
+            parsed.action = "close_position"
+        elif is_update:
+            parsed.actions = ["update_tp_sl"]
+            parsed.action = "update_tp_sl"
+            # 更新信号不需要入场价，避免下游误当开仓。
+            parsed.entry_price = None
+            parsed.entry_prices = []
+            parsed.take_profits = _as_float_list(result.get("take_profits", []))
+            parsed.stop_loss = _as_optional_float(result.get("stop_loss"))
+        elif parsed.side == "long":
+            parsed.actions = ["open_long"]
+            parsed.action = "open_long"
+        elif parsed.side == "short":
+            parsed.actions = ["open_short"]
+            parsed.action = "open_short"
 
         if not parsed.entry_price and parsed.entry_prices:
             parsed.entry_price = parsed.entry_prices[0]
@@ -631,32 +686,100 @@ async def parse_image_with_llm(
         if not _as_bool(result.get("is_valid_signal", False)):
             logger.info(f"图片 LLM 判定为无效信号: {result.get('reasoning', 'N/A')}")
             return ParsedSignal(
-                raw_text=text,
+                raw_text="",
                 confidence=0.0,
                 has_image=True,
             ), usage
 
         position_pct = _as_float(result.get("position_pct"), 0.0)
+        is_exit = _as_bool(result.get("is_exit_signal", False))
+        is_update = _as_bool(result.get("is_update_signal", False))
+        update_reason = str(result.get("reasoning", "") or "")
+        # 图片信号没有原始文本，使用 reasoning 作为兜底文本
+        fallback_text = str(result.get("reasoning", "") or "")
+        fallback_update, fallback_update_reason = _detect_468_update_fallback(fallback_text)
+        if fallback_update and not is_exit:
+            is_update = True
+            update_reason = fallback_update_reason
+        if position_pct <= 0:
+            # LLM 有时不会返回仓位/平仓比例，使用规则解析兜底。
+            from app.services.signal_parser import extract_position_pct
+            position_pct = extract_position_pct(fallback_text)
+        if is_exit and position_pct <= 0:
+            # 明确平仓但未说明比例时,默认全部平仓。
+            position_pct = 100.0
         parsed = ParsedSignal(
             symbol=_lazy_normalize_symbol(result.get("symbol", "")),  # 统一为 BTC/USDT 格式
-            side=_normalize_side(result.get("side", "")),  # 统一为 long/short
-            entry_price=_as_optional_float(result.get("entry_price")),
-            entry_prices=_as_float_list(result.get("entry_prices", [])),
-            take_profits=_as_float_list(result.get("take_profits", [])),
-            condition_price=_as_optional_float(result.get("condition_price")),
-            breakeven_after_tp=_as_optional_float(result.get("breakeven_after_tp")),
-            stop_loss=_as_optional_float(result.get("stop_loss")),
+            side=_normalize_side(result.get("side", "")),  # 平仓信号若明确多/空,保留方向以避免误平反向仓
+            entry_price=None if is_exit else _as_optional_float(result.get("entry_price")),
+            entry_prices=[] if is_exit else _as_float_list(result.get("entry_prices", [])),
+            take_profits=[] if is_exit else _as_float_list(result.get("take_profits", [])),
+            condition_price=None if is_exit else _as_optional_float(result.get("condition_price")),
+            breakeven_after_tp=None if is_exit else _as_optional_float(result.get("breakeven_after_tp")),
+            stop_loss=None if is_exit else _as_optional_float(result.get("stop_loss")),
             position_pct=max(0.0, min(position_pct, 100.0)),
-            raw_text=text,
+            raw_text="",
             confidence=max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0)),
-            is_exit_signal=_as_bool(result.get("is_exit_signal", False)),
+            is_exit_signal=is_exit,
             exit_reason=result.get("reasoning", ""),
+            is_update_signal=is_update,
+            update_reason=update_reason,
             has_image=True,
         )
 
+        if is_exit:
+            parsed.actions = ["close_position"]
+            parsed.action = "close_position"
+        elif is_update:
+            parsed.actions = ["update_tp_sl"]
+            parsed.action = "update_tp_sl"
+            # 更新信号不需要入场价，避免下游误当开仓。
+            parsed.entry_price = None
+            parsed.entry_prices = []
+            parsed.take_profits = _as_float_list(result.get("take_profits", []))
+            parsed.stop_loss = _as_optional_float(result.get("stop_loss"))
+        elif parsed.side == "long":
+            parsed.actions = ["open_long"]
+            parsed.action = "open_long"
+        elif parsed.side == "short":
+            parsed.actions = ["open_short"]
+            parsed.action = "open_short"
+
+        if not parsed.entry_price and parsed.entry_prices:
+            parsed.entry_price = parsed.entry_prices[0]
+
+        # 如果没有品种信息，尝试从文本提取
+        if not parsed.symbol:
+            parsed.symbol = _extract_symbol_fallback(fallback_text)
+
+        # 借鉴 parse_with_llm 的解析保护: 用止盈/入场/止损的价格关系自动纠正多空方向。
+        # 正常多单通常是 TP > Entry > SL；正常空单通常是 TP < Entry < SL。
+        # 只在三者都明确且关系非常清晰时纠正，避免覆盖无止损/无止盈的信号。
+        if (
+            not parsed.is_exit_signal
+            and parsed.side in ("long", "short")
+            and parsed.entry_price is not None
+            and parsed.stop_loss is not None
+            and parsed.take_profits
+        ):
+            tp_price = parsed.take_profits[0]
+            ep = parsed.entry_price
+            sl = parsed.stop_loss
+            if tp_price > ep > sl and parsed.side == "short":
+                logger.warning(
+                    f"图片 LLM 方向纠正: short→long (TP={tp_price}>EP={ep}>SL={sl})"
+                )
+                parsed.side = "long"
+            elif tp_price < ep < sl and parsed.side == "long":
+                logger.warning(
+                    f"图片 LLM 方向纠正: long→short (TP={tp_price}<EP={ep}<SL={sl})"
+                )
+                parsed.side = "short"
+
         logger.info(
             f"图片 LLM 解析成功: symbol={parsed.symbol}, side={parsed.side}, "
-            f"confidence={parsed.confidence}, tokens={usage.get('total_tokens', 0)}"
+            f"is_exit={parsed.is_exit_signal}, confidence={parsed.confidence}, "
+            f"tokens={usage.get('total_tokens', 0)}"
         )
         return parsed, usage
 

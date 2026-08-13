@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import time
+import hashlib
 from dataclasses import dataclass
 from typing import Optional
 
@@ -20,7 +21,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.core.security import decrypt_secret, encrypt_secret
-from app.models.config import SystemConfig
+from app.models.config import DiscordAccount, SystemConfig
 
 
 _CACHE_TTL = 5  # 秒
@@ -61,6 +62,17 @@ class DiscordSettings:
     heartbeat_interval: int
 
 
+@dataclass
+class DiscordAccountSettings:
+    """单个 Discord 监听账号运行时快照。"""
+    id: int | None
+    label: str
+    token: str
+    token_hash: str
+    heartbeat_interval: int
+    is_default: bool = False
+
+
 async def _load_db_config() -> Optional[SystemConfig]:
     """从数据库加载 SystemConfig(单行表,id=1)。"""
     global _cache, _cache_ts
@@ -70,6 +82,9 @@ async def _load_db_config() -> Optional[SystemConfig]:
     try:
         async with AsyncSessionLocal() as db:
             cfg = (await db.execute(select(SystemConfig).where(SystemConfig.id == 1))).scalar_one_or_none()
+            if cfg:
+                # M-4修复: expunge 使对象脱离 session,避免 detached 状态访问 relationship 时报错
+                db.expunge(cfg)
             _cache = cfg
             _cache_ts = now
             return cfg
@@ -237,6 +252,82 @@ async def get_discord_settings() -> DiscordSettings:
         heartbeat = cfg.discord_heartbeat_interval or heartbeat
 
     return DiscordSettings(token=token, heartbeat_interval=heartbeat)
+
+
+async def get_discord_account_settings() -> list[DiscordAccountSettings]:
+    """获取所有启用的 Discord 账号配置。
+
+    兼容逻辑:
+      1. 优先读取 discord_accounts 中 enabled=True 的账号。
+      2. 若表中没有账号,但旧 SystemConfig.discord_token_enc 存在,自动初始化默认账号。
+      3. 若数据库不可用或表尚未迁移,回退到旧的单 Token 配置。
+    """
+    cfg = await _load_db_config()
+    heartbeat = cfg.discord_heartbeat_interval if cfg else 41
+
+    try:
+        async with AsyncSessionLocal() as db:
+            accounts = (
+                await db.execute(
+                    select(DiscordAccount)
+                    .where(DiscordAccount.enabled.is_(True))
+                    .order_by(DiscordAccount.is_default.desc(), DiscordAccount.id)
+                )
+            ).scalars().all()
+
+            if not accounts and cfg and cfg.discord_token_enc:
+                token = decrypt_secret(cfg.discord_token_enc)
+                acc = DiscordAccount(
+                    label="默认 Discord 账号",
+                    token_enc=cfg.discord_token_enc,
+                    token_hash=hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                    enabled=True,
+                    is_default=True,
+                )
+                db.add(acc)
+                await db.commit()
+                await db.refresh(acc)
+                accounts = [acc]
+                logger.info("已从旧 SystemConfig.discord_token_enc 初始化默认 Discord 账号")
+
+            result: list[DiscordAccountSettings] = []
+            for acc in accounts:
+                try:
+                    token = decrypt_secret(acc.token_enc)
+                except Exception:
+                    logger.warning(f"Discord 账号 Token 解密失败: id={acc.id} label={acc.label}")
+                    continue
+                token_hash = acc.token_hash or hashlib.sha256(token.encode("utf-8")).hexdigest()
+                if not acc.token_hash:
+                    acc.token_hash = token_hash
+                    await db.commit()
+                result.append(
+                    DiscordAccountSettings(
+                        id=acc.id,
+                        label=acc.label,
+                        token=token,
+                        token_hash=token_hash,
+                        heartbeat_interval=heartbeat,
+                        is_default=acc.is_default,
+                    )
+                )
+            return result
+    except Exception as e:
+        logger.debug(f"读取 DiscordAccount 失败,回退到单 Token 配置: {e}")
+
+    legacy = await get_discord_settings()
+    if not legacy.token:
+        return []
+    return [
+        DiscordAccountSettings(
+            id=None,
+            label="legacy",
+            token=legacy.token,
+            token_hash=hashlib.sha256(legacy.token.encode("utf-8")).hexdigest(),
+            heartbeat_interval=legacy.heartbeat_interval,
+            is_default=True,
+        )
+    ]
 
 
 async def ensure_system_config_row() -> SystemConfig:

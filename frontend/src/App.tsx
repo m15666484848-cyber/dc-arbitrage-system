@@ -21,11 +21,9 @@ import AdminCustomers from "@/pages/admin/Customers";
 import AdminKols from "@/pages/admin/KolMgmt";
 import AdminSignals from "@/pages/admin/AdminSignals";
 import AdminSettings from "@/pages/admin/Settings";
-import SymbolNotionalPage from "@/pages/admin/SymbolNotional";
 import ProfitStatsPage from "@/pages/admin/ProfitStats";
 import AdminDiagnosis from "@/pages/admin/Diagnosis";
 import AdminSimulator from "@/pages/admin/Simulator";
-import ShadowComparison from "@/pages/admin/ShadowComparison";
 
 function Protected({
   children,
@@ -50,19 +48,52 @@ function Protected({
 }
 
 function InitGate({ children }: { children: React.ReactNode }) {
-  const { token, user, initialized, setUser, markInitialized, logout } = useAuthStore();
+  const { token, user, initialized, setAuth, setUser, markInitialized, logout } = useAuthStore();
 
   useEffect(() => {
     if (initialized) return;
+    // S9修复: 页面刷新时通过HttpOnly Cookie中的refresh_token获取新access token
+    // token不再持久化到localStorage,仅在内存中
     if (token) {
+      // 内存中已有token,直接验证
       API.me()
         .then((u: any) => setUser(u))
         .catch(() => logout())
         .finally(() => markInitialized());
     } else {
-      markInitialized();
+      // 尝试通过refresh token恢复会话
+      API.refreshToken()
+        .then((res: any) => {
+          setAuth(res.access_token, {
+            id: res.user_id,
+            username: res.username,
+            role: res.role,
+            display_name: res.display_name,
+            authorization: res.authorization,
+            show_signal_summary: res.show_signal_summary,
+            emergency_stop: res.emergency_stop,
+          });
+        })
+        .catch(() => {
+          // refresh失败,用户需重新登录
+        })
+        .finally(() => markInitialized());
     }
-  }, [token, initialized, setUser, markInitialized, logout]);
+    // S9修复: 处理管理员模拟登录的impersonate_token (URL hash传递)
+    const hash = window.location.hash;
+    const match = hash.match(/impersonate_token=([^&]+)/);
+    if (match) {
+      const impToken = decodeURIComponent(match[1]);
+      // 清除URL hash中的token
+      window.location.hash = "";
+      // 使用impersonate token获取用户信息
+      useAuthStore.getState().setAuth(impToken, { id: 0, username: "", role: "customer" });
+      API.me()
+        .then((u: any) => setUser(u))
+        .catch(() => logout())
+        .finally(() => markInitialized());
+    }
+  }, [token, initialized, setUser, setAuth, markInitialized, logout]);
 
   if (!initialized) {
     return (
@@ -98,10 +129,8 @@ export default function App() {
             <Route path="/admin/signals" element={<Protected role="admin"><AdminSignals /></Protected>} />
             <Route path="/admin/diagnosis" element={<Protected role="admin"><AdminDiagnosis /></Protected>} />
             <Route path="/admin/simulator" element={<Protected role="admin"><AdminSimulator /></Protected>} />
-            <Route path="/admin/shadow-comparison" element={<Protected role="admin"><ShadowComparison /></Protected>} />
             <Route path="/admin/settings" element={<Protected role="admin"><AdminSettings /></Protected>} />
-            <Route path="/admin/symbol-notional" element={<Protected role="admin"><SymbolNotionalPage /></Protected>} />
-            <Route
+              <Route
               path="*"
               element={
                 <Navigate

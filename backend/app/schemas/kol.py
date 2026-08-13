@@ -1,7 +1,7 @@
 """KOL schemas。"""
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import Field, BaseModel, ConfigDict
 
 
 class KolOut(BaseModel):
@@ -17,7 +17,7 @@ class KolOut(BaseModel):
     llm_enabled: bool = False
     vision_llm_enabled: bool = False
     llm_fallback: bool = True
-    llm_min_confidence: float = 0.4
+    llm_min_confidence: float = Field(0.4, ge=0, le=1)
     # 统计
     cached_win_rate: float = 0.0
     cached_pnl: float = 0.0
@@ -64,7 +64,7 @@ class KolFollowItem(BaseModel):
     """单个 KOL 的关注设置。"""
     kol_id: int
     strategy_id: int | None = None
-    notional_usdt: float | None = None
+    notional_usdt: float | None = Field(None, ge=0)
 
 
 class KolFollowUpdate(BaseModel):

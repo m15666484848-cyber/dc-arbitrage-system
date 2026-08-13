@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import Field, BaseModel, ConfigDict
 
 
 class ParsedSignal(BaseModel):
@@ -25,10 +25,10 @@ class ParsedSignal(BaseModel):
     take_profits: list[float] = []  # 多级止盈
     stop_loss: float | None = None
     condition_price: float | None = None
-    leverage: int = 1
-    position_pct: float = 0.0
+    leverage: int = Field(1, ge=1, le=125)
+    position_pct: float = Field(0.0, ge=0, le=100)
     raw_text: str = ""
-    confidence: float = 0.0
+    confidence: float = Field(0.0, ge=0, le=1)
     has_image: bool = False
     dedup_full_hash: str = ""  # 全周期去重指纹
     is_exit_signal: bool = False  # 是否为平仓信号

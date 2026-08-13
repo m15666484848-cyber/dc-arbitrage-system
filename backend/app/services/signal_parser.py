@@ -271,6 +271,10 @@ REVIEW_INDICATORS = [
 # 这些消息只是状态更新或心理安抚,不包含可执行的交易操作
 HOLDING_INDICATORS = [
     r"继续持有",
+    r"继续持有到",
+    r"持有到",
+    r"持有等待",
+    r"先别(?:睡觉|动|急|出|跑|平)",
     r"继续拿(?:住|着)",
     r"拿着(?:就行|别动|不动)?",
     r"(?:目前|当前|现在|现|已经|已).{0,12}(?:持有|持仓|拿着|保留).{0,30}(?:多单|空单)",
@@ -383,8 +387,10 @@ def _detect_cn_direction_priority(text: str) -> str:
         ("short", r"阻力\s*(?:位|附近)?.{0,8}(?:空|做空|开空)"),
         ("long", r"做多\s*(?:go\s*long)?"),
         ("short", r"做空\s*(?:go\s*short)?"),
-        ("long", r"(?:方向\s*[:：]?\s*)?(?:1\s*倍\s*)?(?:多|做多|开多|进多|接多|挂多|多单|低多|低吸|逢低做多|逢低接|抄底)"),
-        ("short", r"(?:方向\s*[:：]?\s*)?(?:1\s*倍\s*)?(?:空|做空|开空|进空|接空|挂空|空单|高空|逢高做空|反弹空|阻力空)"),
+        ("long", r"(?:方向\s*[:：]?\s*)?(?:做多|开多|进多|接多|挂多|多单|低多|低吸|逢低做多|逢低接|抄底)"),
+        ("short", r"(?:方向\s*[:：]?\s*)?(?:做空|开空|进空|接空|挂空|空单|高空|逢高做空|反弹空|阻力空)"),
+        ("long", r"1\s*倍\s*(?:多|做多)"),
+        ("short", r"1\s*倍\s*(?:空|做空)"),
     ]
     hits: list[tuple[int, str]] = []
     for side, pattern in patterns:
@@ -491,6 +497,11 @@ def check_exit_intent(text: str) -> tuple[bool, str]:
     # 例如“恭喜...止盈出局”“获利1540点...止盈离场”“移动止盈30%”
     # 都是对已有仓位的实际退出/减仓指令，不能被 REVIEW_INDICATORS 误过滤。
     round4_forced_exit_patterns = [
+        r"(?:多单|空单|比特|以太|BTC|ETH).{0,12}(?:出掉|出局)",
+        r"(?:多单|空单).{0,8}(?:全部)?止盈(?:吧|了|掉|出局)?",
+        r"(?:多单|空单).{0,8}止损(?!\s*(?:上移|下移|改|设|设置|放|移|保护|到|至|推到|拉到))\s*\d",
+        r"(?:全部|全都|短线全部)\s*止盈(?:吧|了|出局)?",
+        r"💰.{0,12}(?:多单|空单).{0,8}(?:出掉|止盈)💰",
         r"止盈\s*出局",
         r"止盈\s*离场",
         r"止损\s*出局",
@@ -512,8 +523,12 @@ def check_exit_intent(text: str) -> tuple[bool, str]:
 
     # 第一层:精确关键词
     for w in EXIT_WORDS:
-        if re.search(rf"\b{re.escape(w)}\b", low) or w in low:
-            return True, f"检测到平仓关键词: {w}"
+        if w.isascii():
+            if re.search(rf"\b{re.escape(w)}\b", low):
+                return True, f"检测到平仓关键词: {w}"
+        else:
+            if w in low:
+                return True, f"检测到平仓关键词: {w}"
 
     # 第二层:模糊口语化模式
     # ★ 长文本(>200字)保护: 模糊模式中的单字动词(卖了/走了/出了等)
@@ -1544,7 +1559,7 @@ def extract_entry(text: str) -> tuple[float | None, list[float]]:
 
 
 def extract_leverage(text: str) -> int:
-    m = re.search(r"(\d+)\s*[xX倍]\b", text)
+    m = re.search(r"(\d+)\s*[xX倍](?=\s|杠杆|仓|倍|做多|做空|多|空|$)", text)
     if m:
         return max(1, min(int(m.group(1)), 125))
     return 1
@@ -1765,11 +1780,19 @@ async def ocr_image(image_url: str) -> str:
         logger.warning(f"图片 URL 不在白名单内,拒绝下载: {image_url[:100]}")
         return ""
 
-    # 下载图片
+    # 下载图片 (L-4修复: 添加大小限制和内容类型验证)
+    MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10MB 上限
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True, max_redirects=3) as client:
             resp = await client.get(image_url)
             resp.raise_for_status()
+            content_type = resp.headers.get("content-type", "")
+            if not content_type.startswith("image/"):
+                logger.warning(f"图片 URL 返回非图片内容类型: {content_type}")
+                return """
+            if len(resp.content) > MAX_IMAGE_SIZE:
+                logger.warning(f"图片过大 ({len(resp.content)} bytes), 跳过 OCR")
+                return """
         img_bytes = resp.content
     except Exception as e:
         logger.warning(f"下载图片失败: {e}")
@@ -1786,12 +1809,15 @@ async def ocr_image(image_url: str) -> str:
             img_array = np.array(img)
             result = ocr.ocr(img_array)
 
-            # 提取所有识别到的文本
+            # 提取所有识别到的文本 (L-4修复: 更安全的空值处理)
             texts = []
-            if result and result[0]:
+            if result and len(result) > 0 and result[0]:
                 for line in result[0]:
-                    if line and len(line) >= 2:
-                        texts.append(line[1][0])  # line[1][0] 是识别文本
+                    try:
+                        if line and len(line) >= 2 and line[1]:
+                            texts.append(line[1][0])
+                    except (IndexError, TypeError):
+                        continue
 
             ocr_text = "\n".join(texts)
             if ocr_text.strip():
@@ -2146,12 +2172,20 @@ def parse_text(text: str) -> ParsedSignal:
             new_tps = []
             for tp in tps:
                 if tp < 1000:
-                    new_tps.append(tp * 10000)
+                    # 无论做多做空,如果入场价>1000但TP<1000,很可能是省略了"万"单位
+                    if entry > 1000:
+                        new_tps.append(tp * 10000)
+                    else:
+                        new_tps.append(tp)
                 else:
                     new_tps.append(tp)
             tps = new_tps
         if sl and sl < 1000:
-            sl = sl * 10000
+            # 做空时SL高于入场价是正常的，不推断为"万"单位
+            if side == "short" and sl > entry:
+                pass  # 保持原值
+            else:
+                sl = sl * 10000
         if entry_prices:
             new_eps = [ep * 10000 if ep < 1000 else ep for ep in entry_prices]
             entry_prices = new_eps
@@ -2354,7 +2388,11 @@ async def parse_message(
     if image_url:
         ocr_text = await ocr_image(image_url)
         if ocr_text:
+            # L-5修复: OCR 文本存入独立字段,不混入 raw_text 影响去重
             combined = (combined + "\n" + ocr_text).strip()
+            _ocr_success = True
+        else:
+            ocr_text = ""
             _ocr_success = True
 
     # 1c. 如果 OCR 失败但启用了 vision LLM,尝试用 GLM-4V 分析图片
@@ -2431,6 +2469,7 @@ async def parse_message(
                 combined_for_parse,
                 context=context,
                 min_confidence=llm_min_confidence,
+                kol_name=kol_name,
             )
             if llm_parsed is not None:
                 logger.info(

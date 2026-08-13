@@ -1,7 +1,7 @@
 """配置类模型:交易所账号、风控、告警、净值快照。"""
 from datetime import datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Float, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -38,8 +38,8 @@ class ExchangeAccount(Base, TimestampMixin):
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 多 API 跟单配置
     follow_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
-    follow_weight: Mapped[float] = mapped_column(Float, default=1.0)
-    max_order_usdt: Mapped[float] = mapped_column(Float, default=0.0)  # 0=不限
+    follow_weight: Mapped[float] = mapped_column(default=1.0)
+    max_order_usdt: Mapped[float] = mapped_column(default=0.0)  # 0=不限
     strategy_id: Mapped[int | None] = mapped_column(ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True, index=True)
 
 
@@ -88,10 +88,10 @@ class RiskConfig(Base, TimestampMixin):
     exchange: Mapped[str] = mapped_column(String(32), default="all")
     silent_ranges: Mapped[list] = mapped_column(JSONB, default=list)
     silent_action: Mapped[str] = mapped_column(String(16), default="ignore")
-    max_position_usdt: Mapped[float] = mapped_column(Float, default=0.0)  # 0=不限
+    max_position_usdt: Mapped[float] = mapped_column(default=0.0)  # 0=不限
     max_concurrent_positions: Mapped[int] = mapped_column(Integer, default=0)  # 0=不限
-    max_daily_loss_pct: Mapped[float] = mapped_column(Float, default=0.0)  # 0=不限
-    per_kol_max_usdt: Mapped[float] = mapped_column(Float, default=0.0)
+    max_daily_loss_pct: Mapped[float] = mapped_column(default=0.0)  # 0=不限
+    per_kol_max_usdt: Mapped[float] = mapped_column(default=0.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # ---- 持仓超时自动平仓 ----
     position_timeout_hours: Mapped[int] = mapped_column(Integer, default=72)  # 0=禁用
@@ -101,10 +101,10 @@ class RiskConfig(Base, TimestampMixin):
     # ---- KOL 频率限制 ----
     kol_frequency_per_hour: Mapped[int] = mapped_column(Integer, default=20)  # 0=禁用
     # ---- 自动止损补充 ----
-    auto_stop_loss_pct: Mapped[float] = mapped_column(Float, default=5.0)  # 0=禁用,百分比
+    auto_stop_loss_pct: Mapped[float] = mapped_column(default=5.0)  # 0=禁用,百分比
     # ---- 追踪止损 ----
     enable_trailing_stop: Mapped[bool] = mapped_column(Boolean, default=False)
-    trailing_callback_pct: Mapped[float] = mapped_column(Float, default=1.0)  # 百分比
+    trailing_callback_pct: Mapped[float] = mapped_column(default=1.0)  # 百分比
 
 
 class AlertConfig(Base, TimestampMixin):
@@ -142,7 +142,7 @@ class EquitySnapshot(Base, TimestampMixin):
     exchange: Mapped[str] = mapped_column(String(32), index=True)
     equity: Mapped[float] = mapped_column(Float)  # 账户权益(USDT)
     balance: Mapped[float] = mapped_column(Float)  # 余额
-    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(default=0.0)
     snapshot_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
@@ -153,18 +153,23 @@ class DailyRiskSnapshot(Base, TimestampMixin):
 
     __tablename__ = "daily_risk_snapshots"
 
+    # S8修复: 添加唯一约束,与 analytics.py 的 on_conflict_do_update 对齐
+    __table_args__ = (
+        UniqueConstraint("customer_id", "exchange", "day", name="uq_daily_risk_cid_exch_day"),
+    )
+
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
     exchange: Mapped[str] = mapped_column(String(32), default="all", index=True)
     day: Mapped[datetime.date] = mapped_column(Date, index=True)
-    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
-    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
-    total_daily_pnl: Mapped[float] = mapped_column(Float, default=0.0)
-    equity: Mapped[float] = mapped_column(Float, default=0.0)
-    balance: Mapped[float] = mapped_column(Float, default=0.0)
-    base_equity: Mapped[float] = mapped_column(Float, default=0.0)
-    max_daily_loss_pct: Mapped[float] = mapped_column(Float, default=0.0)
-    loss_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_pnl: Mapped[float] = mapped_column(default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(default=0.0)
+    total_daily_pnl: Mapped[float] = mapped_column(default=0.0)
+    equity: Mapped[float] = mapped_column(default=0.0)
+    balance: Mapped[float] = mapped_column(default=0.0)
+    base_equity: Mapped[float] = mapped_column(default=0.0)
+    max_daily_loss_pct: Mapped[float] = mapped_column(default=0.0)
+    loss_pct: Mapped[float] = mapped_column(default=0.0)
     risk_level: Mapped[str] = mapped_column(String(16), default="normal")
     risk_triggered: Mapped[bool] = mapped_column(Boolean, default=False)
     open_positions: Mapped[int] = mapped_column(Integer, default=0)
@@ -195,7 +200,7 @@ class SystemConfig(Base, TimestampMixin):
     text_llm_api_key_enc: Mapped[str] = mapped_column(Text, default="")  # Fernet 加密
     text_llm_model: Mapped[str] = mapped_column(String(64), default="")  # 空则用预设
     text_llm_api_base: Mapped[str] = mapped_column(String(256), default="")  # 空则用预设
-    text_llm_temperature: Mapped[float] = mapped_column(Float, default=0.1)
+    text_llm_temperature: Mapped[float] = mapped_column(default=0.1)
     text_llm_max_tokens: Mapped[int] = mapped_column(Integer, default=2000)
     text_llm_timeout: Mapped[int] = mapped_column(Integer, default=30)
     # ---- 图片 LLM(推荐 GLM-4V,多模态) ----
@@ -204,7 +209,7 @@ class SystemConfig(Base, TimestampMixin):
     vision_llm_api_key_enc: Mapped[str] = mapped_column(Text, default="")  # Fernet 加密
     vision_llm_model: Mapped[str] = mapped_column(String(64), default="")
     vision_llm_api_base: Mapped[str] = mapped_column(String(256), default="")
-    vision_llm_temperature: Mapped[float] = mapped_column(Float, default=0.1)
+    vision_llm_temperature: Mapped[float] = mapped_column(default=0.1)
     vision_llm_max_tokens: Mapped[int] = mapped_column(Integer, default=2000)
     vision_llm_timeout: Mapped[int] = mapped_column(Integer, default=60)
     # ---- Discord ----

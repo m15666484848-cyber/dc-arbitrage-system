@@ -2,7 +2,7 @@
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -10,8 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.redis import get_redis
+from app.core.config import settings
 from app.core.security import (
     create_access_token,
+    create_refresh_token,
+    decode_refresh_token,
     get_current_user,
     hash_password,
     verify_password,
@@ -46,13 +49,17 @@ async def _check_rate_limit(
         max_count: 窗口内最大允许次数
         window_sec: 时间窗口(秒)
     """
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _client_ip(request)
     key = f"rate_limit:{action}:{client_ip}"
     try:
         redis = await get_redis()
-        current = await redis.incr(key)
-        if current == 1:
-            await redis.expire(key, window_sec)
+        # S10修复: 使用 pipeline(transaction=True) 保证 incr+expire 原子性
+        # 防止进程崩溃导致 key 无过期时间,IP 被永久限流
+        async with redis.pipeline(transaction=True) as pipe:
+            await pipe.incr(key)
+            await pipe.expire(key, window_sec)
+            result = await pipe.execute()
+        current = result[0]
         if current > max_count:
             logger.warning(f"速率限制触发: action={action} ip={client_ip} count={current}")
             raise HTTPException(429, "请求过于频繁,请稍后再试")
@@ -96,9 +103,12 @@ async def _record_login_failure(request: Request, username: str) -> None:
     try:
         redis = await get_redis()
         key = _login_failure_key(request, username)
-        current = await redis.incr(key)
-        if current == 1:
-            await redis.expire(key, LOGIN_LOCK_SECONDS)
+        # S10修复: 使用 pipeline 保证 incr+expire 原子性
+        async with redis.pipeline(transaction=True) as pipe:
+            await pipe.incr(key)
+            await pipe.expire(key, LOGIN_LOCK_SECONDS)
+            result = await pipe.execute()
+        current = result[0]
         if current >= LOGIN_FAILURE_MAX:
             logger.warning(f"登录失败锁定触发: ip={_client_ip(request)} username={username}")
     except Exception as e:
@@ -214,7 +224,7 @@ async def register(body: CustomerRegister, request: Request, db: AsyncSession = 
 
 
 @router.post("/login")
-async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+async def login(body: LoginRequest, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     # 速率限制: 登录 5 次/分钟
     await _check_rate_limit(request, "login", max_count=5, window_sec=60)
     await _check_login_lock(request, body.username)
@@ -247,6 +257,16 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
             raise HTTPException(500, "登录失败,请稍后重试")
         auth_status = await get_authorization_status(db, cust.id)
         token = create_access_token(cust.username, "customer", {"customer_id": cust.id})
+        refresh = create_refresh_token(cust.username, "customer", {"customer_id": cust.id})
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=settings.refresh_token_expire_days * 86400,
+            path="/api/auth",
+        )
         await _clear_login_failures(request, body.username)
         return TokenResponse(
             access_token=token,
@@ -272,6 +292,16 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
         logger.exception("更新管理员登录时间失败")
         raise HTTPException(500, "登录失败,请稍后重试")
     token = create_access_token(user.username, "admin", {"user_id": user.id})
+    refresh = create_refresh_token(user.username, "admin", {"user_id": user.id})
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=settings.refresh_token_expire_days * 86400,
+        path="/api/auth",
+    )
     await _clear_login_failures(request, body.username)
     return TokenResponse(
         access_token=token,
@@ -310,6 +340,63 @@ async def me(current=Depends(get_current_user), db: AsyncSession = Depends(get_d
         else:
             data["inviter_name"] = ""
     return ok(data)
+
+
+
+
+@router.post("/refresh")
+async def refresh_token(request: Request, db: AsyncSession = Depends(get_db)):
+    """使用HttpOnly Cookie中的refresh_token换取新的access_token。"""
+    refresh = request.cookies.get("refresh_token")
+    if not refresh:
+        raise HTTPException(401, "无刷新令牌,请重新登录")
+
+    payload = decode_refresh_token(refresh)
+    role = payload.get("role")
+    sub = payload.get("sub")
+
+    extra = {}
+    if role == "customer":
+        extra["customer_id"] = payload.get("customer_id")
+    elif role == "admin":
+        extra["user_id"] = payload.get("user_id")
+
+    access = create_access_token(sub, role, extra)
+
+    if role == "customer":
+        cust = (await db.execute(select(Customer).where(Customer.username == sub))).scalar_one_or_none()
+        if not cust or not cust.is_active:
+            raise HTTPException(401, "用户不存在或已禁用")
+        auth_status = await get_authorization_status(db, cust.id)
+        return ok({
+            "access_token": access,
+            "role": "customer",
+            "user_id": cust.id,
+            "username": cust.username,
+            "display_name": cust.display_name,
+            "authorization": auth_status,
+            "show_signal_summary": cust.show_signal_summary,
+            "emergency_stop": cust.emergency_stop,
+        })
+    elif role == "admin":
+        user = (await db.execute(select(User).where(User.username == sub))).scalar_one_or_none()
+        if not user or not user.is_active:
+            raise HTTPException(401, "用户不存在或已禁用")
+        return ok({
+            "access_token": access,
+            "role": "admin",
+            "user_id": user.id,
+            "username": user.username,
+            "display_name": user.username,
+        })
+    raise HTTPException(401, "无效的角色")
+
+
+@router.post("/logout")
+async def logout(response: Response):
+    """清除refresh_token Cookie。"""
+    response.delete_cookie(key="refresh_token", path="/api/auth")
+    return ok({"message": "已退出登录"})
 
 
 @router.get("/my-invitees")

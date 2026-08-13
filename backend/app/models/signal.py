@@ -1,7 +1,7 @@
 """原始信号模型。"""
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Numeric, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,6 +22,7 @@ class Signal(Base, TimestampMixin):
     kol_id: Mapped[int] = mapped_column(ForeignKey("kols.id", ondelete="CASCADE"), index=True)
     discord_message_id: Mapped[str] = mapped_column(String(64), index=True)
     raw_text: Mapped[str] = mapped_column(Text, default="")
+    ocr_text: Mapped[str] = mapped_column(Text, default="")  # L-5修复: OCR识别文本独立存储
     image_url: Mapped[str] = mapped_column(String(512), default="")
     # 解析后的结构化数据(符号/方向/入场/止盈多级/止损/杠杆等)
     parsed: Mapped[dict] = mapped_column(JSONB, default=dict)
@@ -29,13 +30,13 @@ class Signal(Base, TimestampMixin):
     dedup_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
     corrected: Mapped[bool] = mapped_column(default=False)
     correct_log: Mapped[str] = mapped_column(Text, default="")  # 纠错轨迹说明
-    confidence: Mapped[float] = mapped_column(Float, default=0.0)  # 置信度评分 0-1
+    confidence: Mapped[float] = mapped_column(default=0.0)  # 置信度评分 0-1
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
     # 解析字段冗余(便于查询/排序)
     symbol: Mapped[str] = mapped_column(String(64), default="", index=True)
     side: Mapped[str] = mapped_column(String(16), default="")  # long|short
-    entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_price: Mapped[float | None] = mapped_column(nullable=True)
     note: Mapped[str] = mapped_column(Text, default="")
 
 
@@ -67,10 +68,10 @@ class ParserShadowResult(Base, TimestampMixin):
     new_symbol: Mapped[str] = mapped_column(String(64), default="", index=True)
     old_side: Mapped[str] = mapped_column(String(16), default="")
     new_side: Mapped[str] = mapped_column(String(16), default="")
-    old_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    new_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    old_stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
-    new_stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    old_entry_price: Mapped[float | None] = mapped_column(nullable=True)
+    new_entry_price: Mapped[float | None] = mapped_column(nullable=True)
+    old_stop_loss: Mapped[float | None] = mapped_column(nullable=True)
+    new_stop_loss: Mapped[float | None] = mapped_column(nullable=True)
 
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     review_note: Mapped[str] = mapped_column(Text, default="")

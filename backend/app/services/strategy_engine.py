@@ -171,13 +171,13 @@ def compute_decision(
 
         return StrategyDecision(allow=True, notional_usdt=100.0, params={
 
-            "default_sl_pct": -0.05,
+            "default_sl_pct": None,  # None=tiered default
 
             "cost_protection_buffer": 0.02,
 
             "no_stop_loss": False,
 
-            "tp_levels": [3, 5, 8],
+            "tp_levels": None,  # None=tiered default
 
             "enable_trailing": False,
 
@@ -238,19 +238,25 @@ def compute_decision(
             qty = base_qty
 
     elif strategy.type == STRATEGY_ANTI_MARTINGALE:
-
         # 反马丁格尔连胜熔断:达到 max_rounds 轮连胜后停止加仓,防止过度暴露
-
-        if strategy.martingale_round >= max_rounds:
-
-            return StrategyDecision(allow=False, notional_usdt=0.0, reason=f"反马丁格尔连胜 {max_rounds} 轮熔断", params=p)
-
-        if strategy.last_result == "win" and strategy.last_qty > 0:
-
-            qty = strategy.last_qty * multiplier
-
+        # L-6修复: 使用 scoped state 按 KOL+symbol 隔离,与马丁策略一致
+        scoped_state = _get_scoped_martingale_state(strategy, kol_id, symbol)
+        if scoped_state is None:
+            if kol_id is None and symbol is None:
+                scoped_state = {
+                    "last_result": strategy.last_result,
+                    "last_qty": strategy.last_qty,
+                    "round": strategy.martingale_round,
+                    "symbol": "strategy",
+                }
+            else:
+                qty = base_qty
+                scoped_state = None
+        if scoped_state is not None and scoped_state["round"] >= max_rounds:
+            return StrategyDecision(allow=False, notional_usdt=0.0, reason=f"反马丁格尔 {scoped_state['symbol']} 连胜 {max_rounds} 轮熔断", params=p)
+        if scoped_state is not None and scoped_state["last_result"] == "win" and scoped_state["last_qty"] > 0:
+            qty = scoped_state["last_qty"] * multiplier
         else:
-
             qty = base_qty
 
     else:
@@ -329,22 +335,32 @@ async def record_trade_result(
         flag_modified(strategy, "martingale_state")
 
     elif strategy.type == STRATEGY_ANTI_MARTINGALE:
-
-        strategy.last_result = "win" if won else "loss"
-
-        strategy.last_qty = float(notional_usdt or 0.0)
+        # L-5修复: 使用 scoped martingale_state 与 compute_decision 保持一致
+        scoped_state = _get_scoped_martingale_state(strategy, kol_id, symbol)
+        if scoped_state is None:
+            return  # 非 BTC/ETH 币种不更新反马丁状态
 
         if break_even:
-            pass  # P2-5 fix: break-even does not count
-        elif not won:
+            return  # 保本不计入连胜/连败
 
-            strategy.martingale_round = 0
+        state_map = dict(strategy.martingale_state or {})
+        key = scoped_state["key"]
 
-            strategy.last_qty = 0.0
-
+        if won:
+            state_map[key] = {
+                "round": scoped_state["round"] + 1,
+                "last_result": "win",
+                "last_qty": float(notional_usdt or 0.0),
+            }
         else:
+            state_map[key] = {
+                "round": 0,
+                "last_result": "loss",
+                "last_qty": 0.0,
+            }
 
-            strategy.martingale_round += 1
+        strategy.martingale_state = state_map
+        flag_modified(strategy, "martingale_state")
 
 
 
@@ -393,38 +409,46 @@ def _tp_levels_to_pct(tp_levels: list) -> list[float]:
 
 
 def get_strategy_defaults(params: dict[str, Any]) -> dict:
-
     """从策略 params 提取信号兜底/止盈分级等配置。
 
-
-
     default_tp_pct 从 tp_levels 自动派生,不再作为独立策略参数。
-
+    use_tiered_defaults=True 时, 强制使用币种分层默认值(TIERED_CONFIG)。
     """
+    # 分层模式: use_tiered_defaults=True 时, 强制 SL/TP 为 None, 由 signal_filter 按币种自动分配
+    use_tiered = params.get("use_tiered_defaults", False)  # M-6修复: 默认改为False,尊重用户显式配置
 
-    tp_levels = params.get("tp_levels", [3, 5, 8])
-    default_tp_pct = params.get("default_tp_pct")
-    if default_tp_pct is None:
-        default_tp_pct = _tp_levels_to_pct(tp_levels)
+    if use_tiered:
+        # 分层模式: SL/TP 全部为 None, 由 signal_filter.apply_defaults 按币种自动分配
+        tp_levels = None
+        default_tp_pct = None
+        default_sl_pct = None
+    else:
+        # 手动模式: 使用策略显式配置的 SL/TP
+        tp_levels = params.get("tp_levels")  # None=按币种分层自动分配
+        if tp_levels is None:
+            default_tp_pct = None
+        else:
+            default_tp_pct = params.get("default_tp_pct")
+            if default_tp_pct is None:
+                default_tp_pct = _tp_levels_to_pct(tp_levels)
+        default_sl_pct = params.get("default_sl_pct")  # None=按币种分层默认
 
     return {
-
         "default_tp_pct": default_tp_pct,
-
-        "default_sl_pct": params.get("default_sl_pct", -0.05),
-
+        "default_sl_pct": default_sl_pct,
         "no_stop_loss": params.get("no_stop_loss", False),
-
-        "cost_protection_buffer": params.get("cost_protection_buffer", 0.002),
-
+        "cost_protection_buffer": params.get("cost_protection_buffer", 0.02),
         "tp_levels": tp_levels,
-
         "enable_trailing": params.get("enable_trailing", False),
-
         "trailing_callback": params.get("trailing_callback", 0.01),
-
         "batch_entry_enabled": params.get("batch_entry_enabled", True),
-
         "batch_entry_window": params.get("batch_entry_window", 300),
-
+        "max_sl_pct": params.get("max_sl_pct"),
+        "timeout_protection_enabled": params.get("timeout_protection_enabled", True),
+        "timeout_phase1_hours": params.get("timeout_phase1_hours", 4),
+        "timeout_phase2_hours": params.get("timeout_phase2_hours", 24),
+        "timeout_phase3_hours": params.get("timeout_phase3_hours", 72),
+        "timeout_phase4_hours": params.get("timeout_phase4_hours", 96),
+        "timeout_trailing_p1": params.get("timeout_trailing_p1", 0.03),
+        "timeout_trailing_p2": params.get("timeout_trailing_p2", 0.02),
     }

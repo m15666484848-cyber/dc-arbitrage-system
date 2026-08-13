@@ -2,9 +2,11 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import get_current_user, require_admin
 from app.models.kol import Kol, KolFollow
@@ -159,7 +161,7 @@ async def dashboard(
     cid = current.id if current.role == "customer" else None
     if cid is None:
         return ok({"open_positions": 0, "today_pnl": 0, "total_pnl": 0, "total_trades": 0, "win_rate": 0,
-                    "followed_kols": [], "open_positions_list": []})
+                    "equity_curve": [], "followed_kols": [], "open_positions_list": []})
     stats = await analytics.dashboard_stats(db, cid, exchange_account_id)
     curve = await analytics.equity_curve(db, cid, exchange_account_id=exchange_account_id)
 
@@ -209,7 +211,7 @@ async def dashboard(
                 Position.customer_id == cid,
                 Position.status == "open",
                 Position.parent_id.is_not(None),
-                Position.exchange_account_id == exchange_account_id if exchange_account_id else True,
+                (Position.exchange_account_id == exchange_account_id) if exchange_account_id else True,
             ).order_by(Position.opened_at.desc())
         )
     ).scalars().all()
@@ -225,6 +227,15 @@ async def dashboard(
     price_cache: dict[tuple[str, str], float] = {}
     if open_pos_rows:
         exchange_symbols: dict[str, set[str]] = {}
+        for p in open_pos_rows:
+            exchange_symbols.setdefault(p.exchange, set()).add(p.symbol)
+        for exh, syms in exchange_symbols.items():
+            try:
+                prices = await exchange_adapter.fetch_market_prices_batch(exh, list(syms))
+                for sym, price in prices.items():
+                    price_cache[(exh, sym)] = price
+            except Exception as e:
+                logger.warning(f"dashboard 批量获取持仓现价失败 {exh}: {e}")
     account_map = await _exchange_account_map(db, {p.exchange_account_id for p in open_pos_rows})
     for p in open_pos_rows:
         price = price_cache.get((p.exchange, p.symbol), 0.0)
@@ -240,13 +251,13 @@ async def dashboard(
 
 
 @router.get("/kol-ranking")
-async def kol_ranking(days: int = Query(30), db: AsyncSession = Depends(get_db), _=Depends(get_current_user)):
+async def kol_ranking(days: int = Query(30, ge=1, le=365), db: AsyncSession = Depends(get_db), _=Depends(get_current_user)):
     return ok(await analytics.kol_ranking(db, days))
 
 
 @router.get("/equity-curve")
 async def equity_curve(
-    days: int = Query(30),
+    days: int = Query(30, ge=1, le=365),
     exchange: str | None = Query(None),
     exchange_account_id: int | None = Query(None),
     current=Depends(get_current_user),
@@ -309,6 +320,9 @@ async def inject_signal(
     db: AsyncSession = Depends(get_db),
 ):
     """手动注入信号(测试用:模拟 KOL 消息)。仅管理员可用,防止客户伪造 KOL 信号触发跟单。"""
+    # M-3修复: 生产环境禁用信号注入
+    if settings.app_env == "production":
+        raise HTTPException(403, "生产环境禁止信号注入,请在测试环境使用")
     from datetime import datetime, timezone
 
     from app.services import signal_parser

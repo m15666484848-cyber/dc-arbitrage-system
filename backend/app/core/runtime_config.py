@@ -82,6 +82,9 @@ async def _load_db_config() -> Optional[SystemConfig]:
     try:
         async with AsyncSessionLocal() as db:
             cfg = (await db.execute(select(SystemConfig).where(SystemConfig.id == 1))).scalar_one_or_none()
+            if cfg:
+                # M-4修复: expunge 使对象脱离 session,避免 detached 状态访问 relationship 时报错
+                db.expunge(cfg)
             _cache = cfg
             _cache_ts = now
             return cfg

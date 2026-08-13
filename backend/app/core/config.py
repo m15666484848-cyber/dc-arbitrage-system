@@ -37,8 +37,19 @@ class Settings(BaseSettings):
     jwt_alg: str = "HS256"
 
     jwt_expire_minutes: int = 1440
+    refresh_token_expire_days: int = 7  # refresh token expiry (days)
 
     fernet_key: str = "change-me"
+
+    @property
+    def fernet_key_valid(self) -> bool:
+        """M-9修复: 检查 fernet_key 是否为合法 Fernet key。"""
+        try:
+            from cryptography.fernet import Fernet
+            Fernet(self.fernet_key.encode())
+            return True
+        except Exception:
+            return False
 
 
 
@@ -176,6 +187,33 @@ def get_settings() -> Settings:
                 "生产环境必须设置 ADMIN_PASSWORD 环境变量且不能为常见弱密码!"
 
             )
+
+
+    # S10新增: LLM 配置验证
+    if s.llm_enabled:
+        if not s.llm_api_key:
+            raise RuntimeError(
+                "CONFIG ERROR: llm_enabled=True 但 llm_api_key 为空, "
+                "请在 .env 中设置 LLM_API_KEY!"
+            )
+        if not s.llm_model:
+            raise RuntimeError(
+                "CONFIG ERROR: llm_enabled=True 但 llm_model 为空, "
+                "请在 .env 中设置 LLM_MODEL!"
+            )
+
+    # S10新增: 数据库连接池验证
+    if s.db_pool_size < 1:
+        raise RuntimeError("CONFIG ERROR: db_pool_size 必须 >= 1")
+    if s.db_max_overflow < 0:
+        raise RuntimeError("CONFIG ERROR: db_max_overflow 不能为负数")
+
+    # S10新增: Discord token 验证(生产环境必须配置)
+    if not s.discord_token:
+        warnings.warn(
+            "CONFIG WARNING: discord_token 未配置,系统将无法监听 KOL 信号!",
+            stacklevel=2,
+        )
 
     return s
 

@@ -29,6 +29,7 @@ services:
 
     mem_limit: 512m
     memswap_limit: 512m
+    cpus: 0.5
   redis:
     image: redis:7-alpine
     container_name: dcquant-redis
@@ -47,6 +48,7 @@ services:
 
     mem_limit: 192m
     memswap_limit: 192m
+    cpus: 0.25
   backend:
     build:
       context: ./backend
@@ -80,6 +82,7 @@ services:
 
     mem_limit: 768m
     memswap_limit: 768m
+    cpus: 1.0
   frontend:
     build:
       context: ./frontend
@@ -94,6 +97,7 @@ services:
 
     mem_limit: 256m
     memswap_limit: 256m
+    cpus: 0.25
 volumes:
   pgdata:
   redisdata:

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, time, timezone
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.config import RiskConfig
@@ -29,8 +29,20 @@ def _now_beijing() -> datetime:
 
 
 def _parse_hhmm(s: str) -> time:
-    parts = s.split(":")
-    return time(int(parts[0]), int(parts[1]))
+    # M8修复: 添加输入验证,防止格式错误导致风控崩溃
+    try:
+        parts = s.split(":")
+        if len(parts) != 2:
+            logger.warning(f"无效的时间格式(非HH:MM): {s}")
+            return time(0, 0)
+        h, m = int(parts[0]), int(parts[1])
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            logger.warning(f"时间值超出范围: {s}")
+            return time(0, 0)
+        return time(h, m)
+    except (ValueError, IndexError) as e:
+        logger.warning(f"时间解析失败 '{s}': {e}")
+        return time(0, 0)
 
 
 def is_in_silent_period(ranges: list[dict[str, Any]], now: datetime) -> bool:
@@ -143,6 +155,13 @@ async def check_can_trade(
         # P2-2 修复: 不再仅统计 master 仓位(parent_id IS NULL),
         # 而是统计所有 open 仓位,防止通过加仓绕过并发上限
         if cfg.max_concurrent_positions > 0:
+            # BUG-3 修复: 并发持仓数检查存在 TOCTOU 竞态,多个信号同时到达可突破上限。
+            # 使用 PostgreSQL 事务级 advisory lock 锁定 customer+exchange 组合,
+            # 串行化同一客户+交易所的并发持仓计数检查,避免竞态突破上限。
+            await db.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                {"lock_key": f"pos_count_{customer_id}_{exchange}"},
+            )
             total_positions = (
                 await db.execute(
                     select(func.count(Position.id)).where(
@@ -186,21 +205,29 @@ async def check_can_trade(
             ).scalars().all()
 
             unrealized_pnl_total = 0.0
-            for pos in open_positions:
-                try:
-                    from app.services.position_manager import _get_cached_price, compute_pnl
-                    from app.services import exchange_adapter
+            if open_positions:
+                # EX-M5 修复: 并行获取持仓价格,避免缓存全 miss 时串行 API 调用导致 2-10 秒延迟
+                import asyncio as _aio
+                from app.services.position_manager import _get_cached_price, compute_pnl
+                from app.services import exchange_adapter
 
-                    current_price = await _get_cached_price(pos.exchange, pos.symbol)
-                    if not current_price or current_price <= 0:
-                        current_price = await exchange_adapter.fetch_market_price(
-                            pos.exchange, pos.symbol
-                        )
-                    if current_price and current_price > 0:
-                        pnl, _ = compute_pnl(pos, current_price)
-                        unrealized_pnl_total += pnl
-                except Exception as e:
-                    logger.debug(f"获取仓位 {pos.id} 浮亏失败: {e}")
+                async def _get_pos_pnl(pos):
+                    """获取单个持仓的未实现盈亏。"""
+                    try:
+                        current_price = await _get_cached_price(pos.exchange, pos.symbol)
+                        if not current_price or current_price <= 0:
+                            current_price = await exchange_adapter.fetch_market_price(
+                                pos.exchange, pos.symbol
+                            )
+                        if current_price and current_price > 0:
+                            pnl, _ = compute_pnl(pos, current_price)
+                            return pnl
+                    except Exception as e:
+                        logger.debug(f"获取仓位 {pos.id} 浮亏失败: {e}")
+                    return 0.0
+
+                pnl_results = await _aio.gather(*[_get_pos_pnl(pos) for pos in open_positions])
+                unrealized_pnl_total = sum(pnl_results)
 
             total_daily_loss = daily_pnl + unrealized_pnl_total
 
@@ -215,9 +242,41 @@ async def check_can_trade(
                     .limit(1)
                 )
             ).scalar_one_or_none()
-            base = last_eq or 1000.0
-            if total_daily_loss < 0 and abs(total_daily_loss) / base * 100 >= cfg.max_daily_loss_pct:
-                return False, f"触发单日最大亏损 {cfg.max_daily_loss_pct}%(含浮亏)"
+            base = float(last_eq) if last_eq else 0.0
+            # EX-M4 修复: 权益快照不可用时,尝试从交易所获取当前余额作为基准
+            if not base:
+                try:
+                    from app.services import exchange_adapter as _ea
+                    ex, _ = await _ea.load_exchange(db, customer_id, exchange)
+                    try:
+                        bal = await _ea.fetch_balance(ex)
+                        base = float(bal.get("equity", 0))
+                    finally:
+                        await _ea.close_exchange(ex)
+                except Exception as eq_err:
+                    logger.warning(f"无法获取账户 customer={customer_id} exchange={exchange} 的权益基准: {eq_err}")
+            if base > 0:
+                if total_daily_loss < 0 and abs(total_daily_loss) / base * 100 >= cfg.max_daily_loss_pct:
+                    return False, f"触发单日最大亏损 {cfg.max_daily_loss_pct}%(含浮亏)"
+            else:
+                # BUG-6 修复: 权益基准为0时(交易所API故障),日亏损熔断不应完全失效。
+                # 使用当日已实现亏损与持仓名义价值的比例作为 fallback。
+                logger.warning(
+                    f"无法获取账户 customer={customer_id} exchange={exchange} 的权益基准,"
+                    f"使用持仓名义价值比例作为 fallback 熔断检查"
+                )
+                # 计算当前持仓总名义价值作为基准
+                total_notional = sum(
+                    (abs(p.qty or 0) * (p.entry_price or 0)) for p in open_positions
+                ) if open_positions else 0.0
+                fallback_base = max(total_notional, 1000.0)  # 最低基准1000 USDT
+                fallback_loss_pct = cfg.max_daily_loss_pct if cfg.max_daily_loss_pct > 0 else 10.0
+                if total_daily_loss < 0 and abs(total_daily_loss) / fallback_base * 100 >= fallback_loss_pct:
+                    return False, (
+                        f"触发单日亏损熔断(权益基准不可用,当日亏损 "
+                        f"{daily_pnl:.2f} USDT 占持仓名义价值 {total_notional:.2f} USDT 的 "
+                        f"{abs(total_daily_loss) / fallback_base * 100:.1f}%)"
+                    )
     return True, "ok"
 
 
@@ -281,8 +340,14 @@ async def check_kol_consecutive_losses(db: AsyncSession) -> None:
 
         if streak >= threshold:
             kol_name = kol.name if kol else "未知KOL"
-            follow.enabled = False
-            follow.paused_until = now + timedelta(hours=pause_hours)
+            # 加行锁防止与 check_kol_can_trade 的自动恢复逻辑竞态
+            locked_follow = (await db.execute(
+                select(KolFollow).where(KolFollow.id == follow.id).with_for_update()
+            )).scalar_one_or_none()
+            if not locked_follow or not locked_follow.enabled:
+                continue
+            locked_follow.enabled = False
+            locked_follow.paused_until = now + timedelta(hours=pause_hours)
             # 查找该KOL最近的信号作为溯源
             _risk_src = ""
             try:
@@ -293,16 +358,20 @@ async def check_kol_consecutive_losses(db: AsyncSession) -> None:
                     _risk_src = _recent_sig.raw_text
             except Exception as e:
                 logger.debug(f"查询KOL最近信号失败 kol_id={kol.id if kol else None}: {e}")
-            await notify(
-                "risk", "KOL 连亏暂停",
-                f"KOL {kol_name} 连续亏损 {streak} 次\n"
-                f"已暂停 {pause_hours} 小时\n"
-                f"预计恢复时间: {follow.paused_until.strftime('%Y-%m-%d %H:%M UTC')}",
-                follow.customer_id,
-                source_text=_risk_src,
-            )
+            # BUG-12 修复: notify 调用加异常保护,飞书 API 故障不应中断后续 KOL 检查
+            try:
+                await notify(
+                    "risk", "KOL 连亏暂停",
+                    f"KOL {kol_name} 连续亏损 {streak} 次\n"
+                    f"已暂停 {pause_hours} 小时\n"
+                    f"预计恢复时间: {locked_follow.paused_until.strftime('%Y-%m-%d %H:%M UTC')}",
+                    locked_follow.customer_id,
+                    source_text=_risk_src,
+                )
+            except Exception as notify_err:
+                logger.warning(f"KOL 连亏暂停通知发送失败,不影响后续检查: {notify_err}")
             logger.warning(
-                f"客户 {follow.customer_id} KOL {kol_name} 连亏 {streak} 次,暂停 {pause_hours}h"
+                f"客户 {locked_follow.customer_id} KOL {kol_name} 连亏 {streak} 次,暂停 {pause_hours}h"
             )
 
     try:
@@ -390,16 +459,22 @@ async def check_kol_can_trade(
     if not follow.enabled:
         if follow.paused_until and follow.paused_until > _now():
             return False, f"该 KOL 已被暂停至 {follow.paused_until.strftime('%Y-%m-%d %H:%M UTC')}"
-        else:
+        elif follow.paused_until:
+            # P0-2修复: paused_until 已过期 → 连亏熔断自动暂停到期,允许自动恢复
             follow.enabled = True
             follow.paused_until = None
+            # 使用 flush 而非 commit,避免影响调用方事务(advisory lock 等需在同一事务内)
+            # 调用方会在自己的事务中统一 commit
             try:
                 await db.flush()
             except Exception as e:
                 await db.rollback()
-                logger.error(f"数据库提交失败: {e}")
+                logger.error(f"数据库flush失败: {e}")
                 raise
-            logger.info(f"KOL {kol_id} 暂停期结束,自动恢复交易")
+            logger.info(f"KOL {kol_id} 连亏暂停期结束,自动恢复交易")
+        else:
+            # P0-2修复: enabled=False 且无 paused_until → 用户手动禁用,不自动恢复
+            return False, "该KOL已被手动禁用,请在设置中手动启用"
 
     return True, "ok"
 

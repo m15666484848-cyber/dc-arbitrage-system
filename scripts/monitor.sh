@@ -5,7 +5,7 @@ ALERT_WEBHOOK="https://open.feishu.cn/open-apis/bot/v2/hook/eb8cfb4f-fd41-4d15-8
 
 UNHEALTHY=$(docker ps --filter "health=unhealthy" --filter "name=dcquant" -q 2>/dev/null | wc -l)
 DOWN=$(docker ps -a --filter "status=exited" --filter "name=dcquant" -q 2>/dev/null | wc -l)
-BACKEND_OK=$(curl -sf http://127.0.0.1:8000/health 2>/dev/null | grep -c "ok")
+BACKEND_OK=$(curl -sf http://127.0.0.1:8000/api/health 2>/dev/null | grep -c "ok")
 DB_OK=$(docker exec dcquant-postgres pg_isready -U dcquant 2>/dev/null | grep -c "accepting")
 REDIS_OK=$(docker exec dcquant-redis redis-cli ping 2>/dev/null | grep -c "PONG")
 

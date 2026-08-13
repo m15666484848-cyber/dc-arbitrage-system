@@ -255,6 +255,7 @@ async def create_pending_order(
     await notify(
         "order", "待触发单已创建",
         f"KOL: {kol_name}\n"
+        f"交易所: {pending.exchange.upper()}\n"
         f"API账户: #{pending.exchange_account_id or '未知'}\n"
         f"挂单ID: {pending.id}\n"
         f"品种: {pending.symbol}\n方向: {_side_cn(pending.side)}\n"
@@ -357,6 +358,16 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
         logger.warning(f"advisory lock 获取失败(降级为无锁): {e}")
 
     # 调用 _place_entry 下单
+    # ★ 急停检查: 急停状态下不允许触发待触发单
+    from app.models.user import User
+    customer = await db.get(User, pending.customer_id)
+    if customer and getattr(customer, "emergency_stop", False):
+        pending.status = "cancelled"
+        pending.cancel_reason = "客户急停已激活,待触发单自动取消"
+        await db.commit()
+        logger.warning(f"待触发单 {pending.id} 因客户急停自动取消")
+        return {"ok": False, "reason": "客户急停已激活,待触发单已取消"}
+
     try:
         result = await order_manager._place_entry(
             db,
@@ -383,8 +394,10 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
             "minimum amount", "minimum amount precision",
             "notional must be no smaller", "订单参数无效",
             "订单查询连续失败", "fetchorder() can only access",
+            "position side does not match", "-4061",
             "不是双向持仓模式", "long_short_mode",
             "min notional", "min_notional",
+            "小单被拒",
         ))
         if non_retriable:
             logger.warning(f"待触发单 {pending.id} 因不可恢复错误自动取消,防止循环触发: {err_msg}")
@@ -401,6 +414,7 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
         await notify(
             "error", "待触发单下单失败",
             f"KOL: {kol_name}\n"
+            f"交易所: {pending.exchange.upper()}\n"
             f"API账户: #{pending.exchange_account_id or '未知'}\n"
             f"挂单ID: {pending.id}\n"
             f"品种: {pending.symbol}\n方向: {_side_cn(pending.side)}\n"
@@ -444,9 +458,10 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
     await notify(
         "order", "挂单触发进场成功",
         f"KOL: {kol_name}\n"
+        f"交易所: {pending.exchange.upper()}\n"
         f"品种: {pending.symbol}\n方向: {_side_cn(pending.side)}\n"
         f"挂单ID: {pending.id}\n"
-        f"{order_manager._order_success_lines(action='挂单触发后市价进场成功', order=result.get('order'), requested_entry=pending.entry_price, trigger_price=trigger_price, notional_usdt=pending.notional_usdt, account_id=result.get('exchange_account_id') or pending.exchange_account_id, basis='监控价已触及目标入场价,触发后按市价单执行')}\n"
+        f"{order_manager._order_success_lines(action='挂单触发后市价进场成功', order=result.get('order'), requested_entry=pending.entry_price, trigger_price=trigger_price, notional_usdt=pending.notional_usdt, account_id=result.get('exchange_account_id') or pending.exchange_account_id, basis='监控价已触及目标入场价,触发后按市价单执行', exchange=pending.exchange)}\n"
         f"止盈:\n{tp_str}\n止损: {sl_str}\n"
         f"杠杆: {pending.leverage}x\n"
         f"持仓ID: {result.get('position_id')}\n订单ID: {result.get('order_id')}",
@@ -501,23 +516,12 @@ async def cleanup_expired_orders(db: AsyncSession) -> int:
         )
     ).scalars().all()
 
+    # 先提取通知所需信息,再commit,最后发通知
+    notify_list = []
     for pending in expired:
         pending.status = "expired"
         pending.cancel_reason = "已过期"
-        kol_name = await _get_kol_name(db, pending.kol_id)
-        tp_str, sl_str = _format_tp_sl(pending.tp_levels, pending.sl)
-        _src_text = await _get_signal_text(db, pending.signal_id)
-        await notify(
-            "order", "待触发单已过期",
-            f"KOL: {kol_name}\n"
-            f"品种: {pending.symbol}\n方向: {_side_cn(pending.side)}\n"
-            f"目标入场价: {pending.entry_price}\n"
-            f"止盈: {tp_str}\n止损: {sl_str}\n"
-            f"杠杆: {pending.leverage}x\n名义价值: {pending.notional_usdt} USDT\n"
-            f"已自动取消",
-            pending.customer_id,
-            source_text=_src_text,
-        )
+        notify_list.append(pending)
 
     if expired:
         try:
@@ -527,6 +531,26 @@ async def cleanup_expired_orders(db: AsyncSession) -> int:
             logger.error(f"数据库提交失败: {e}")
             raise
         logger.info(f"清理了 {len(expired)} 个过期待触发单")
+        # commit 成功后再发通知,避免 commit 失败时发出虚假通知
+        for pending in notify_list:
+            try:
+                kol_name = await _get_kol_name(db, pending.kol_id)
+                tp_str, sl_str = _format_tp_sl(pending.tp_levels, pending.sl)
+                _src_text = await _get_signal_text(db, pending.signal_id)
+                await notify(
+                    "order", "待触发单已过期",
+                    f"KOL: {kol_name}\n"
+                    f"交易所: {pending.exchange.upper()}\n"
+                    f"品种: {pending.symbol}\n方向: {_side_cn(pending.side)}\n"
+                    f"目标入场价: {pending.entry_price}\n"
+                    f"止盈: {tp_str}\n止损: {sl_str}\n"
+                    f"杠杆: {pending.leverage}x\n名义价值: {pending.notional_usdt} USDT\n"
+                    f"已自动取消",
+                    pending.customer_id,
+                    source_text=_src_text,
+                )
+            except Exception as notify_err:
+                logger.warning(f"过期通知发送失败 pending={pending.id}: {notify_err}")
 
     return len(expired)
 

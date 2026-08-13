@@ -7,7 +7,7 @@
 - 山寨币: SOL, DOGE, PEPE → 倍率 2.0 (波动大,但本金风险高)
 """
 
-from sqlalchemy import Float, Boolean, String
+from sqlalchemy import Numeric, Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -27,7 +27,7 @@ class SymbolNotionalConfig(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(50), unique=True)
     symbols: Mapped[str] = mapped_column(String(500), default="")
-    multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    multiplier: Mapped[float] = mapped_column(default=1.0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     note: Mapped[str] = mapped_column(String(200), default="")
 

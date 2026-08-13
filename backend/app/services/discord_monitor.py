@@ -68,7 +68,7 @@ from app.models.signal import Signal
 from app.models.trading import Position
 
 
-from app.services import order_manager, parser_shadow, signal_parser
+from app.services import order_manager, signal_parser
 
 
 from app.services.signal_parser import KolLLMConfig
@@ -513,18 +513,39 @@ async def _handle_message(
         # 提取 kol 属性到局部变量(避免 session 关闭后访问 ORM 对象触发懒加载)
         _kol_id = kol.id
         _kol_name = kol.name
-        _kol_min_confidence = getattr(kol, 'llm_min_confidence', 0.4) or 0.4
+        _kol_mc = getattr(kol, 'llm_min_confidence', None)
+        _kol_min_confidence = _kol_mc if _kol_mc is not None else 0.4
     # Phase 1 结束: DB 会话已关闭
 
     # Phase 2: LLM 调用(不占用 DB 会话,释放连接池资源)
-    parsed = await signal_parser.parse_message(
-        content,
-        image_url,
-        kol_config=kol_llm_config,
-        kol_name=_kol_name,
-        context=_llm_context,
-        recent_texts=_recent_texts,
-    )
+    # L-4修复: 解析失败时记录错误信号,不静默丢消息
+    try:
+        parsed = await signal_parser.parse_message(
+            content,
+            image_url,
+            kol_config=kol_llm_config,
+            kol_name=_kol_name,
+            context=_llm_context,
+            recent_texts=_recent_texts,
+        )
+    except Exception as parse_err:
+        logger.exception(f"信号解析失败 kol={_kol_name} msg={message_id}: {parse_err}")
+        async with AsyncSessionLocal() as db:
+            try:
+                err_signal = Signal(
+                    kol_id=_kol_id,
+                    discord_message_id=message_id,
+                    raw_text=content[:2000],
+                    image_url=image_url,
+                    parsed={},
+                    status="parse_error",
+                    correct_log=f"解析异常: {str(parse_err)[:500]}",
+                )
+                db.add(err_signal)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+        return
 
     # Phase 3: 创建信号记录并处理(使用新的 DB 会话)
     async with AsyncSessionLocal() as db:
@@ -549,22 +570,14 @@ async def _handle_message(
             confidence=parsed.confidence,
         )
         db.add(signal)
-        await db.commit()
-        await db.refresh(signal)
-
-        # 影子解析:旁路记录新旧解析差异,不参与真实下单决策。
-        await parser_shadow.record_shadow_parse(
-            db,
-            signal,
-            parsed,
-            kol_id=_kol_id,
-            discord_message_id=message_id,
-            raw_text=content,
-            image_url=image_url,
-            source="discord",
-            recent_texts=_recent_texts,
-            signal_received_at=now,
-        )
+        # M10修复: Signal入库添加try/except,防止commit失败导致信号丢失且无日志
+        try:
+            await db.commit()
+            await db.refresh(signal)
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"信号入库失败 kol={_kol_name} symbol={parsed.symbol}: {e}")
+            return
 
         # 广播信号事件(管理员/前端可见)
         await bus.publish("admin", "signal", {
@@ -596,7 +609,11 @@ async def _handle_message(
                 f"kol={_kol_name} symbol={parsed.symbol}"
             )
             signal.status = "ignored"
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                logger.warning(f"信号状态更新失败(ignored/置信度): {e}")
             _write_parser_diff_log(
                 kol_id=_kol_id,
                 kol_name=_kol_name,
@@ -628,7 +645,11 @@ async def _handle_message(
                 f"symbol={parsed.symbol} side={parsed.side}"
             )
             signal.status = "ignored"
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                logger.warning(f"信号状态更新失败(ignored/无效动作): {e}")
             _write_parser_diff_log(
                 kol_id=_kol_id,
                 kol_name=_kol_name,
@@ -719,9 +740,7 @@ async def _process_for_customer_sem(signal_id: int, customer_id: int) -> None:
                 logger.error(f"客户 {customer_id} 处理信号 {signal_id} 超时({PROCESS_TIMEOUT}s)")
             except Exception as e:
                 logger.exception(f"客户 {customer_id} 处理信号 {signal_id} 失败: {e}")
-        # 锁释放后清理:如果当前无人等待该锁,则从 dict 移除,避免内存泄漏
-        if not lock.locked() and not lock._waiters:
-            _customer_locks.pop(customer_id, None)
+        # 不清理锁,避免竞态条件;customer 数量有限,不会内存泄漏
 
 
 
@@ -940,6 +959,10 @@ async def _run_single_discord_account(account) -> None:
         heartbeat_task: "asyncio.Task | None" = None
 
 
+        # SC-S3 修复: watcher 也需在外层初始化,确保异常路径可清理
+        watcher: "asyncio.Task | None" = None
+
+
         try:
 
 
@@ -1066,8 +1089,7 @@ async def _run_single_discord_account(account) -> None:
                 reconnect_count = 0
 
 
-                consecutive_failures = 0
-
+                # SC-S1 修复: consecutive_failures 重置移至 READY/RESUMED 事件确认后
 
 
 
@@ -1162,6 +1184,8 @@ async def _run_single_discord_account(account) -> None:
                                 await _mark_discord_account_connected(account_id)
                                 _set_source_status(connected=True, state="ready", session_id=session_id or "", last_connected_at=_iso_now())
                                 logger.info(f"Discord READY: account={account_label}({account_id}) session_id={session_id}")
+                                # SC-S1 修复: 收到 READY 确认连接成功后才重置失败计数
+                                consecutive_failures = 0
                             # RESUMED 事件表示恢复成功,无需重新 IDENTIFY
 
 
@@ -1169,6 +1193,10 @@ async def _run_single_discord_account(account) -> None:
 
 
                                 logger.info("Discord RESUME 成功,已补齐遗漏消息")
+
+
+                                # SC-S1 修复: RESUME 成功也重置失败计数
+                                consecutive_failures = 0
 
 
                             elif t == "MESSAGE_CREATE":
@@ -1189,6 +1217,11 @@ async def _run_single_discord_account(account) -> None:
                             logger.info("Discord 要求重连")
 
 
+                            # SC-S2 修复: 递增失败计数并添加指数退避延迟
+                            consecutive_failures += 1
+                            await asyncio.sleep(min(2 ** consecutive_failures, 32))
+
+
                             break
 
 
@@ -1198,19 +1231,31 @@ async def _run_single_discord_account(account) -> None:
                             resumable = bool(payload.get("d"))
 
 
-                            logger.warning(f"Discord Invalid Session, resumable={resumable}")
+                            # SC-S1 修复: 递增失败计数
+                            consecutive_failures += 1
+                            logger.warning(f"Discord Invalid Session, resumable={resumable}, consecutive_failures={consecutive_failures}")
 
 
-                            # 不可恢复:清除 session_id,等待 1-5 秒后重新 IDENTIFY
+                            # SC-S1 修复: 超过最大重连次数则记录 CRITICAL 并停止重连
+                            if consecutive_failures >= MAX_RECONNECT_ATTEMPTS:
+                                logger.critical(
+                                    f"Discord Invalid Session 重连次数已达 {consecutive_failures} 次, "
+                                    f"超过最大重连限制 {MAX_RECONNECT_ATTEMPTS}, 停止重连: "
+                                    f"account={account_label}({account_id})"
+                                )
+                                _set_source_status(connected=False, state="fatal", last_error="重连次数超限,停止重连")
+                                return
 
 
+                            # 不可恢复:清除 session_id
                             if not resumable:
 
 
                                 session_id = None
 
 
-                            await asyncio.sleep(2)
+                            # SC-S1 修复: 使用指数退避替代固定 2 秒
+                            await asyncio.sleep(min(2 ** consecutive_failures, 32))
 
 
                             await ws.close()
@@ -1240,6 +1285,25 @@ async def _run_single_discord_account(account) -> None:
 
 
         except Exception as e:
+
+
+            # SC-S3 修复: 确保异常路径下 heartbeat_task 和 watcher 被清理
+            if heartbeat_task and not heartbeat_task.done():
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            if watcher and not watcher.done():
+                watcher.cancel()
+                try:
+                    await watcher
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
 
 
             reconnect_count += 1

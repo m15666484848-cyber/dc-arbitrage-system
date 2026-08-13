@@ -39,6 +39,25 @@ _LOOP_FACTORIES: dict[str, callable] = {
 WATCHDOG_INTERVAL = 60  # 看门狗检查间隔(秒)
 
 
+def _setup_scheduler_jobs(scheduler: AsyncIOScheduler) -> None:
+    """注册所有定时任务(replace_existing=True 防止重启后重复添加)。
+
+    S10修复:
+    - coalesce=True: 错过的多次执行合并为一次
+    - max_instances=1: 防止同一任务并发执行
+    - misfire_grace_time=300: 允许5分钟内的迟到执行
+    """
+    _job_kwargs = {"replace_existing": True, "coalesce": True, "max_instances": 1, "misfire_grace_time": 300}
+    scheduler.add_job(_equity_snapshot_job, "interval", minutes=5, id="equity_snapshot", **_job_kwargs)
+    scheduler.add_job(_daily_risk_snapshot_job, "interval", minutes=5, id="daily_risk_snapshot", **_job_kwargs)
+    scheduler.add_job(_auth_expire_job, "interval", hours=6, id="auth_expire", **_job_kwargs)
+    scheduler.add_job(_timeout_position_job, "interval", hours=1, id="timeout_position", **_job_kwargs)
+    scheduler.add_job(_tpsl_timeout_protection_job, "interval", minutes=30, id="tpsl_timeout_protection", **_job_kwargs)
+    scheduler.add_job(_kol_risk_check_job, "interval", minutes=10, id="kol_risk_check", **_job_kwargs)
+    scheduler.add_job(_reconciliation_job, "interval", minutes=10, id="reconciliation", **_job_kwargs)
+    scheduler.add_job(_data_archival_job, "interval", hours=24, id="data_archival", **_job_kwargs)
+
+
 
 
 
@@ -186,6 +205,19 @@ async def _auth_expire_job() -> None:
 
 
 
+
+
+async def _tpsl_timeout_protection_job() -> None:
+    """止盈止损超时分级保护: 每30分钟检查一次。"""
+    try:
+        async with AsyncSessionLocal() as db:
+            processed = await position_manager.check_and_apply_tpsl_timeout_protection(db)
+            if processed > 0:
+                logger.info(f"止盈止损超时保护任务完成: 处理 {processed} 个持仓")
+    except Exception as e:
+        logger.exception(f"止盈止损超时保护任务异常: {e}")
+
+
 async def _timeout_position_job() -> None:
 
     """超时持仓自动平仓(超过 48h 的持仓)。"""
@@ -271,6 +303,57 @@ async def _reconciliation_job() -> None:
         logger.exception(f"交易所对账任务异常: {e}")
 
 
+
+
+async def _data_archival_job() -> None:
+    """S10新增: 数据归档任务 - 清理超过90天的旧数据,保持数据库性能。
+
+    清理范围:
+    - equity_snapshots: 保留90天(高频写入,增长最快)
+    - alert_logs: 保留90天
+    - audit_logs: 保留180天(审计需要更长保留期)
+    - trades: 保留180天(成交流水,可能需要用于统计)
+    """
+    from sqlalchemy import delete, text
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import EquitySnapshot, AlertLog
+    from app.models.audit import AuditLog
+    from app.models.trading import Trade
+
+    cutoff_90 = datetime.now(timezone.utc) - timedelta(days=90)
+    cutoff_180 = datetime.now(timezone.utc) - timedelta(days=180)
+
+    try:
+        async with AsyncSessionLocal() as db:
+            # 清理旧净值快照(高频写入,增长最快)
+            result1 = await db.execute(
+                delete(EquitySnapshot).where(EquitySnapshot.snapshot_at < cutoff_90)
+            )
+            # 清理旧告警日志
+            result2 = await db.execute(
+                delete(AlertLog).where(AlertLog.created_at < cutoff_90)
+            )
+            # 清理旧审计日志(保留180天)
+            result3 = await db.execute(
+                delete(AuditLog).where(AuditLog.created_at < cutoff_180)
+            )
+            # 清理旧成交流水(保留180天)
+            result4 = await db.execute(
+                delete(Trade).where(Trade.executed_at < cutoff_180)
+            )
+            await db.commit()
+
+            total = result1.rowcount + result2.rowcount + result3.rowcount + result4.rowcount
+            if total > 0:
+                logger.info(
+                    f"[数据归档] 清理完成: equity_snapshots={result1.rowcount}, "
+                    f"alert_logs={result2.rowcount}, audit_logs={result3.rowcount}, "
+                    f"trades={result4.rowcount}"
+                )
+    except Exception as e:
+        logger.exception(f"数据归档任务异常: {e}")
+
 async def _watchdog() -> None:
 
     """看门狗:定期检查后台循环是否存活,意外退出则自动重启。
@@ -301,13 +384,13 @@ async def _watchdog() -> None:
 
                         exc = task.exception() if not task.cancelled() else None
 
-                        logger.error(f"后台循环 {name} 已退出,异常={exc},准备重启")
+                        logger.info(f"后台循环 {name} 已退出(正常取消),准备重启") if exc is None else logger.error(f"后台循环 {name} 异常退出,异常={exc},准备重启")
 
                     new_task = asyncio.create_task(factory(), name=f"loop:{name}")
 
                     new_task.add_done_callback(
 
-                        lambda t, n=name: logger.error(f"后台循环 {n} 退出: cancelled={t.cancelled()} exc={t.exception() if not t.cancelled() else None}")
+                        lambda t, n=name: logger.info(f"后台循环 {n} 退出: cancelled={t.cancelled()} exc={t.exception() if not t.cancelled() else None}") if t.cancelled() else logger.error(f"后台循环 {n} 异常退出: exc={t.exception()}")
 
                     )
 
@@ -323,8 +406,10 @@ async def _watchdog() -> None:
         if _scheduler and not _scheduler.running:
             logger.error("APScheduler 已停止运行,准备重启")
             try:
+                # S6修复: 重启时重新注册定时任务,防止任务丢失
+                _setup_scheduler_jobs(_scheduler)
                 _scheduler.start()
-                logger.info("APScheduler 重启成功")
+                logger.info("APScheduler 重启成功,定时任务已重新注册")
             except Exception as e:
                 logger.error(f"APScheduler 重启失败: {e}")
         await asyncio.sleep(WATCHDOG_INTERVAL)
@@ -337,6 +422,15 @@ async def start_background_tasks() -> None:
 
     """应用启动时调用:启动所有后台循环与定时任务。"""
 
+    
+    # 启动时加载币种分类缓存
+    try:
+        from app.services.signal_filter import refresh_coin_tier_cache
+        await refresh_coin_tier_cache()
+        logger.info("币种分类缓存已加载")
+    except Exception as e:
+        logger.warning(f"加载币种分类缓存失败: {e}")
+
     global _scheduler, _watchdog_task
 
     # 后台循环(保留引用防止 GC,并供看门狗监控)
@@ -347,7 +441,7 @@ async def start_background_tasks() -> None:
 
         _background_tasks[name].add_done_callback(
 
-            lambda t, n=name: logger.error(f"后台循环 {n} 退出: cancelled={t.cancelled()} exc={t.exception() if not t.cancelled() else None}")
+            lambda t, n=name: logger.info(f"后台循环 {n} 退出: cancelled={t.cancelled()} exc={t.exception() if not t.cancelled() else None}") if t.cancelled() else logger.error(f"后台循环 {n} 异常退出: exc={t.exception()}")
 
         )
 
@@ -355,17 +449,12 @@ async def start_background_tasks() -> None:
 
     # 定时任务
 
-    _scheduler = AsyncIOScheduler()
+    _scheduler = AsyncIOScheduler(
+        job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 300},
+    )
 
-    _scheduler.add_job(_equity_snapshot_job, "interval", minutes=5, id="equity_snapshot")
-    _scheduler.add_job(_daily_risk_snapshot_job, "interval", minutes=5, id="daily_risk_snapshot")
+    _setup_scheduler_jobs(_scheduler)
 
-    _scheduler.add_job(_auth_expire_job, "interval", hours=6, id="auth_expire")
-
-    _scheduler.add_job(_timeout_position_job, "interval", hours=1, id="timeout_position")
-
-    _scheduler.add_job(_kol_risk_check_job, "interval", minutes=10, id="kol_risk_check")
-    _scheduler.add_job(_reconciliation_job, "interval", minutes=10, id="reconciliation")
     _scheduler.start()
 
 
@@ -374,7 +463,7 @@ async def start_background_tasks() -> None:
 
     _watchdog_task = asyncio.create_task(_watchdog(), name="watchdog")
 
-    logger.info("后台任务已启动(Discord 监听 / 持仓监控 / 待触发单监控 / 止损监控(1秒级) / 净值快照 / 日风控快照 / 授权预警 / 超时平仓 / KOL风控 / 交易所对账(10分钟) / 看门狗)")
+    logger.info("后台任务已启动(Discord 监听 / 持仓监控 / 待触发单监控 / 止损监控(1秒级) / 净值快照 / 日风控快照 / 授权预警 / 超时平仓 / KOL风控 / 交易所对账(10分钟) / 数据归档(24小时) / 看门狗)")
 
 
 
@@ -431,6 +520,13 @@ async def stop_background_tasks() -> None:
                 pass
 
         _background_tasks.pop(name, None)
+
+    # S11新增: 清理公开行情交易所实例
+    try:
+        from app.services.exchange_adapter import close_all_public_exchanges
+        await close_all_public_exchanges()
+    except Exception as e:
+        logger.warning(f"清理公开行情交易所实例失败: {e}")
 
     logger.info("后台任务已全部停止")
 

@@ -12,7 +12,7 @@ export default function SettingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-bold gradient-text flex items-center gap-2">交易设置</h1>
-        <p className="text-sm text-slate-500 mt-1">交易所账号 · 风控静默时段 · 品种倍率 · 告警查看 · 高级风控 · 邀请</p>
+        <p className="text-sm text-slate-500 mt-1">交易所账号 · 风控静默时段 · 品种倍率 · 告警查看 · KOL风控 · 邀请</p>
       </div>
       <div className="flex gap-2 flex-wrap">
         {[
@@ -20,7 +20,7 @@ export default function SettingsPage() {
           { k: "templates", label: "推荐模板", icon: Save },
           { k: "risk", label: "风控/静默时段", icon: Clock },
           { k: "multiplier", label: "品种倍率", icon: Gauge },
-          { k: "advanced", label: "高级风控", icon: Shield },
+          { k: "advanced", label: "KOL风控", icon: Shield },
           { k: "alert", label: "告警查看", icon: Bell },
           { k: "invite", label: "邀请推广", icon: Gift },
           { k: "security", label: "修改密码", icon: Lock },
@@ -52,117 +52,204 @@ function MultiplierTab() {
   const { push } = useToast();
   const list: any[] = data || [];
   const customList: any[] = customData || [];
-  const [drafts, setDrafts] = useState<Map<number, number>>(new Map());
+  const [saving, setSaving] = useState(false);
+  const [editMap, setEditMap] = useState<Record<number, { name: string; symbols: string; multiplier: string; note: string }>>({});
+  const [showAdd, setShowAdd] = useState(false);
+  const [newCat, setNewCat] = useState({ name: "", symbols: "", multiplier: "1.0", note: "" });
 
-  const getMultiplier = (cfg: any) => drafts.get(cfg.id) ?? cfg.multiplier;
-
-  const onChange = (id: number, v: number) => {
-    setDrafts((prev) => new Map(prev).set(id, v));
+  const startEdit = (cfg: any) => {
+    setEditMap({ ...editMap, [cfg.id]: {
+      name: cfg.name,
+      symbols: cfg.symbols || "",
+      multiplier: String(cfg.multiplier ?? cfg.default_multiplier ?? 1),
+      note: cfg.note || "",
+    } });
   };
 
-  const save = async () => {
-    try {
-      const updates: { config_id: number; multiplier: number }[] = [];
-      for (const cfg of list) {
-        if (drafts.has(cfg.id)) {
-          updates.push({ config_id: cfg.id, multiplier: drafts.get(cfg.id)! });
-        }
-      }
-      if (updates.length === 0) {
-        push("info", "没有需要保存的修改");
-        return;
-      }
-      await API.setSymbolMultipliers(updates);
-      push("success", `已保存 ${updates.length} 个分类倍率`);
-      setDrafts(new Map());
-      reload();
-    } catch (e: any) {
-      push("error", e?.response?.data?.message || "保存失败");
-    }
+  const cancelEdit = (id: number) => {
+    const m = { ...editMap };
+    delete m[id];
+    setEditMap(m);
   };
 
-  const reset = async (config_id: number) => {
+  const saveEdit = async (id: number) => {
+    const ed = editMap[id];
+    if (!ed) return;
+    if (!ed.name.trim()) { push("error", "分类名称不能为空"); return; }
+    const mult = parseFloat(ed.multiplier);
+    if (isNaN(mult) || mult <= 0) { push("error", "倍率必须大于0"); return; }
+    setSaving(true);
     try {
-      await API.resetSymbolMultiplier(config_id);
-      setDrafts((prev) => {
-        const n = new Map(prev);
-        n.delete(config_id);
-        return n;
+      await API.updateSymbolCategory(id, {
+        name: ed.name.trim(),
+        symbols: ed.symbols.trim(),
+        multiplier: mult,
+        note: ed.note.trim(),
       });
-      push("success", "已重置为默认值");
+      const m = { ...editMap };
+      delete m[id];
+      setEditMap(m);
+      push("success", "分类已更新");
       reload();
     } catch (e: any) {
-      push("error", e?.response?.data?.message || "重置失败");
+      push("error", e?.response?.data?.detail || e?.message || "保存失败");
     }
+    setSaving(false);
   };
 
-  const hasChanges = drafts.size > 0;
+  const deleteCat = async (id: number, name: string) => {
+    if (!confirm(`确认删除分类「${name}」？\n该分类下所有币种将归入其他分类。`)) return;
+    setSaving(true);
+    try {
+      await API.deleteSymbolCategory(id);
+      push("success", "分类已删除");
+      reload();
+    } catch (e: any) {
+      push("error", e?.response?.data?.detail || e?.message || "删除失败");
+    }
+    setSaving(false);
+  };
+
+  const addCat = async () => {
+    if (!newCat.name.trim()) { push("error", "分类名称不能为空"); return; }
+    const mult = parseFloat(newCat.multiplier);
+    if (isNaN(mult) || mult <= 0) { push("error", "倍率必须大于0"); return; }
+    setSaving(true);
+    try {
+      await API.createSymbolCategory({
+        name: newCat.name.trim(),
+        symbols: newCat.symbols.trim(),
+        multiplier: mult,
+        note: newCat.note.trim(),
+      });
+      setNewCat({ name: "", symbols: "", multiplier: "1.0", note: "" });
+      setShowAdd(false);
+      push("success", "分类已创建");
+      reload();
+    } catch (e: any) {
+      push("error", e?.response?.data?.detail || e?.message || "创建失败");
+    }
+    setSaving(false);
+  };
 
   return (
     <div className="space-y-4">
       <Card>
-        <CardTitle action={hasChanges ? <Button onClick={save}>保存修改</Button> : null}>
+        <CardTitle action={
+          <Button onClick={() => setShowAdd(!showAdd)} variant="ghost">
+            {showAdd ? "取消" : "+ 添加分类"}
+          </Button>
+        }>
           品种分类倍率
         </CardTitle>
         <p className="text-xs text-slate-500 mb-4">
-          每个品种分类可独立设置跟单金额倍率。最终下单金额 = 策略金额 × 倍率。未设置时使用管理员默认值。
+          按币种类型设置跟单金额倍率。留空的分类为兜底分类（所有未匹配币种归入）。最终下单金额 = 策略金额 × 倍率。
         </p>
-        <div className="space-y-3">
+
+        {/* 添加新分类 */}
+        {showAdd && (
+          <div className="mb-4 p-3 rounded-xl bg-slate-800/50 border border-slate-600 space-y-2">
+            <div className="grid grid-cols-4 gap-2">
+              <Input
+                placeholder="分类名称"
+                value={newCat.name}
+                onChange={(e) => setNewCat({ ...newCat, name: e.target.value })}
+                className="col-span-1"
+              />
+              <Input
+                placeholder="币种 (逗号分隔, 留空=兜底)"
+                value={newCat.symbols}
+                onChange={(e) => setNewCat({ ...newCat, symbols: e.target.value })}
+                className="col-span-2"
+              />
+              <Input
+                type="number"
+                step="0.1"
+                placeholder="倍率"
+                value={newCat.multiplier}
+                onChange={(e) => setNewCat({ ...newCat, multiplier: e.target.value })}
+                className="col-span-1 text-center font-mono"
+              />
+            </div>
+            <div className="flex gap-2">
+              <Input
+                placeholder="备注 (可选)"
+                value={newCat.note}
+                onChange={(e) => setNewCat({ ...newCat, note: e.target.value })}
+                className="flex-1"
+              />
+              <Button onClick={addCat} disabled={saving}>创建</Button>
+            </div>
+          </div>
+        )}
+
+        {/* 分类列表 */}
+        <div className="space-y-2">
           {list.map((cfg) => {
-            const current = getMultiplier(cfg);
-            const changed = drafts.has(cfg.id);
+            const isEditing = !!editMap[cfg.id];
+            const ed = editMap[cfg.id];
+            const isFallback = !cfg.symbols;
             return (
-              <div key={cfg.id} className="glass-soft p-3 rounded-xl">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-medium text-slate-100">{cfg.name}</span>
-                      <div className="flex gap-1 flex-wrap">
-                        {cfg.symbols?.split(",").filter(Boolean).map((s: string) => (
-                          <Badge key={s} tone="accent" className="!py-0 !px-1.5 !text-[10px]">{s.trim()}</Badge>
-                        ))}
-                        {!cfg.symbols && <Badge tone="default" className="!py-0 !px-1.5 !text-[10px]">所有其他</Badge>}
-                      </div>
-                      {cfg.customer_override && !changed && (
-                        <Badge tone="accent" className="!py-0 !px-1.5 !text-[10px]">自定义</Badge>
-                      )}
-                      {changed && (
-                        <Badge tone="warn" className="!py-0 !px-1.5 !text-[10px]">待保存</Badge>
-                      )}
-                    </div>
-                    <div className="text-xs text-slate-500 mt-1">{cfg.note || "—"}</div>
-                    <div className="text-xs text-slate-600 mt-0.5">
-                      默认: <span className="font-mono">{cfg.default_multiplier}x</span>
-                      {changed && <span className="text-accent-glow"> → 修改为: <span className="font-mono font-bold">{current}x</span></span>}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="flex items-center gap-1">
+              <div key={cfg.id} className={`glass-soft p-3 rounded-xl ${isEditing ? "border border-accent" : ""}`}>
+                {isEditing && ed ? (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-4 gap-2">
+                      <Input
+                        value={ed.name}
+                        onChange={(e) => setEditMap({ ...editMap, [cfg.id]: { ...ed, name: e.target.value } })}
+                        className="col-span-1"
+                        placeholder="分类名称"
+                      />
+                      <Input
+                        value={ed.symbols}
+                        onChange={(e) => setEditMap({ ...editMap, [cfg.id]: { ...ed, symbols: e.target.value } })}
+                        className="col-span-2"
+                        placeholder="币种 (逗号分隔, 留空=兜底)"
+                      />
                       <Input
                         type="number"
                         step="0.1"
-                        min="0.01"
-                        max="100"
-                        value={current}
-                        onChange={(e) => onChange(cfg.id, parseFloat(e.target.value) || 1.0)}
-                        className="w-20 text-center font-mono"
+                        value={ed.multiplier}
+                        onChange={(e) => setEditMap({ ...editMap, [cfg.id]: { ...ed, multiplier: e.target.value } })}
+                        className="col-span-1 text-center font-mono"
                       />
-                      <span className="text-slate-500 text-sm">x</span>
                     </div>
-                    {(cfg.customer_override || changed) && (
-                      <button
-                        onClick={() => reset(cfg.id)}
-                        className="p-1.5 text-slate-400 hover:text-accent-glow"
-                        title="重置为默认值"
-                      >
-                        <RotateCcw size={14} />
-                      </button>
-                    )}
+                    <Input
+                      value={ed.note}
+                      onChange={(e) => setEditMap({ ...editMap, [cfg.id]: { ...ed, note: e.target.value } })}
+                      placeholder="备注 (可选)"
+                    />
+                    <div className="flex gap-2 justify-end">
+                      <Button variant="ghost" onClick={() => cancelEdit(cfg.id)}>取消</Button>
+                      <Button onClick={() => saveEdit(cfg.id)} disabled={saving}>保存</Button>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-medium text-slate-100">{cfg.name}</span>
+                        <span className="text-xs text-accent-glow font-mono">{cfg.multiplier ?? cfg.default_multiplier}x</span>
+                        {isFallback && <Badge tone="default" className="!py-0 !px-1.5 !text-[10px]">兜底</Badge>}
+                        {cfg.customer_override && <Badge tone="accent" className="!py-0 !px-1.5 !text-[10px]">已自定义</Badge>}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5 truncate">
+                        {cfg.symbols ? cfg.symbols : "所有未匹配的币种"}
+                        {cfg.note ? ` · ${cfg.note}` : ""}
+                      </div>
+                    </div>
+                    <div className="flex gap-1 shrink-0">
+                      <Button variant="ghost" onClick={() => startEdit(cfg)} className="!px-2 !py-1 !text-xs">编辑</Button>
+                      <Button variant="ghost" onClick={() => deleteCat(cfg.id, cfg.name)} disabled={saving} className="!px-2 !py-1 !text-xs !text-red-400">删除</Button>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
+          {list.length === 0 && (
+            <div className="text-center py-6 text-slate-500 text-sm">暂无分类，点击「添加分类」创建</div>
+          )}
         </div>
       </Card>
 
@@ -171,17 +258,6 @@ function MultiplierTab() {
         reload={reloadCustom}
         push={push}
       />
-
-      <div className="glass p-4 rounded-xl border border-border-soft">
-        <h3 className="text-sm font-semibold text-slate-300 mb-2">计算示例</h3>
-        <div className="text-xs text-slate-500 space-y-1">
-          <div>策略基础金额: <span className="font-mono text-accent-glow">100 USDT</span></div>
-          <div>BTC 信号 (主流币 0.5x): <span className="font-mono text-accent-glow">100 × 0.5 = 50 USDT</span></div>
-          <div>DOGE 信号 (山寨币 2.0x): <span className="font-mono text-accent-glow">100 × 2.0 = 200 USDT</span></div>
-          <div>XAU 信号 (贵金属 1.0x): <span className="font-mono text-accent-glow">100 × 1.0 = 100 USDT</span></div>
-          <div className="text-accent-glow mt-1">SKHY 信号 (自定义 5.0x): <span className="font-mono text-accent-glow">100 × 5.0 = 500 USDT</span></div>
-        </div>
-      </div>
     </div>
   );
 }
@@ -466,6 +542,8 @@ function ExchangeTab() {
     max_order_usdt: 0,
     strategy_id: null as number | null,
   });
+  // 只显示3类加密货币分类: 主流币/中型币/山寨币
+  const CRYPTO_CATEGORIES = ["主流币", "中型币", "山寨币"];
   const list: any[] = data || [];
   const strategies: any[] = Array.isArray(strategiesData) ? strategiesData : [];
   const positions: any[] = Array.isArray(positionsData) ? positionsData : [];
@@ -1132,17 +1210,12 @@ function AdvancedRiskTab() {
     max_daily_loss_pct: 10,
     per_kol_max_usdt: 0,
     enabled: true,
-    position_timeout_hours: 72,
     consecutive_loss_threshold: 3,
     consecutive_loss_pause_hours: 24,
     kol_frequency_per_hour: 20,
-    auto_stop_loss_pct: 5.0,
-    enable_trailing_stop: false,
-    trailing_callback_pct: 1.0,
   });
   const [loaded, setLoaded] = useState(false);
 
-  // 同步后端数据到本地 state(useEffect,避免渲染期间 setState 警告)
   useEffect(() => {
     if (data && !loaded) {
       const server = Array.isArray(data) ? data[0] : data;
@@ -1158,7 +1231,7 @@ function AdvancedRiskTab() {
   const save = async () => {
     try {
       await API.upsertRiskConfig(f);
-      push("success", "高级风控配置已保存");
+      push("success", "KOL风控配置已保存");
       reload();
     } catch (e: any) {
       push("error", e?.response?.data?.message || "保存失败");
@@ -1167,58 +1240,20 @@ function AdvancedRiskTab() {
 
   return (
     <div className="space-y-4">
-      {/* 持仓超时自动平仓 */}
-      <Card>
-        <CardTitle>
-          <div className="flex items-center gap-2">
-            <Timer size={16} className="text-accent-glow" />
-            <span>持仓超时自动平仓</span>
-          </div>
-        </CardTitle>
-        <div className="space-y-3">
-          <p className="text-xs text-slate-500">
-            KOL 发出开仓信号后,如果长时间未补止盈止损,持仓超过设定时长后自动平仓,防止资金长期占用。
-          </p>
-          <div className="glass-soft p-3 rounded-xl">
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex-1">
-                <div className="text-sm text-slate-200">持仓超时时间</div>
-                <div className="text-xs text-slate-500 mt-0.5">
-                  0 = 禁用此功能。推荐 24-72 小时。
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="number"
-                  min="0"
-                  max="240"
-                  value={f.position_timeout_hours}
-                  onChange={(e) => update("position_timeout_hours", Number(e.target.value))}
-                  className="w-24 text-center font-mono"
-                />
-                <span className="text-slate-500 text-sm">小时</span>
-              </div>
-            </div>
-            <div className="flex gap-2 mt-2">
-              {[0, 24, 48, 72].map((h) => (
-                <button
-                  key={h}
-                  onClick={() => update("position_timeout_hours", h)}
-                  className={`text-xs px-2 py-1 rounded ${
-                    f.position_timeout_hours === h
-                      ? "bg-accent text-white"
-                      : "bg-bg-hover text-slate-400"
-                  }`}
-                >
-                  {h === 0 ? "禁用" : `${h}h`}
-                </button>
-              ))}
-            </div>
+      {/* 提示: 持仓级风控已迁移到策略管理 */}
+      <div className="glass-soft p-3 rounded-xl border border-accent/30">
+        <div className="flex items-start gap-2">
+          <Shield size={16} className="text-accent-glow mt-0.5 shrink-0" />
+          <div className="text-xs text-slate-400 leading-relaxed">
+            <span className="text-slate-300 font-medium">持仓级风控已统一到「策略管理」</span>
+            <br />
+            追踪止损 · 缺失止损补充 · 持仓超时保护 · 硬止损上限 — 请在策略管理页面按策略单独配置。
+            本页仅保留 KOL 级别风控（连亏暂停 · 信号频率）。
           </div>
         </div>
-      </Card>
+      </div>
 
-      {/* 连亏暂停风控 */}
+      {/* KOL 连亏暂停风控 */}
       <Card>
         <CardTitle>
           <div className="flex items-center gap-2">
@@ -1265,7 +1300,7 @@ function AdvancedRiskTab() {
         </div>
       </Card>
 
-      {/* KOL 频率限制 */}
+      {/* KOL 信号频率限制 */}
       <Card>
         <CardTitle>
           <div className="flex items-center gap-2">
@@ -1299,110 +1334,10 @@ function AdvancedRiskTab() {
         </div>
       </Card>
 
-      {/* 自动止损补充 */}
-      <Card>
-        <CardTitle>
-          <div className="flex items-center gap-2">
-            <Shield size={16} className="text-accent-glow" />
-            <span>自动止损补充</span>
-          </div>
-        </CardTitle>
-        <div className="space-y-3">
-          <p className="text-xs text-slate-500">
-            KOL 未设置止损的持仓,系统自动按入场价下跌/上涨一定百分比补充止损,防止裸奔仓位。
-          </p>
-          <div className="glass-soft p-3 rounded-xl">
-            <div className="flex items-center justify-between gap-4">
-              <div className="flex-1">
-                <div className="text-sm text-slate-200">默认止损百分比</div>
-                <div className="text-xs text-slate-500 mt-0.5">
-                  0 = 禁用。多单止损 = 入场价 × (1 - %);空单相反。
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="number"
-                  step="0.5"
-                  min="0"
-                  max="50"
-                  value={f.auto_stop_loss_pct}
-                  onChange={(e) => update("auto_stop_loss_pct", Number(e.target.value))}
-                  className="w-24 text-center font-mono"
-                />
-                <span className="text-slate-500 text-sm">%</span>
-              </div>
-            </div>
-            <div className="flex gap-2 mt-2">
-              {[0, 3, 5, 8, 10].map((p) => (
-                <button
-                  key={p}
-                  onClick={() => update("auto_stop_loss_pct", p)}
-                  className={`text-xs px-2 py-1 rounded ${
-                    f.auto_stop_loss_pct === p
-                      ? "bg-accent text-white"
-                      : "bg-bg-hover text-slate-400"
-                  }`}
-                >
-                  {p === 0 ? "禁用" : `${p}%`}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      </Card>
-
-      {/* 追踪止损 */}
-      <Card>
-        <CardTitle>
-          <div className="flex items-center gap-2">
-            <RotateCcw size={16} className="text-accent-glow" />
-            <span>追踪止损(Trailing Stop)</span>
-          </div>
-        </CardTitle>
-        <div className="space-y-3">
-          <p className="text-xs text-slate-500">
-            盈利时自动上移止损价,锁定利润。价格回撤超过设定比例时触发平仓。
-          </p>
-          <label className="flex items-center gap-2 text-sm text-slate-300 glass-soft p-3 rounded-xl cursor-pointer">
-            <input
-              type="checkbox"
-              className="accent-accent w-4 h-4"
-              checked={f.enable_trailing_stop}
-              onChange={(e) => update("enable_trailing_stop", e.target.checked)}
-            />
-            <span>启用追踪止损</span>
-          </label>
-          {f.enable_trailing_stop && (
-            <div className="glass-soft p-3 rounded-xl">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex-1">
-                  <div className="text-sm text-slate-200">回撤触发比例</div>
-                  <div className="text-xs text-slate-500 mt-0.5">
-                    从最高盈利点回撤此比例时平仓。推荐 0.5%-3%。
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    step="0.1"
-                    min="0.1"
-                    max="20"
-                    value={f.trailing_callback_pct}
-                    onChange={(e) => update("trailing_callback_pct", Number(e.target.value))}
-                    className="w-24 text-center font-mono"
-                  />
-                  <span className="text-slate-500 text-sm">%</span>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </Card>
-
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={reload}>重置</Button>
         <Button onClick={save}>
-          <Shield size={15} /> 保存高级风控配置
+          <Shield size={15} /> 保存KOL风控配置
         </Button>
       </div>
     </div>

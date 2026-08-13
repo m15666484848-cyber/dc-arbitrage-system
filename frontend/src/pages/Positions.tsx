@@ -10,6 +10,39 @@ import { useAccountFilterStore } from "@/stores/accountFilter";
 import { Modal } from "@/components/ui/Modal";
 import { fmtMoney, fmtPct, pnlColor } from "@/lib/utils";
 
+
+// 交易所彩色徽章
+const EXCHANGE_COLORS: Record<string, string> = {
+  okx: "text-blue-400 border-blue-500/30 bg-blue-500/10",
+  binance: "text-yellow-400 border-yellow-500/30 bg-yellow-500/10",
+  bybit: "text-orange-400 border-orange-500/30 bg-orange-500/10",
+};
+const ExchangeBadge = React.memo(function ExchangeBadge({ exchange, accountName }: { exchange?: string; accountName?: string }) {
+  if (!exchange) return null;
+  const colorClass = EXCHANGE_COLORS[exchange.toLowerCase()] || "text-slate-400 border-slate-500/30 bg-slate-500/10";
+  const label = exchange.toUpperCase();
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold border ${colorClass}`}>
+      {label}
+    </span>
+  );
+});
+
+// 持仓时长格式化
+function fmtDuration(openedAt: string | null | undefined): string {
+  if (!openedAt) return "—";
+  const now = Date.now();
+  const opened = new Date(openedAt).getTime();
+  const diffMs = now - opened;
+  if (diffMs < 0) return "—";
+  const hours = Math.floor(diffMs / 3600000);
+  const days = Math.floor(hours / 24);
+  if (days > 0) return `${days}天${hours % 24}h`;
+  if (hours > 0) return `${hours}h${Math.floor((diffMs % 3600000) / 60000)}m`;
+  const mins = Math.floor(diffMs / 60000);
+  return `${mins}m`;
+}
+
 const StopBadges = React.memo(function StopBadges({ p }: { p: any }) {
   const tpLevels = Array.isArray(p.tp_levels) ? p.tp_levels : [];
   const hitTpCount = tpLevels.filter((tp: any) => tp?.status === "hit").length;
@@ -17,12 +50,27 @@ const StopBadges = React.memo(function StopBadges({ p }: { p: any }) {
     <div className="flex flex-col items-center gap-1">
       {p.sl && <span className="text-xs font-mono text-loss">{fmtMoney(p.sl, 4)}</span>}
       {p.breakeven_moved && (
-        <Badge tone="accent"><ShieldCheck size={10} /> 成本保护</Badge>
+        <Badge tone="accent"><ShieldCheck size={10} /> 已触发</Badge>
       )}
       {tpLevels.length > 0 && (
         <Badge tone="profit"><Target size={10} /> TP {hitTpCount}/{tpLevels.length}</Badge>
       )}
       {p.trailing_stop && <Badge tone="warn"><TrendingUp size={10} /> 追踪</Badge>}
+      {p.tp_sl_source === "default" && (
+        <Badge tone="warn"><ShieldAlert size={10} /> 系统</Badge>
+      )}
+      {p.tp_sl_source === "timeout" && (
+        <Badge tone="loss"><AlertTriangle size={10} /> 超时</Badge>
+      )}
+      {p.timeout_phase === 1 && (
+        <Badge tone="warn"><Clock size={10} /> 4h追踪</Badge>
+      )}
+      {p.timeout_phase === 2 && (
+        <Badge tone="warn"><Clock size={10} /> 24h收紧</Badge>
+      )}
+      {p.timeout_phase === 3 && (
+        <Badge tone="loss"><Clock size={10} /> 72h告警</Badge>
+      )}
     </div>
   );
 });
@@ -378,6 +426,7 @@ export default function PositionsPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
+                        <ExchangeBadge exchange={o.exchange} />
                         <Badge tone={o.side === "long" ? "profit" : "loss"}>{o.side}</Badge>
                         <span className="font-mono text-base font-bold text-slate-100">{o.symbol}</span>
                         <Badge tone="warn" className="text-[10px] gap-1"><Clock size={10} /> 等待触发</Badge>
@@ -387,7 +436,14 @@ export default function PositionsPage() {
                           </Badge>
                         )}
                       </div>
-                      <div className="grid grid-cols-2 md:grid-cols-6 gap-3 mt-3 text-xs">
+                      <div className="grid grid-cols-2 md:grid-cols-7 gap-3 mt-3 text-xs">
+                        <div>
+                          <div className="text-slate-500">交易所/账户</div>
+                          <div className="flex items-center gap-1">
+                            <ExchangeBadge exchange={o.exchange} />
+                            <span className="text-slate-300 truncate text-[11px]">{o.exchange_account_name || "#" + (o.exchange_account_id || "?")}</span>
+                          </div>
+                        </div>
                         <div>
                           <div className="text-slate-500">KOL</div>
                           <div className="text-slate-300 truncate">{o.kol_name || "未知"}</div>
@@ -454,6 +510,7 @@ export default function PositionsPage() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
+                      <ExchangeBadge exchange={master.exchange} />
                       <Badge tone={master.side === "long" ? "profit" : "loss"} className="text-xs">
                         {master.side}
                       </Badge>
@@ -465,7 +522,7 @@ export default function PositionsPage() {
                       <span className="text-xs text-slate-500">· {subs.length} 个子仓位</span>
                     </div>
                     <div className="text-xs text-slate-500 mt-1">
-                      入场 {fmtMoney(master.entry_price, 4)} · 现价 {fmtMoney(master.current_price, 4)} · 总量 {fmtMoney(master.qty, 4)}
+                      {master.exchange_account_name || "#" + (master.exchange_account_id || "?")} · 入场 {fmtMoney(master.entry_price, 4)} · 现价 {fmtMoney(master.current_price, 4)} · 总量 {fmtMoney(master.qty, 4)}
                     </div>
                     <div className="mt-2">
                       <ProtectionBadges p={master} compact />
@@ -500,7 +557,8 @@ export default function PositionsPage() {
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="text-xs text-slate-500 border-b border-border/50">
-                            <th className="text-left py-2 px-2">KOL</th>
+                            <th className="text-left py-2 px-2">交易所/账户</th>
+                            <th className="text-left px-2">KOL</th>
                             <th className="text-right px-2">入场价</th>
                             <th className="text-right px-2">数量</th>
                             <th className="text-right px-2">未实现盈亏</th>
@@ -512,7 +570,14 @@ export default function PositionsPage() {
                         <tbody>
                           {subs.map((sub) => (
                             <tr key={sub.id} className="border-b border-border/30 hover:bg-bg-hover/30">
-                              <td className="py-2 px-2 text-slate-300">{sub.kol_name || "未知"}</td>
+                              <td className="py-2 px-2">
+                                <div className="flex flex-col gap-0.5">
+                                  <ExchangeBadge exchange={sub.exchange} />
+                                  <span className="text-[10px] text-slate-500 truncate max-w-[100px]">{sub.exchange_account_name || "#" + (sub.exchange_account_id || "?")}</span>
+                                  <span className="text-[9px] text-slate-600 font-mono">#{sub.id}</span>
+                                </div>
+                              </td>
+                              <td className="px-2 text-slate-300">{sub.kol_name || "未知"}</td>
                               <td className="px-2 text-right font-mono text-slate-300">{fmtMoney(sub.entry_price, 4)}</td>
                               <td className="px-2 text-right font-mono text-slate-300">{fmtMoney(sub.qty, 4)}</td>
                               <td className={`px-2 text-right font-mono font-semibold ${pnlColor(sub.unrealized_pnl)}`}>
@@ -523,6 +588,15 @@ export default function PositionsPage() {
                                 {sub.sl && <span className="text-xs font-mono text-loss">{fmtMoney(sub.sl, 4)}</span>}
                                 {sub.trailing_stop && (
                                   <Badge tone="warn" className="text-[10px] ml-1"><TrendingUp size={9} /> 追踪</Badge>
+                                )}
+                                {sub.tp_sl_source === "default" && (
+                                  <Badge tone="warn" className="text-[10px] ml-1"><ShieldAlert size={9} /> 系统</Badge>
+                                )}
+                                {sub.tp_sl_source === "timeout" && (
+                                  <Badge tone="loss" className="text-[10px] ml-1"><AlertTriangle size={9} /> 超时</Badge>
+                                )}
+                                {sub.timeout_phase > 0 && sub.timeout_phase < 4 && (
+                                  <Badge tone={sub.timeout_phase >= 3 ? "loss" : "warn"} className="text-[10px] ml-1"><Clock size={9} /> P{sub.timeout_phase}</Badge>
                                 )}
                               </td>
                               <td className="px-2 text-center">
@@ -543,9 +617,10 @@ export default function PositionsPage() {
                       {subs.map((sub) => (
                         <div key={sub.id} className="glass-soft p-2.5">
                           <div className="flex items-center justify-between gap-2 mb-1.5">
-                            <span className="text-xs text-slate-300 font-medium">
+                            <span className="text-xs text-slate-300 font-medium flex items-center gap-1.5">
+                              <ExchangeBadge exchange={sub.exchange} />
                               {sub.kol_name || "未知"}
-                              <span className="ml-1 text-[10px] text-slate-500">#{sub.batch_no || ""}</span>
+                              <span className="text-[10px] text-slate-500">#{sub.id}</span>
                             </span>
                             <div className={`text-sm font-bold font-mono ${pnlColor(sub.unrealized_pnl)}`}>
                               {fmtMoney(sub.unrealized_pnl)}
@@ -626,7 +701,8 @@ export default function PositionsPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-xs text-slate-500 border-b border-border">
-                    <th className="text-left py-2.5 px-2">KOL</th>
+                    <th className="text-left py-2.5 px-2">交易所/账户</th>
+                    <th className="text-left px-2">KOL</th>
                     <th className="text-left px-2">品种</th>
                     <th className="text-left px-2">方向</th>
                     <th className="text-right px-2">入场价</th>
@@ -634,6 +710,7 @@ export default function PositionsPage() {
                     <th className="text-right px-2">数量</th>
                     <th className="text-right px-2">未实现盈亏</th>
                     <th className="text-right px-2">收益率</th>
+                    <th className="text-center px-2">持仓时长</th>
                     <th className="text-center px-2">止损/保护</th>
                     <th className="text-center px-2">操作</th>
                   </tr>
@@ -641,7 +718,14 @@ export default function PositionsPage() {
                 <tbody>
                   {visibleIndependent.map((p) => (
                     <tr key={p.id} className="border-b border-border/50 hover:bg-bg-hover/40">
-                      <td className="py-3 px-2 text-slate-300">{p.kol_name || "手动"}</td>
+                      <td className="py-3 px-2">
+                        <div className="flex flex-col gap-0.5">
+                          <ExchangeBadge exchange={p.exchange} accountName={p.exchange_account_name} />
+                          <span className="text-[10px] text-slate-500 truncate max-w-[120px]">{p.exchange_account_name || "#" + (p.exchange_account_id || "?")}</span>
+                          <span className="text-[9px] text-slate-600 font-mono">#{p.id}</span>
+                        </div>
+                      </td>
+                      <td className="px-2 text-slate-300">{p.kol_name || "手动"}</td>
                       <td className="px-2 font-mono text-slate-100">{p.symbol}</td>
                       <td className="px-2">
                         <Badge tone={p.side === "long" ? "profit" : "loss"}>{p.side}</Badge>
@@ -653,6 +737,7 @@ export default function PositionsPage() {
                         {fmtMoney(p.unrealized_pnl)}
                       </td>
                       <td className={`px-2 text-right font-mono ${pnlColor(p.pnl_pct)}`}>{fmtPct(p.pnl_pct)}</td>
+                      <td className="px-2 text-center text-xs text-slate-400 font-mono">{fmtDuration(p.opened_at)}</td>
                       <td className="px-2 text-center">
                         <StopBadges p={p} />
                       </td>
@@ -676,13 +761,16 @@ export default function PositionsPage() {
                   <div className="flex items-start justify-between gap-2 mb-2.5">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5 flex-wrap">
+                        <ExchangeBadge exchange={p.exchange} />
                         <Badge tone={p.side === "long" ? "profit" : "loss"} className="text-[10px]">
                           {p.side}
                         </Badge>
                         <span className="font-mono text-sm font-bold text-slate-100">{p.symbol}</span>
                         {p.status !== "open" && <Badge>已平仓</Badge>}
                       </div>
-                      <div className="text-xs text-slate-500 mt-1 truncate">{p.kol_name || "手动"}</div>
+                      <div className="text-xs text-slate-500 mt-1 truncate">
+                        {p.exchange_account_name || "#" + (p.exchange_account_id || "?")} · {p.kol_name || "手动"} · #{p.id}
+                      </div>
                     </div>
                     <div className="text-right shrink-0">
                       <div className={`text-base font-bold font-mono ${pnlColor(p.unrealized_pnl)}`}>

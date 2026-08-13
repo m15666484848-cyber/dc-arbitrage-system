@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import Field, BaseModel, ConfigDict
 
 
 class OrderOut(BaseModel):
@@ -19,12 +19,12 @@ class OrderOut(BaseModel):
     type: str
     qty: float
     price: float | None = None
-    leverage: int = 1
+    leverage: int = Field(1, ge=1, le=125)
     batch_no: int = 1
     status: str
     exchange_order_id: str = ""
-    filled_qty: float = 0.0
-    filled_price: float = 0.0
+    filled_qty: float = Field(0.0, ge=0)
+    filled_price: float = Field(0.0, ge=0)
     error_msg: str = ""
     tp_level: int = 0
     created_at: datetime
@@ -52,8 +52,10 @@ class PositionOut(BaseModel):
     cost_protection: bool = False
     breakeven_moved: bool = False
     trailing_stop: bool = False
+    tp_sl_source: str = "kol"  # kol|default|timeout
+    timeout_phase: int = 0  # 0=none, 1=4h, 2=24h, 3=72h, 4=96h(auto-close)
     status: str
-    realized_pnl: float = 0.0
+    realized_pnl: float = Field(0.0)
     # 实时计算字段
     current_price: float = 0.0
     unrealized_pnl: float = 0.0
@@ -76,7 +78,7 @@ class TradeOut(BaseModel):
     side: str
     qty: float
     price: float
-    fee: float = 0.0
+    fee: float = Field(0.0, ge=0)
     realized_pnl: float = 0.0
     is_close: bool = False
     tp_level: int = 0

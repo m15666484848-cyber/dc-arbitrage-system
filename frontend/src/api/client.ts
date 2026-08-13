@@ -1,16 +1,68 @@
 import axios, { AxiosError } from "axios";
 import { useAuthStore } from "@/stores/auth";
-const client = axios.create({ baseURL: "/api", timeout: 15000 });
+const client = axios.create({ baseURL: "/api", timeout: 15000, withCredentials: true });
 client.interceptors.request.use((cfg) => {
   const token = useAuthStore.getState().token;
   if (token) cfg.headers.Authorization = `Bearer ${token}`;
   return cfg;
 });
+// S9修复: 401时尝试refresh token,避免用户频繁被登出
+let isRefreshing = false;
+let refreshPromise: Promise<any> | null = null;
+
+async function doRefresh(): Promise<any> {
+  if (isRefreshing && refreshPromise) return refreshPromise;
+  isRefreshing = true;
+  refreshPromise = (async () => {
+    const res = await axios.post("/api/auth/refresh", {}, { withCredentials: true });
+    return res.data?.data ?? res.data;
+  })();
+  try {
+    const result = await refreshPromise;
+    isRefreshing = false;
+    refreshPromise = null;
+    return result;
+  } catch (e) {
+    isRefreshing = false;
+    refreshPromise = null;
+    throw e;
+  }
+}
+
 client.interceptors.response.use(
   (r) => r,
-  (err: AxiosError) => {
+  async (err: AxiosError) => {
+    const originalRequest = err.config as any;
+    // 排除auth端点本身的401(避免循环)
+    const isAuthEndpoint = originalRequest?.url?.startsWith("/auth/");
+    if (err.response?.status === 401 && !originalRequest._retry && !isAuthEndpoint) {
+      originalRequest._retry = true;
+      try {
+        const res = await doRefresh();
+        useAuthStore.getState().setAuth(res.access_token, {
+          id: res.user_id,
+          username: res.username,
+          role: res.role,
+          display_name: res.display_name,
+          authorization: res.authorization,
+          show_signal_summary: res.show_signal_summary,
+          emergency_stop: res.emergency_stop,
+        });
+        originalRequest.headers.Authorization = `Bearer ${res.access_token}`;
+        return client.request(originalRequest);
+      } catch {
+        useAuthStore.getState().logout();
+        if (window.location.pathname !== "/login") {
+          window.location.href = "/login";
+        }
+        return Promise.reject(err);
+      }
+    }
     if (err.response?.status === 401) {
       useAuthStore.getState().logout();
+      if (window.location.pathname !== "/login") {
+        window.location.href = "/login";
+      }
     }
     return Promise.reject(err);
   }
@@ -24,6 +76,8 @@ export const API_BASE = "/api";
 export const API = {
   // auth
   login: (username: string, password: string) => api("post", "/auth/login", { username, password }),
+  refreshToken: () => api("post", "/auth/refresh"),
+  logout: () => api("post", "/auth/logout"),
   register: (username: string, password: string, display_name?: string, invite_code?: string) =>
     api("post", "/auth/register", { username, password, display_name, invite_code }),
   me: () => api("get", "/auth/me"),
@@ -69,38 +123,12 @@ export const API = {
     kol_id?: number;
   }) => api("get", "/admin/diagnosis", null, params),
   getSourceStatus: () => api("get", "/admin/source-status"),
-  listShadowResults: (params: {
-    page?: number;
-    page_size?: number;
-    hours?: number;
-    kol_id?: number;
-    status?: string;
-    mismatch_only?: boolean;
-  }) => api("get", "/admin/shadow-results", null, params),
-  reviewShadowResult: (id: number, data: { status: string; review_note?: string }) =>
-    api("post", `/admin/shadow-results/${id}/review`, data),
   // 系统配置(LLM + Discord)
   getSystemConfig: () => api("get", "/admin/system-config"),
   updateSystemConfig: (data: any) => api("put", "/admin/system-config", data),
   testLlm: (llm_type: "text" | "vision" = "text") =>
     api("post", `/admin/system-config/test-llm?llm_type=${llm_type}`),
   simulateKolSignal: (data: any) => api("post", "/admin/simulate-kol-signal", data),
-  listParserRegressionCases: (params?: { enabled?: boolean; q?: string; page?: number; page_size?: number }) =>
-    api("get", "/admin/parser-regression-cases", null, params),
-  createParserRegressionCase: (data: any) => api("post", "/admin/parser-regression-cases", data),
-  bulkImportParserRegressionCases: (data: { raw_text: string; enabled?: boolean; tag_prefix?: string; include_noise?: boolean; max_cases?: number }) =>
-    api("post", "/admin/parser-regression-cases/bulk-import", data),
-  updateParserRegressionCase: (id: number, data: any) => api("put", `/admin/parser-regression-cases/${id}`, data),
-  deleteParserRegressionCase: (id: number) => api("delete", `/admin/parser-regression-cases/${id}`),
-  bulkDeleteParserRegressionCases: (data: { mode: "filtered" | "drafts" | "all"; q?: string; enabled?: boolean; confirm?: string }) =>
-    api("post", "/admin/parser-regression-cases/bulk-delete", data),
-  listParserRegressionImportReports: () => api("get", "/admin/parser-regression-import-reports"),
-  saveParserRegressionImportReport: (data: { import_batch_id: string; source_file?: string; total_messages?: number; created_cases?: number; report: any }) =>
-    api("post", "/admin/parser-regression-import-reports", data),
-  refreshParserRegressionImportReport: (batchId: string) => api("post", `/admin/parser-regression-import-reports/${encodeURIComponent(batchId)}/refresh`),
-  deleteParserRegressionImportReport: (batchId: string) => api("delete", `/admin/parser-regression-import-reports/${encodeURIComponent(batchId)}`),
-  runParserRegression: (data: { ids?: number[]; enabled_only?: boolean }) =>
-    api("post", "/admin/parser-regression-run", data),
   // trading
   listKols: () => api("get", "/kols"),
   setFollows: (kol_settings: { kol_id: number; strategy_id: number | null; notional_usdt: number | null }[]) =>
@@ -123,6 +151,12 @@ export const API = {
   setSymbolMultipliers: (data: { config_id: number; multiplier: number }[]) =>
     api("post", "/symbol-multipliers", data),
   resetSymbolMultiplier: (config_id: number) => api("delete", `/symbol-multipliers/${config_id}`),
+  // symbol categories CRUD (customer)
+  createSymbolCategory: (data: { name: string; symbols?: string; multiplier?: number; note?: string }) =>
+    api("post", "/symbol-categories", data),
+  updateSymbolCategory: (id: number, data: { name?: string; symbols?: string; multiplier?: number; note?: string }) =>
+    api("put", `/symbol-categories/${id}`, data),
+  deleteSymbolCategory: (id: number) => api("delete", `/symbol-categories/${id}`),
   // custom symbols (customer)
   getCustomSymbols: () => api("get", "/custom-symbols"),
   addCustomSymbol: (data: { symbol: string; multiplier: number }) =>

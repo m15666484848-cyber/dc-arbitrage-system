@@ -19,7 +19,6 @@ import {
   Gauge,
   BarChart3,
   TrendingUp,
-  GitCompareArrows,
   ChevronRight,
   Power,
   CalendarDays,
@@ -55,9 +54,7 @@ const NAV: NavItem[] = [
   { to: "/admin/signals", label: "信号监控", icon: Radio, roles: ["admin"] },
   { to: "/admin/diagnosis", label: "跟单诊断", icon: ShieldAlert, roles: ["admin"] },
   { to: "/admin/simulator", label: "模拟测试", icon: FlaskConical, roles: ["admin"] },
-  { to: "/admin/shadow-comparison", label: "影子对比", icon: GitCompareArrows, roles: ["admin"] },
   { to: "/admin/settings", label: "系统设置", icon: Cog, roles: ["admin"] },
-  { to: "/admin/symbol-notional", label: "分类倍率", icon: Gauge, roles: ["admin"] },
 ];
 
 const BOTTOM_NAV: NavItem[] = [

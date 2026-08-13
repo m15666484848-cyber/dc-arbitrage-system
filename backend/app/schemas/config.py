@@ -15,8 +15,8 @@ class ExchangeAccountOut(BaseModel):
     is_active: bool = True
     is_default: bool = False
     follow_enabled: bool = False
-    follow_weight: float = 1.0
-    max_order_usdt: float = 0.0
+    follow_weight: float = Field(1.0, ge=0)
+    max_order_usdt: float = Field(0.0, ge=0)
     strategy_id: int | None = None
     last_error: str = ""
     last_verified_at: datetime | None = None
@@ -84,19 +84,19 @@ class RiskConfigOut(BaseModel):
     exchange: str = "all"
     silent_ranges: list[dict[str, Any]] = []
     silent_action: str = "ignore"
-    max_position_usdt: float = 0.0
+    max_position_usdt: float = Field(0.0, ge=0)
     max_concurrent_positions: int = 0
-    max_daily_loss_pct: float = 0.0
-    per_kol_max_usdt: float = 0.0
+    max_daily_loss_pct: float = Field(0.0, ge=0, le=100)
+    per_kol_max_usdt: float = Field(0.0, ge=0)
     enabled: bool = True
     # 客户级风控开关
-    position_timeout_hours: int = 72
-    consecutive_loss_threshold: int = 3
-    consecutive_loss_pause_hours: int = 24
+    position_timeout_hours: int = Field(72, ge=0)
+    consecutive_loss_threshold: int = Field(3, ge=0)
+    consecutive_loss_pause_hours: int = Field(24, ge=0)
     kol_frequency_per_hour: int = 20
-    auto_stop_loss_pct: float = 5.0
+    auto_stop_loss_pct: float = Field(5.0, ge=0, le=100)
     enable_trailing_stop: bool = False
-    trailing_callback_pct: float = 1.0
+    trailing_callback_pct: float = Field(1.0, ge=0, le=100)
 
     model_config = ConfigDict(from_attributes=True)
 

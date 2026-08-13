@@ -2,8 +2,8 @@
 import secrets
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Numeric, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import backref, Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.base import TimestampMixin
@@ -49,7 +49,7 @@ class Customer(Base, TimestampMixin):
     single_exchange_multi_api_limit: Mapped[int] = mapped_column(Integer, default=2)  # 允许同交易所/同模式最多绑定 API 数量
     multi_exchange_allowed: Mapped[bool] = mapped_column(Boolean, default=False)
     # 单笔下单上限(USDT),管理员强制下发,优先级高于客户自配的 RiskConfig
-    max_order_usdt: Mapped[float] = mapped_column(Float, default=5000.0)
+    max_order_usdt: Mapped[float] = mapped_column(default=5000.0)
     # ---- 急停开关 ----
     # True = 管理员一键阻断该客户的所有新开仓信号(平仓信号不受影响)
     # 借鉴 KOL 跟单系统的 emergency_stop 机制
@@ -64,14 +64,14 @@ class Customer(Base, TimestampMixin):
     # 每个客户的唯一邀请码(注册时自动生成)
     invite_code: Mapped[str] = mapped_column(String(16), unique=True, index=True, default=_generate_invite_code)
     # 邀请人ID(谁邀请的这个客户,NULL=无邀请人)
-    invited_by: Mapped[int | None] = mapped_column(ForeignKey("customers.id"), nullable=True, index=True)
+    invited_by: Mapped[int | None] = mapped_column(ForeignKey("customers.id", ondelete="SET NULL"), nullable=True, index=True)
 
     authorizations: Mapped[list["Authorization"]] = relationship(
         back_populates="customer", cascade="all, delete-orphan"
     )
     # 邀请人关系(反向:被邀请的客户列表)
     invitees: Mapped[list["Customer"]] = relationship(
-        "Customer", backref="inviter", remote_side="Customer.id"
+        "Customer", backref=backref("inviter", remote_side="Customer.id")
     )
 
     @property

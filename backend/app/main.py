@@ -246,12 +246,22 @@ async def _migrate_schema(conn) -> None:
         "FOREIGN KEY(discord_account_id) REFERENCES discord_accounts(id) ON DELETE SET NULL; "
         "END IF; "
         "END $$",
+        # 信号去重: discord_message_id 唯一约束,防止 Discord 重连重放导致重复信号
+        "DO $$ BEGIN "
+        "IF NOT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_signals_discord_message_id_unique') THEN "
+        "IF NOT EXISTS (SELECT 1 FROM (SELECT discord_message_id FROM signals GROUP BY discord_message_id HAVING COUNT(*) > 1) dup) THEN "
+        "CREATE UNIQUE INDEX idx_signals_discord_message_id_unique ON signals(discord_message_id); "
+        "END IF; "
+        "END IF; "
+        "END $$",
     ]
     applied = 0
     skipped = 0
     for sql in migrations:
         try:
-            await conn.execute(text(sql))
+            # M9修复: 使用savepoint,单条迁移失败不影响后续迁移
+            async with conn.begin_nested():
+                await conn.execute(text(sql))
             applied += 1
         except Exception as e:
             skipped += 1
@@ -388,7 +398,7 @@ async def _migrate_schema(conn) -> None:
                 except Exception:
                     pass
         except Exception as e:
-            logger.debug(f"api_key_hash 回填跳过: {e}")
+            logger.debug("api_key_hash 回填跳过")
     except Exception as e:
         logger.debug(f"数据迁移跳过(可能字段不存在): {e}")
 
@@ -416,7 +426,12 @@ async def rate_limit_middleware(request: Request, call_next):
     path = request.url.path
     if path in ("/api/health", "/health", "/ws") or path.startswith("/ws"):
         return await call_next(request)
-    client_ip = request.client.host if request.client else "unknown"
+    # S7修复: 与 auth.py 保持一致,优先从 x-forwarded-for 提取真实客户端IP
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        client_ip = forwarded_for.split(",")[0].strip() or "unknown"
+    else:
+        client_ip = request.client.host if request.client else "unknown"
     now = _time.monotonic()
     q = _rate_limit_store[client_ip]
 

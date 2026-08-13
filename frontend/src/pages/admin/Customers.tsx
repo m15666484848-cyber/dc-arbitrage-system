@@ -242,25 +242,9 @@ export default function AdminCustomers() {
   const loginAsCustomer = async (c: any) => {
     try {
       const res: any = await API.loginAsCustomer(c.id);
-      const newWin = window.open("/", "_blank");
+      // S9修复: 不再向新窗口localStorage写入token,改用URL hash传递一次性impersonate token
+      const newWin = window.open(`/#impersonate_token=${encodeURIComponent(res.access_token)}`, "_blank");
       if (newWin) {
-        newWin.localStorage.setItem("dc-quant-auth", JSON.stringify({
-          state: {
-            token: res.access_token,
-            user: {
-              id: res.user_id,
-              username: res.username,
-              role: "customer",
-              display_name: res.display_name,
-              authorization: res.authorization,
-              show_signal_summary: res.show_signal_summary,
-              emergency_stop: res.emergency_stop,
-            },
-            initialized: true,
-          },
-          version: 0,
-        }));
-        newWin.location.reload();
         push("success", `已以 ${res.display_name || res.username} 身份打开新窗口`);
       } else {
         push("error", "新窗口被浏览器拦截,请允许弹窗");

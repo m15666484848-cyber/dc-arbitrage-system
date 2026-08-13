@@ -2,6 +2,8 @@
 FROM python:3.11-slim AS builder
 
 WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # 安装编译依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,6 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean
 
 WORKDIR /app
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # 复制 Python 依赖（从 builder 阶段）
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
@@ -42,6 +46,13 @@ COPY . .
 # 健康检查
 HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=30s \
     CMD curl -f http://localhost:8000/api/health || exit 1
+
+# Create non-root user (uid 1000 matches host ubuntu user for bind-mount access)
+RUN useradd -m -u 1000 appuser && \
+    mkdir -p /app/logs && \
+    chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 8000
 

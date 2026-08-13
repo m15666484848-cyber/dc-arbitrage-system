@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -118,20 +119,51 @@ async def take_equity_snapshot(
             bal = await exchange_adapter.fetch_balance(ex)
         finally:
             await exchange_adapter.close_exchange(ex)
+
+        # SU-S2 修复: 查询所有未平仓持仓的未实现盈亏并累加
+        total_unrealized = 0.0
+        try:
+            from app.services.position_manager import _get_cached_price, compute_pnl
+
+            open_positions = (
+                await db.execute(
+                    select(Position).where(
+                        Position.customer_id == customer_id,
+                        Position.exchange == exchange,
+                        Position.status == "open",
+                    )
+                )
+            ).scalars().all()
+            for pos in open_positions:
+                # 如果指定了 exchange_account_id, 只统计该账号的持仓
+                if exchange_account_id is not None and pos.exchange_account_id != exchange_account_id:
+                    continue
+                try:
+                    current_price = await _get_cached_price(pos.exchange, pos.symbol)
+                    if not current_price or current_price <= 0:
+                        current_price = await exchange_adapter.fetch_market_price(
+                            pos.exchange, pos.symbol
+                        )
+                    if current_price and current_price > 0:
+                        pnl, _ = compute_pnl(pos, current_price)
+                        total_unrealized += pnl
+                except Exception as e:
+                    logger.warning(f"计算仓位 {pos.id} 未实现盈亏失败: {e}")
+        except Exception as e:
+            logger.warning(f"获取持仓列表失败 customer={customer_id}: {e}")
+
         snapshot = EquitySnapshot(
             customer_id=customer_id,
             exchange_account_id=exchange_account_id,
             exchange=exchange,
             equity=float(bal.get("equity", 0)),
             balance=float(bal.get("balance", 0)),
-            unrealized_pnl=0.0,
+            unrealized_pnl=total_unrealized,
             snapshot_at=datetime.now(timezone.utc),
         )
         db.add(snapshot)
         await db.commit()
     except Exception as e:
-        from loguru import logger
-
         logger.warning(f"净值快照失败 customer={customer_id} exchange={exchange} testnet={testnet}: {e}")
         await db.rollback()
 
@@ -322,7 +354,19 @@ async def calculate_advanced_metrics(
                 monthly_return = total_return * 100
                 annual_return = total_return * 100
 
-        # 夏普比:基于日收益率的均值/标准差 (年化 = sqrt(365))
+        # 夏普比:基于快照收益率的均值/标准差
+        # L-3修复: 从实际快照时间戳计算间隔,而非硬编码5分钟
+        if len(snapshots) >= 2:
+            actual_interval_seconds = (
+                snapshots[-1]["snapshot_at"] - snapshots[0]["snapshot_at"]
+            ).total_seconds() / max(len(snapshots) - 1, 1)
+            if actual_interval_seconds > 0:
+                periods_per_year = 365 * 24 * 3600 / actual_interval_seconds
+            else:
+                periods_per_year = 105120  # 回退到5分钟间隔
+        else:
+            periods_per_year = 105120
+        annualization_factor = math.sqrt(periods_per_year)
         daily_returns = []
         for i in range(1, len(snapshots)):
             prev_eq = float(snapshots[i - 1].get("equity") or 0)
@@ -335,7 +379,7 @@ async def calculate_advanced_metrics(
             std_ret = math.sqrt(variance) if variance > 0 else 0
             if std_ret > 0:
                 # 年化夏普比 (假设无风险利率为0)
-                sharpe_ratio = round((avg_ret / std_ret) * math.sqrt(365), 2)
+                sharpe_ratio = round((avg_ret / std_ret) * annualization_factor, 2)
 
     # 3. 盈亏比 (平均盈利 / 平均亏损)
     win_pnl = (
@@ -343,7 +387,7 @@ async def calculate_advanced_metrics(
             select(sql_func.avg(Trade.realized_pnl)).where(
                 Trade.customer_id == customer_id,
                 Trade.is_close.is_(True),
-                Trade.exchange_account_id == exchange_account_id if exchange_account_id else True,
+                (Trade.exchange_account_id == exchange_account_id) if exchange_account_id else True,
                 Trade.realized_pnl > 0,
             )
         )
@@ -353,7 +397,7 @@ async def calculate_advanced_metrics(
             select(sql_func.avg(Trade.realized_pnl)).where(
                 Trade.customer_id == customer_id,
                 Trade.is_close.is_(True),
-                Trade.exchange_account_id == exchange_account_id if exchange_account_id else True,
+                (Trade.exchange_account_id == exchange_account_id) if exchange_account_id else True,
                 Trade.realized_pnl < 0,
             )
         )
@@ -380,8 +424,8 @@ async def dashboard_stats(db: AsyncSession, customer_id: int, exchange_account_i
     利润按 Trade 统计(按成交时间累加,准确反映当日/累计盈亏)。
     """
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    account_filter_pos = Position.exchange_account_id == exchange_account_id if exchange_account_id else True
-    account_filter_trade = Trade.exchange_account_id == exchange_account_id if exchange_account_id else True
+    account_filter_pos = (Position.exchange_account_id == exchange_account_id) if exchange_account_id else True
+    account_filter_trade = (Trade.exchange_account_id == exchange_account_id) if exchange_account_id else True
     # Open positions: child positions only, same as /positions.
     open_positions = (
         await db.execute(
@@ -754,8 +798,14 @@ async def take_daily_risk_snapshot(
         index_elements=["customer_id", "exchange", "day"],
         set_={k: v for k, v in values.items() if k not in ("customer_id", "exchange", "day")},
     )
-    await db.execute(stmt)
-    await db.commit()
+    # M11修复: 添加try/except/rollback,防止upsert失败导致session脏状态
+    try:
+        await db.execute(stmt)
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"日风控快照写入失败 customer={customer_id} day={local_day}: {e}")
+        raise
     return {
         **values,
         "day": local_day.isoformat(),

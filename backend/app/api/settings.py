@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -34,10 +35,11 @@ ALERT_UPDATABLE_FIELDS = {
 }
 
 
-def _mask(key: str) -> str:
-    if not key or len(key) <= 8:
+def _mask(key: str, show: int = 4) -> str:
+    """掩码 API Key。show 参数控制显示首尾各几位,默认 4。"""
+    if not key or len(key) <= show * 2:
         return "***"
-    return f"{key[:4]}...{key[-4:]}"
+    return f"{key[:show]}...{key[-show:]}"
 
 
 def _hash_api_key(api_key: str) -> str:
@@ -77,14 +79,22 @@ def _audit(db: AsyncSession, action: str, target: str, detail: str) -> None:
 async def list_exchange_accounts(current=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     cid = current.id if current.role == "customer" else None
     if cid is None:
-        return ok([])
-    rows = (
-        await db.execute(
-            select(ExchangeAccount)
-            .where(ExchangeAccount.customer_id == cid, ExchangeAccount.is_active.is_(True))
-            .order_by(ExchangeAccount.exchange, ExchangeAccount.account_mode, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
-        )
-    ).scalars().all()
+        # admin: return all active accounts
+        rows = (
+            await db.execute(
+                select(ExchangeAccount)
+                .where(ExchangeAccount.is_active.is_(True))
+                .order_by(ExchangeAccount.customer_id, ExchangeAccount.exchange, ExchangeAccount.account_mode, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
+            )
+        ).scalars().all()
+    else:
+        rows = (
+            await db.execute(
+                select(ExchangeAccount)
+                .where(ExchangeAccount.customer_id == cid, ExchangeAccount.is_active.is_(True))
+                .order_by(ExchangeAccount.exchange, ExchangeAccount.account_mode, ExchangeAccount.is_default.desc(), ExchangeAccount.id)
+            )
+        ).scalars().all()
     out = []
     for r in rows:
         d = ExchangeAccountOut.model_validate(r).model_dump()
@@ -92,7 +102,11 @@ async def list_exchange_accounts(current=Depends(get_current_user), db: AsyncSes
         for _secret_field in ("api_key_enc", "api_secret_enc", "passphrase_enc", "api_key_hash"):
             d.pop(_secret_field, None)
         try:
-            d["api_key_mask"] = _mask(decrypt_secret(r.api_key_enc))
+            # M-2修复: 管理员视图掩码更严格(仅显示后2位),客户视图保持前4后4
+            if current.role == "admin":
+                d["api_key_mask"] = _mask(decrypt_secret(r.api_key_enc), show=2)
+            else:
+                d["api_key_mask"] = _mask(decrypt_secret(r.api_key_enc))
         except Exception:
             d["api_key_mask"] = "***"
         d["status"] = _api_status(r)
@@ -207,6 +221,9 @@ async def add_exchange_account(
     _audit(db, "exchange_account_create", f"exchange_account:{current.id}:{body.exchange}", f"customer_id={current.id}, exchange={body.exchange}, account_mode={body_mode}")
     try:
         await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(400, "该API Key已存在,不能重复添加")
     except Exception:
         await db.rollback()
         logger.exception("绑定交易所API失败")
@@ -219,21 +236,25 @@ async def add_exchange_account(
 
 
 @router.post("/exchange-accounts/{aid}/default")
-async def set_default_exchange_account(aid: int, current=Depends(require_customer), db: AsyncSession = Depends(get_db)):
+async def set_default_exchange_account(aid: int, customer_id: int | None = None, current=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """设置客户级默认下单 API。
 
     默认 API 用于手动下单和未显式开启多 API 跟单时的兼容兜底；
     自动跟单会优先使用所有 follow_enabled=True 且验证正常的 API。
     """
-    acc = (
-        await db.execute(
-            select(ExchangeAccount).where(
-                ExchangeAccount.id == aid,
-                ExchangeAccount.customer_id == current.id,
-                ExchangeAccount.is_active.is_(True),
-            )
-        )
-    ).scalar_one_or_none()
+    # M-1修复: 管理员操作时必须指定 customer_id,审计日志记录目标客户 ID
+    if current.role == "admin":
+        if customer_id is None:
+            raise HTTPException(400, "管理员操作需要指定 customer_id")
+        cid = customer_id
+    else:
+        cid = current.id
+    q = select(ExchangeAccount).where(
+        ExchangeAccount.id == aid,
+        ExchangeAccount.is_active.is_(True),
+        ExchangeAccount.customer_id == cid,
+    )
+    acc = (await db.execute(q)).scalar_one_or_none()
     if not acc:
         raise HTTPException(404, "账号不存在或已禁用")
     if acc.last_error:
@@ -242,14 +263,14 @@ async def set_default_exchange_account(aid: int, current=Depends(require_custome
     rows = (
         await db.execute(
             select(ExchangeAccount).where(
-                ExchangeAccount.customer_id == current.id,
+                ExchangeAccount.customer_id == cid,
                 ExchangeAccount.is_active.is_(True),
             )
         )
     ).scalars().all()
     for row in rows:
         row.is_default = row.id == aid
-    _audit(db, "exchange_account_set_default", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}")
+    _audit(db, "exchange_account_set_default", f"exchange_account:{aid}", f"customer_id={cid}, exchange={acc.exchange}, testnet={acc.testnet}")
     try:
         await db.commit()
     except Exception:
@@ -333,7 +354,7 @@ async def update_exchange_account_follow(
 
 
 @router.delete("/exchange-accounts/{aid}")
-async def delete_exchange_account(aid: int, current=Depends(require_customer), db: AsyncSession = Depends(get_db)):
+async def delete_exchange_account(aid: int, current=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     acc = (await db.execute(select(ExchangeAccount).where(ExchangeAccount.id == aid, ExchangeAccount.customer_id == current.id))).scalar_one_or_none()
     if not acc:
         raise HTTPException(404, "账号不存在")
@@ -351,7 +372,7 @@ async def delete_exchange_account(aid: int, current=Depends(require_customer), d
                     ExchangeAccount.customer_id == current.id,
                     ExchangeAccount.is_active.is_(True),
                     ExchangeAccount.id != aid,
-                    ExchangeAccount.last_error == "",
+                    ExchangeAccount.last_error.is_(None) | (ExchangeAccount.last_error == ""),
                 )
                 .order_by(ExchangeAccount.last_verified_at.desc().nullslast(), ExchangeAccount.id)
             )
@@ -382,7 +403,7 @@ async def delete_exchange_account(aid: int, current=Depends(require_customer), d
 
 
 @router.post("/exchange-accounts/{aid}/test")
-async def test_exchange_account(aid: int, current=Depends(require_customer), db: AsyncSession = Depends(get_db)):
+async def test_exchange_account(aid: int, current=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     from app.services import exchange_adapter
 
     acc = (await db.execute(select(ExchangeAccount).where(ExchangeAccount.id == aid, ExchangeAccount.customer_id == current.id, ExchangeAccount.is_active.is_(True)))).scalar_one_or_none()

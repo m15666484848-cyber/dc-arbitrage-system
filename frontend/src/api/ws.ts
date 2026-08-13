@@ -3,15 +3,10 @@ import { useAuthStore } from "@/stores/auth";
 type WsListener = (event: string, data?: any) => void;
 type Unsubscribe = () => void;
 
-/** 获取token: 优先从Zustand store读取,回退到localStorage(防止store未初始化) */
+// S9修复: 仅从内存store获取token,移除localStorage回退
 function getToken(): string | null {
   try {
-    const token = useAuthStore.getState()?.token;
-    if (token) return token;
-  } catch {}
-  try {
-    const stored = JSON.parse(localStorage.getItem("dc-quant-auth") || "{}");
-    return stored?.state?.token || null;
+    return useAuthStore.getState()?.token || null;
   } catch {
     return null;
   }
@@ -23,8 +18,22 @@ class WsClient {
   private reconnectTimer: any = null;
   private authTimer: any = null;
   private reconnectAttempts: number = 0;
+  private manualClose: boolean = false;
+  private static readonly MAX_RECONNECT_ATTEMPTS = 20;
 
   connect() {
+    this.manualClose = false;
+    // 关闭已有连接，防止 resetReconnect 产生僵尸连接
+    if (this.ws) {
+      this.ws.onclose = null;
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
+      this.ws.onerror = null;
+      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+        this.ws.close();
+      }
+      this.ws = null;
+    }
     const token = getToken();
     if (!token) {
       this.scheduleReconnect();
@@ -70,6 +79,9 @@ class WsClient {
       };
 
       this.ws.onclose = () => {
+        if (this.manualClose) {
+          return;
+        }
         if (this.authTimer) {
           clearTimeout(this.authTimer);
           this.authTimer = null;
@@ -85,6 +97,7 @@ class WsClient {
   }
 
   close() {
+    this.manualClose = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -111,6 +124,11 @@ class WsClient {
   }
 
   private scheduleReconnect() {
+    if (this.manualClose) return;
+    if (this.reconnectAttempts >= WsClient.MAX_RECONNECT_ATTEMPTS) {
+      console.warn(`[WS] Max reconnection attempts (${WsClient.MAX_RECONNECT_ATTEMPTS}) reached, stopping.`);
+      return;
+    }
     if (this.reconnectTimer) return;
     // 指数退避: 1s, 2s, 4s, 8s, 16s, 最大 30s
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
@@ -120,6 +138,21 @@ class WsClient {
       this.connect();
     }, delay);
   }
+
+  /** Manually reset reconnection counter and retry. Call after user login/token refresh. */
+  resetReconnect() {
+    this.reconnectAttempts = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.connect();
+  }
 }
 
 export const wsClient = new WsClient();
+
+/** Reset WS reconnection counter and reconnect. */
+export function resetWsReconnect() {
+  wsClient.resetReconnect();
+}

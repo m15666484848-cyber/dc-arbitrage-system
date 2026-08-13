@@ -1,4 +1,5 @@
 """交易路由(客户视图):KOL 跟随、持仓、订单、成交、手动平仓/删除/下单、止损修改。"""
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -8,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_customer
+from app.core.security import get_current_user, require_customer, require_admin
 from app.models.kol import Kol, KolFollow
 from app.models.strategy import Strategy
 from app.models.trading import Order, Position, Trade
@@ -202,6 +203,20 @@ async def set_follows(
             inactive_names = [k.name for k in inactive_kols]
             raise HTTPException(400, f"以下 KOL 已停用,无法跟随: {inactive_names}")
 
+    # ★ 安全修复: 验证 strategy_id 归属当前客户,防止跨客户引用
+    all_strategy_ids = {s["strategy_id"] for s in settings_map.values() if s.get("strategy_id")}
+    if all_strategy_ids:
+        valid_strats = (await db.execute(
+            select(Strategy).where(
+                Strategy.id.in_(all_strategy_ids),
+                Strategy.customer_id == cid,
+            )
+        )).scalars().all()
+        valid_strat_ids = {s.id for s in valid_strats}
+        invalid_strat_ids = all_strategy_ids - valid_strat_ids
+        if invalid_strat_ids:
+            raise HTTPException(400, f"以下策略不存在或不属于当前客户: {invalid_strat_ids}")
+
     # 获取现有关注记录
     existing = (await db.execute(select(KolFollow).where(KolFollow.customer_id == cid))).scalars().all()
     existing_map = {f.kol_id: f for f in existing}
@@ -226,6 +241,7 @@ async def set_follows(
     for f in existing:
         if f.kol_id not in target_ids:
             f.enabled = False
+            f.paused_until = None  # P0-2修复: 取消关注时清理暂停状态,防止check_kol_can_trade误自动恢复
 
     try:
         await db.commit()
@@ -275,18 +291,19 @@ async def list_positions(
     cid = _resolve_customer(current, customer_id)
     # 持仓管理只展示未结束的子仓位；已平仓仓位应进入历史记录。
     # master 仓位仅作为内部聚合记录，不直接返回给前端。
-    positions = (
-        await db.execute(
-            select(Position)
-            .where(
-                Position.customer_id == cid,
-                Position.status == "open",
-                Position.parent_id.is_not(None),
-                Position.exchange_account_id == exchange_account_id if exchange_account_id else True,
-            )
-            .order_by(Position.opened_at.desc())
+    stmt = (
+        select(Position)
+        .where(
+            Position.customer_id == cid,
+            Position.status == "open",
+            Position.parent_id.is_not(None),
         )
-    ).scalars().all()
+        .order_by(Position.opened_at.desc())
+    )
+    # M1修复: 条件追加筛选,避免表达式优先级BUG(None时 == True 变为 == 1)
+    if exchange_account_id:
+        stmt = stmt.where(Position.exchange_account_id == exchange_account_id)
+    positions = (await db.execute(stmt)).scalars().all()
     kol_ids = {p.kol_id for p in positions if p.kol_id}
     kol_map = {k.id: k.name for k in (await db.execute(select(Kol).where(Kol.id.in_(kol_ids)))).scalars().all()} if kol_ids else {}
 
@@ -475,7 +492,14 @@ async def manual_order(
     max_notional = getattr(_rc, "max_notional_per_order", None) if _rc else None
     if max_notional is None and _rc:
         max_notional = getattr(_rc, "max_position_usdt", 0)
-    if max_notional and body.qty > max_notional:
+    # 也检查客户级单笔下单限制
+    customer_max_order = getattr(current, "max_order_usdt", None)
+    if customer_max_order and customer_max_order > 0:
+        if max_notional is None or max_notional <= 0:
+            max_notional = customer_max_order
+        else:
+            max_notional = min(max_notional, customer_max_order)
+    if max_notional is not None and max_notional > 0 and body.qty > max_notional:
         raise HTTPException(400, f"下单金额超限: 最大 {max_notional} USDT")
     decision = strategy_engine.StrategyDecision(allow=True, notional_usdt=body.qty, params={})
 
@@ -515,6 +539,127 @@ async def manual_order(
 
 
 # ---------- 成交记录 ----------
+
+@router.get("/daily-stats")
+async def daily_stats(
+    current=Depends(get_current_user),
+    customer_id: int | None = Query(None),
+    exchange_account_id: int | None = Query(None),
+    month: str = Query(..., description="YYYY-MM"),
+    db: AsyncSession = Depends(get_db),
+):
+    """按北京时间自然日统计每日交易数据。"""
+    # P0-4修复: 管理员必须传 customer_id,否则返回 400(原代码用 admin User.id 查 Customer.id 字段)
+    if current.role == "admin" and customer_id is None:
+        raise HTTPException(400, "管理员查询统计需要指定 customer_id")
+    cid = _resolve_customer(current, customer_id)
+
+    try:
+        parts = month.split("-")
+        year, mon = int(parts[0]), int(parts[1])
+    except (ValueError, IndexError, AttributeError):
+        raise HTTPException(400, "month 格式应为 YYYY-MM")
+
+    beijing_tz = timezone(timedelta(hours=8))
+    month_start = datetime(year, mon, 1, tzinfo=beijing_tz)
+    if mon == 12:
+        month_end = datetime(year + 1, 1, 1, tzinfo=beijing_tz)
+    else:
+        month_end = datetime(year, mon + 1, 1, tzinfo=beijing_tz)
+
+    month_start_utc = month_start.astimezone(timezone.utc)
+    month_end_utc = month_end.astimezone(timezone.utc)
+
+    stmt = select(Trade).where(
+        Trade.customer_id == cid,
+        Trade.executed_at >= month_start_utc,
+        Trade.executed_at < month_end_utc,
+    )
+    if exchange_account_id:
+        stmt = stmt.where(Trade.exchange_account_id == exchange_account_id)
+
+    trades = (await db.execute(stmt.order_by(Trade.executed_at.asc()))).scalars().all()
+
+    day_data: dict[str, dict] = defaultdict(lambda: {
+        "pnl": 0.0, "trade_count": 0, "open_count": 0, "close_count": 0,
+        "fee": 0.0, "win_count": 0, "loss_count": 0,
+        "symbols": defaultdict(lambda: {
+            "pnl": 0.0, "trade_count": 0, "open_count": 0, "close_count": 0, "fee": 0.0
+        })
+    })
+
+    for t in trades:
+        beijing_time = t.executed_at.astimezone(beijing_tz)
+        day_str = beijing_time.strftime("%Y-%m-%d")
+
+        d = day_data[day_str]
+        d["pnl"] += t.realized_pnl
+        d["trade_count"] += 1
+        d["fee"] += t.fee
+        if t.is_close:
+            d["close_count"] += 1
+            if t.realized_pnl > 0:
+                d["win_count"] += 1
+            elif t.realized_pnl < 0:
+                d["loss_count"] += 1
+        else:
+            d["open_count"] += 1
+
+        s = d["symbols"][t.symbol]
+        s["pnl"] += t.realized_pnl
+        s["trade_count"] += 1
+        s["fee"] += t.fee
+        if t.is_close:
+            s["close_count"] += 1
+        else:
+            s["open_count"] += 1
+
+    days = []
+    total_pnl = 0.0
+    total_trade_count = 0
+    total_close_count = 0
+    total_fee = 0.0
+    total_win = 0
+    total_loss = 0
+
+    for day_str in sorted(day_data.keys()):
+        d = day_data[day_str]
+        symbols = [
+            {"symbol": sym, **data}
+            for sym, data in sorted(d["symbols"].items())
+        ]
+        days.append({
+            "day": day_str,
+            "pnl": round(d["pnl"], 8),
+            "trade_count": d["trade_count"],
+            "open_count": d["open_count"],
+            "close_count": d["close_count"],
+            "fee": round(d["fee"], 8),
+            "win_count": d["win_count"],
+            "loss_count": d["loss_count"],
+            "symbols": symbols,
+        })
+        total_pnl += d["pnl"]
+        total_trade_count += d["trade_count"]
+        total_close_count += d["close_count"]
+        total_fee += d["fee"]
+        total_win += d["win_count"]
+        total_loss += d["loss_count"]
+
+    win_rate = round(total_win / total_close_count * 100, 1) if total_close_count > 0 else 0
+
+    return ok({
+        "days": days,
+        "summary": {
+            "total_pnl": round(total_pnl, 8),
+            "trade_count": total_trade_count,
+            "close_count": total_close_count,
+            "win_rate": win_rate,
+            "fee": round(total_fee, 8),
+        }
+    })
+
+
 @router.get("/trades")
 async def list_trades(
     current=Depends(get_current_user),
@@ -719,6 +864,133 @@ class CustomSymbolCreate(BaseModel):
 
 class CustomSymbolUpdate(BaseModel):
     multiplier: float
+
+
+
+
+# ==================== 品种分类管理 (客户可增删改) ====================
+
+class CategoryCreate(BaseModel):
+    name: str
+    symbols: str = ""
+    multiplier: float = 1.0
+    note: str = ""
+
+
+class CategoryUpdate(BaseModel):
+    name: str | None = None
+    symbols: str | None = None
+    multiplier: float | None = None
+    note: str | None = None
+
+
+@router.post("/symbol-categories")
+async def create_symbol_category(
+    body: CategoryCreate,
+    current=Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """创建品种分类。"""
+    from app.models.symbol_config import SymbolNotionalConfig
+    if body.multiplier <= 0:
+        raise HTTPException(400, "倍率必须大于 0")
+    existing = (await db.execute(
+        select(SymbolNotionalConfig).where(SymbolNotionalConfig.name == body.name)
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(400, f"分类名 '{body.name}' 已存在")
+    cfg = SymbolNotionalConfig(
+        name=body.name,
+        symbols=body.symbols.upper().strip(),
+        multiplier=body.multiplier,
+        enabled=True,
+        note=body.note,
+    )
+    db.add(cfg)
+    try:
+        await db.commit()
+        await db.refresh(cfg)
+    except Exception:
+        await db.rollback()
+        logger.exception("创建品种分类失败")
+        raise HTTPException(500, "创建品种分类失败")
+    # 刷新币种分类缓存
+    from app.services.signal_filter import refresh_coin_tier_cache
+    await refresh_coin_tier_cache(db)
+
+    return ok({"id": cfg.id, "name": cfg.name})
+
+
+@router.put("/symbol-categories/{cfg_id}")
+async def update_symbol_category(
+    cfg_id: int,
+    body: CategoryUpdate,
+    current=Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """更新品种分类。"""
+    from app.models.symbol_config import SymbolNotionalConfig
+    cfg = (await db.execute(
+        select(SymbolNotionalConfig).where(SymbolNotionalConfig.id == cfg_id)
+    )).scalar_one_or_none()
+    if not cfg:
+        raise HTTPException(404, "分类不存在")
+    if body.name is not None:
+        cfg.name = body.name
+    if body.symbols is not None:
+        cfg.symbols = body.symbols.upper().strip()
+    if body.multiplier is not None:
+        if body.multiplier <= 0:
+            raise HTTPException(400, "倍率必须大于 0")
+        cfg.multiplier = body.multiplier
+    if body.note is not None:
+        cfg.note = body.note
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("更新品种分类失败")
+        raise HTTPException(500, "更新品种分类失败")
+    # 刷新币种分类缓存
+    from app.services.signal_filter import refresh_coin_tier_cache
+    await refresh_coin_tier_cache(db)
+
+    return ok({"id": cfg_id})
+
+
+@router.delete("/symbol-categories/{cfg_id}")
+async def delete_symbol_category(
+    cfg_id: int,
+    current=Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除品种分类。同时清除该分类的客户倍率覆盖。"""
+    from app.models.symbol_config import SymbolNotionalConfig
+    from app.models.customer_multiplier import CustomerSymbolMultiplier
+    cfg = (await db.execute(
+        select(SymbolNotionalConfig).where(SymbolNotionalConfig.id == cfg_id)
+    )).scalar_one_or_none()
+    if not cfg:
+        raise HTTPException(404, "分类不存在")
+    cms = (await db.execute(
+        select(CustomerSymbolMultiplier).where(
+            CustomerSymbolMultiplier.config_id == cfg_id
+        )
+    )).scalars().all()
+    for cm in cms:
+        await db.delete(cm)
+    await db.delete(cfg)
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("删除品种分类失败")
+        raise HTTPException(500, "删除品种分类失败")
+    # 刷新币种分类缓存
+    from app.services.signal_filter import refresh_coin_tier_cache
+    await refresh_coin_tier_cache(db)
+
+    return ok({"id": cfg_id})
 
 
 @router.get("/custom-symbols")

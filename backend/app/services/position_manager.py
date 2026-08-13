@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select, text
+from sqlalchemy import select, text, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
@@ -20,6 +20,9 @@ from app.services.event_bus import bus
 # 内存锁:记录正在平仓中的仓位ID,防止止损监控循环重复触发同一仓位
 # 作为 Redis 不可用时的进程内兜底
 _closing_positions: set[int] = set()
+
+# 保存 asyncio.create_task 的引用,防止任务被 GC 回收
+_pending_tasks: set = set()
 
 DEFAULT_POSITION_TIMEOUT_HOURS = 48
 # P3-6 修复: 缓存TTL与监控循环间隔(5秒)匹配,减少冗余API调用
@@ -42,7 +45,7 @@ async def _add_closing_position(position_id: int) -> bool:
         redis = await get_redis()
         if redis:
             key = f"closing_pos:{position_id}"
-            acquired = await redis.set(key, "1", ex=30, nx=True)  # 30 second TTL
+            acquired = await redis.set(key, "1", ex=60, nx=True)  # 60 second TTL
             return bool(acquired)
     except Exception as e:
         logger.warning(f"获取 Redis 平仓锁失败 pos={position_id}: {e}")
@@ -112,6 +115,22 @@ def should_trigger_cost_protection(position: Position, current_price: float) -> 
     return pct >= 2.0
 
 
+async def _get_timeout_phase(position, redis_conn=None) -> int:
+    """获取持仓当前的超时保护阶段 (0=无, 1=4h, 2=24h, 3=72h, 4=96h)."""
+    try:
+        if redis_conn is None:
+            from app.core.redis import get_redis
+            redis_conn = await get_redis()
+        if redis_conn:
+            phase_key = f"dcq:tpsl_timeout:{position.id}"
+            cached = await redis_conn.get(phase_key)
+            if cached:
+                return int(cached)
+    except Exception:
+        pass
+    return 0
+
+
 async def enrich_position(position: Position, current_price: float, kol_name: str = "") -> dict:
     """填充实时字段用于 API 输出。"""
     pnl, pct = compute_pnl(position, current_price)
@@ -145,6 +164,8 @@ async def enrich_position(position: Position, current_price: float, kol_name: st
         "cost_protection": position.cost_protection,
         "breakeven_moved": position.breakeven_moved,
         "trailing_stop": position.trailing_stop,
+        "tp_sl_source": getattr(position, "tp_sl_source", "kol") or "kol",
+        "timeout_phase": await _get_timeout_phase(position, redis_conn=None),
         "status": position.status,
         "realized_pnl": position.realized_pnl,
         "entry_fee": position.entry_fee or 0.0,
@@ -228,7 +249,13 @@ async def _check_one_position_with_price(db: AsyncSession, position: Position, c
     tp_level = should_trigger_tp(position, current_price)
     if tp_level:
         logger.info(f"止盈{tp_level}触发 pos={position.id} {position.symbol} price={current_price}")
-        await order_manager.close_at_tp_level(db, position, tp_level, current_price)
+        if not await _add_closing_position(position.id):
+            logger.info(f"止盈平仓跳过:已有平仓进行中 pos={position.id}")
+            return
+        try:
+            await order_manager.close_at_tp_level(db, position, tp_level, current_price)
+        finally:
+            await _remove_closing_position(position.id)
         return
 
     # 成本保护(+2% 利润,且 TP1 未触发时也保护)
@@ -245,31 +272,35 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
     pnl, _ = compute_pnl(position, current_price)
     if pnl <= 0:
         return
-    # 再次校验仓位仍为 open(防止并发平仓后对已关闭仓位写入止损)
-    if position.status != "open" or position.qty <= 0:
+    # S2修复: 使用行锁防止与close_position竞态(TOCTOU)
+    # 重新查询并锁定行,确保检查和更新之间不会被并发平仓打断
+    locked = (await db.execute(
+        select(Position).where(Position.id == position.id).with_for_update()
+    )).scalar_one_or_none()
+    if not locked or locked.status != "open" or locked.qty <= 0:
         return
-    callback = position.trailing_callback
-    if position.side == "long":
+    callback = locked.trailing_callback
+    if locked.side == "long":
         new_sl = current_price * (1 - callback)
-        if not position.sl or new_sl > position.sl:
-            position.sl = new_sl
+        if not locked.sl or new_sl > locked.sl:
+            locked.sl = new_sl
             try:
                 if hasattr(db, "flush"):
                     await db.flush()
                 await db.commit()
             except Exception as e:
-                logger.warning(f"追踪止损提交失败 pos={position.id}: {e}")
+                logger.warning(f"追踪止损提交失败 pos={locked.id}: {e}")
                 await db.rollback()
     else:
         new_sl = current_price * (1 + callback)
-        if not position.sl or new_sl < position.sl:
-            position.sl = new_sl
+        if not locked.sl or new_sl < locked.sl:
+            locked.sl = new_sl
             try:
                 if hasattr(db, "flush"):
                     await db.flush()
                 await db.commit()
             except Exception as e:
-                logger.warning(f"追踪止损提交失败 pos={position.id}: {e}")
+                logger.warning(f"追踪止损提交失败 pos={locked.id}: {e}")
                 await db.rollback()
 
 
@@ -330,6 +361,9 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
         ).scalars().all()
 
         for pos in positions:
+            if not await _add_closing_position(pos.id):
+                logger.info(f"超时平仓跳过:已有平仓进行中 pos={pos.id}")
+                continue
             try:
                 logger.warning(
                     f"持仓超时自动平仓 pos={pos.id} symbol={pos.symbol} "
@@ -372,10 +406,329 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
                     )
                 except Exception:
                     pass
+            finally:
+                await _remove_closing_position(pos.id)
 
     if closed_count > 0:
         logger.info(f"超时平仓完成: {closed_count} 个持仓已自动关闭")
     return closed_count
+
+
+
+# ---------------------------------------------------------------------------
+# 超时分级保护: KOL 未提供止盈止损时的自动风控
+# ---------------------------------------------------------------------------
+
+# 超时阈值 (小时)
+TPSL_TIMEOUT_PHASE1_HOURS = 4       # 启用追踪止损
+TPSL_TIMEOUT_PHASE2_HOURS = 24      # 收紧追踪止损回撤
+TPSL_TIMEOUT_PHASE3_HOURS = 72      # 告警用户手动决策
+TPSL_TIMEOUT_PHASE4_HOURS = 96      # 自动市价平仓 (72h告警 + 24h宽限期)
+
+# 追踪止损参数
+TIMEOUT_TRAILING_CALLBACK_PHASE1 = 0.03   # 3% 回撤
+TIMEOUT_TRAILING_CALLBACK_PHASE2 = 0.02   # 2% 回撤 (收紧)
+
+# 默认超时配置 (可被策略 params 覆盖)
+DEFAULT_TIMEOUT_CONFIG = {
+    "enabled": True,          # 超时保护总开关
+    "phase1_hours": 4,        # 启用追踪止损
+    "phase2_hours": 24,       # 收紧追踪回撤
+    "phase3_hours": 72,       # 告警用户
+    "phase4_hours": 96,       # 自动平仓
+    "trailing_p1": 0.03,      # Phase1 追踪回撤
+    "trailing_p2": 0.02,      # Phase2 追踪回撤
+}
+
+
+async def _get_strategy_timeout_config(db, pos) -> dict:
+    """从持仓关联的策略获取超时保护配置, 无策略则用默认值."""
+    cfg = dict(DEFAULT_TIMEOUT_CONFIG)
+    try:
+        from app.models.strategy import Strategy
+        from sqlalchemy import select as _sel
+        # 通过 exchange_account_id 找 strategy_id
+        from app.models.config import ExchangeAccount
+        ea_result = await db.execute(
+            _sel(ExchangeAccount).where(ExchangeAccount.id == pos.exchange_account_id)
+        )
+        ea = ea_result.scalar_one_or_none()
+        if ea and ea.strategy_id:
+            s_result = await db.execute(
+                _sel(Strategy).where(Strategy.id == ea.strategy_id)
+            )
+            strategy = s_result.scalar_one_or_none()
+            if strategy and strategy.params:
+                p = strategy.params
+                if "timeout_protection_enabled" in p:
+                    cfg["enabled"] = p["timeout_protection_enabled"]
+                if "timeout_phase1_hours" in p:
+                    cfg["phase1_hours"] = p["timeout_phase1_hours"]
+                if "timeout_phase2_hours" in p:
+                    cfg["phase2_hours"] = p["timeout_phase2_hours"]
+                if "timeout_phase3_hours" in p:
+                    cfg["phase3_hours"] = p["timeout_phase3_hours"]
+                if "timeout_phase4_hours" in p:
+                    cfg["phase4_hours"] = p["timeout_phase4_hours"]
+                if "timeout_trailing_p1" in p:
+                    cfg["trailing_p1"] = p["timeout_trailing_p1"]
+                if "timeout_trailing_p2" in p:
+                    cfg["trailing_p2"] = p["timeout_trailing_p2"]
+    except Exception:
+        pass
+    return cfg
+
+
+async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
+    """超时分级保护: 对持仓时间过长且无 KOL 止盈止损管理的仓位自动加保护。
+
+    分级策略:
+      Phase 1 (4h):  启用追踪止损 (3% 回撤), 防止盈利回吐
+      Phase 2 (24h): 收紧追踪止损回撤至 2%
+      Phase 3 (72h): 飞书告警, 提示用户手动决策
+
+    使用 Redis key dcq:tpsl_timeout:{position_id} 记录已执行的阶段, 避免重复处理。
+    每个阶段只执行一次。
+
+    Returns: 处理的持仓数量
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        redis = await get_redis()
+    except Exception as e:
+        logger.warning(f"check_and_apply_tpsl_timeout_protection get_redis 失败, redis=None: {e}")
+        redis = None
+
+    # 查询所有 open 子仓位 (仅限无 KOL 止盈止损管理的持仓)
+    # tp_sl_source = 'kol' 表示 KOL 明确提供了止盈止损, 不需要超时保护
+    # tp_sl_source = 'default' 或 'timeout' 或 NULL 表示需要系统保护
+    result = await db.execute(
+        select(Position).where(
+            Position.status == "open",
+            Position.parent_id.is_not(None),
+            or_(Position.tp_sl_source.is_(None), Position.tp_sl_source != "kol"),
+        )
+    )
+    positions = result.scalars().all()
+    if not positions:
+        return 0
+
+    processed = 0
+    from app.services.notification import notify
+
+    for pos in positions:
+        if not pos.opened_at:
+            continue
+
+        # 获取此持仓关联的策略超时配置
+        timeout_cfg = await _get_strategy_timeout_config(db, pos)
+        if not timeout_cfg["enabled"]:
+            continue
+
+        # 如果持仓已有 KOL 止盈止损 (tp_sl_source='kol'), 跳过
+        if getattr(pos, 'tp_sl_source', '') == 'kol':
+            continue
+
+        # 如果策略已配置追踪止损, Phase1 不应覆盖
+        strategy_has_trailing = pos.trailing_stop and pos.trailing_callback > 0
+
+        # 计算持仓时长 (小时)
+        opened_at = pos.opened_at
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+        age_hours = (now - opened_at).total_seconds() / 3600
+
+        # Redis key 记录已执行的阶段
+        phase_key = f"dcq:tpsl_timeout:{pos.id}"
+        try:
+            completed_phase = 0
+            if redis:
+                cached = await redis.get(phase_key)
+                if cached:
+                    completed_phase = int(cached)
+        except Exception:
+            completed_phase = 0
+
+        # Phase 4: 96h 自动市价平仓 (72h告警 + 24h宽限期)
+        if age_hours >= timeout_cfg["phase4_hours"] and completed_phase < 4:
+            phase4_ok = False
+            try:
+                # 使用 Redis 锁防止与其他平仓逻辑并发
+                if not await _add_closing_position(pos.id):
+                    logger.debug(f"Phase4 跳过(正在平仓中) pos={pos.id}")
+                    continue
+                try:
+                    from app.services import order_manager as _om
+                    result = await _om.close_position(db, pos.id, pos.qty)
+                    if result.get("ok"):
+                        phase4_ok = True
+                        logger.warning(
+                            f"超时分级保护 Phase4 自动平仓 pos={pos.id} {pos.symbol} "
+                            f"age={age_hours:.1f}h pnl={result.get('pnl', 0):.2f}"
+                        )
+                        try:
+                            from app.services.notification import notify
+                            from app.services.order_manager import _get_position_source_text, _get_kol_name
+                            _src = await _get_position_source_text(db, pos.id, pos.kol_id, pos.symbol)
+                            _kol = await _get_kol_name(db, pos.kol_id)
+                            await notify(
+                                "tp_sl", "持仓超96小时已自动平仓",
+                                "品种: " + pos.symbol + "\n"
+                                "方向: " + pos.side + "\n"
+                                "交易所: " + pos.exchange.upper() + "\n"
+                                "持仓时间: " + f"{age_hours:.1f}" + " 小时\n"
+                                "净盈亏: " + f"{result.get('pnl', 0):.2f}" + " USDT\n"
+                                "说明: KOL 未提供止盈止损且超72h告警后24h未处理, 系统已自动平仓",
+                                pos.customer_id,
+                                source_text=_src,
+                                kol_name=_kol,
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        logger.warning(
+                            f"Phase4 自动平仓失败 pos={pos.id}: {result.get('reason')}"
+                        )
+                finally:
+                    await _remove_closing_position(pos.id)
+            except Exception as e:
+                logger.exception(f"Phase4 自动平仓异常 pos={pos.id}: {e}")
+            # 仅在平仓成功时才标记 Phase4 完成, 失败时不标记以便下次循环重试
+            if phase4_ok:
+                try:
+                    if redis:
+                        await redis.setex(phase_key, 7 * 86400, "4")
+                except Exception:
+                    pass
+            processed += 1
+            continue
+
+        # Phase 3: 72h 告警 (只执行一次)
+        if age_hours >= timeout_cfg["phase3_hours"] and completed_phase < 3:
+            phase3_ok = False
+            try:
+                from app.services.order_manager import _get_position_source_text, _get_kol_name
+                _src = await _get_position_source_text(db, pos.id, pos.kol_id, pos.symbol)
+                _kol = await _get_kol_name(db, pos.kol_id)
+                await notify(
+                    "tp_sl", "持仓超72小时需关注",
+                    "品种: " + pos.symbol + "\n"
+                    "方向: " + pos.side + "\n"
+                    "交易所: " + pos.exchange.upper() + "\n"
+                    "持仓时间: " + f"{age_hours:.1f}" + " 小时\n"
+                    "入场价: " + str(pos.entry_price) + "\n"
+                    "当前止损: " + str(pos.sl) + "\n"
+                    "建议: 检查是否需要手动平仓或调整止盈止损",
+                    pos.customer_id,
+                    source_text=_src,
+                    kol_name=_kol,
+                )
+                logger.warning(
+                    f"超时分级保护 Phase3 pos={pos.id} {pos.symbol} "
+                    f"age={age_hours:.1f}h"
+                )
+                phase3_ok = True
+            except Exception as e:
+                logger.warning(f"Phase3 告警失败 pos={pos.id}: {e}")
+            # 仅在通知发送成功后才标记 Phase3 完成, 失败时不标记以便下次重试
+            if phase3_ok:
+                try:
+                    if redis:
+                        await redis.setex(phase_key, 7 * 86400, "3")
+                except Exception:
+                    pass
+            processed += 1
+            continue
+
+        # Phase 2: 24h 收紧追踪止损
+        if age_hours >= timeout_cfg["phase2_hours"] and completed_phase < 2:
+            phase2_ok = False
+            try:
+                if pos.trailing_stop and pos.trailing_callback > timeout_cfg["trailing_p2"]:
+                    pos.trailing_callback = timeout_cfg["trailing_p2"]
+                    await db.commit()
+                    logger.info(
+                        f"超时分级保护 Phase2 pos={pos.id} {pos.symbol} "
+                        f"trailing_callback -> {timeout_cfg['trailing_p2']}"
+                    )
+                    phase2_ok = True
+                elif not pos.trailing_stop:
+                    pos.trailing_stop = True
+                    pos.trailing_callback = timeout_cfg["trailing_p2"]
+                    await db.commit()
+                    logger.info(
+                        f"超时分级保护 Phase2 pos={pos.id} {pos.symbol} "
+                        f"启用追踪止损 callback={timeout_cfg['trailing_p2']}"
+                    )
+                    phase2_ok = True
+                else:
+                    # 追踪止损已启用且回撤已 <= p2, 无需调整, 视为目标已达成
+                    phase2_ok = True
+            except Exception as e:
+                logger.warning(f"Phase2 收紧失败 pos={pos.id}: {e}")
+                await db.rollback()
+            # 仅在 DB commit 成功(或无需调整)后才标记 Phase2 完成, 失败时不标记以便下次重试
+            if phase2_ok:
+                try:
+                    if redis:
+                        await redis.setex(phase_key, 7 * 86400, "2")
+                except Exception:
+                    pass
+            processed += 1
+            continue
+
+        # Phase 1: 4h 启用追踪止损
+        if age_hours >= timeout_cfg["phase1_hours"] and completed_phase < 1:
+            phase1_ok = False
+            try:
+                # 如果策略已配置追踪止损, 不覆盖策略设置
+                if strategy_has_trailing:
+                    logger.debug(f"Phase1 跳过(策略已配置追踪止损) pos={pos.id}")
+                    phase1_ok = True
+                elif not pos.trailing_stop:
+                    pos.trailing_stop = True
+                    pos.trailing_callback = timeout_cfg["trailing_p1"]
+                    pos.tp_sl_source = "timeout"
+                    await db.commit()
+                    logger.info(
+                        f"超时分级保护 Phase1 pos={pos.id} {pos.symbol} "
+                        f"启用追踪止损 callback={timeout_cfg['trailing_p1']}"
+                    )
+                    phase1_ok = True
+                    try:
+                        from app.services.order_manager import _get_kol_name
+                        _kol = await _get_kol_name(db, pos.kol_id)
+                        await notify(
+                            "tp_sl", "持仓超4小时已启动追踪止损",
+                            "品种: " + pos.symbol + "\n"
+                            "方向: " + pos.side + "\n"
+                            "交易所: " + pos.exchange.upper() + "\n"
+                            "持仓时间: " + f"{age_hours:.1f}" + " 小时\n"
+                            "追踪止损回撤: " + f"{timeout_cfg['trailing_p1'] * 100:.0f}" + "%\n"
+                            "说明: KOL 未提供止盈止损, 系统已自动启动追踪止损保护",
+                            pos.customer_id,
+                            kol_name=_kol,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    # 已有追踪止损, 无需覆盖
+                    phase1_ok = True
+            except Exception as e:
+                logger.warning(f"Phase1 启用追踪止损失败 pos={pos.id}: {e}")
+                await db.rollback()
+            # 仅在 DB commit 成功(或策略已有/无需调整)后才标记 Phase1 完成, 失败时不标记以便下次重试
+            if phase1_ok:
+                try:
+                    if redis:
+                        await redis.setex(phase_key, 7 * 86400, "1")
+                except Exception:
+                    pass
+            processed += 1
+
+    if processed > 0:
+        logger.info(f"超时分级保护完成: 处理 {processed} 个持仓")
+    return processed
 
 
 async def monitor_loop() -> None:
@@ -421,22 +774,32 @@ async def monitor_loop() -> None:
                             price_cache[(exh, sym)] = price
                             # 异步写入缓存(不阻塞,失败已内部捕获)
                             _task = asyncio.create_task(_set_cached_price(exh, sym, price))
+                            _pending_tasks.add(_task)
+                            _task.add_done_callback(_pending_tasks.discard)
 
                 for pos in positions:
+                    pos_id = pos.id
+                    pos_exchange = pos.exchange
+                    pos_symbol = pos.symbol
+                    pos_customer_id = pos.customer_id
                     try:
-                        current_price = price_cache.get((pos.exchange, pos.symbol))
+                        current_price = price_cache.get((pos_exchange, pos_symbol))
                         if not current_price or current_price <= 0:
                             continue
                         await _check_one_position_with_price(db, pos, current_price)
                     except Exception as e:
-                        logger.exception(f"检查持仓 {pos.id} 失败: {e}")
+                        logger.exception(f"检查持仓 {pos_id} 失败: {e}")
                         # 回滚会话,防止单笔异常(close_position 中途失败)污染后续持仓检查
                         await db.rollback()
                 # 推送持仓更新事件,触发前端实时刷新(价格/盈亏/止损/成本保护/追踪止损)
                 _refresh_cids = set()
                 for _pos in positions:
-                    if _pos.status == "open":
-                        _refresh_cids.add(_pos.customer_id)
+                    try:
+                        if _pos.status == "open":
+                            _refresh_cids.add(_pos.customer_id)
+                    except Exception:
+                        # ORM 对象可能在回滚后失效,跳过
+                        pass
                 for _cid in _refresh_cids:
                     try:
                         await bus.publish_customer(_cid, "position", {"action": "refresh"})
@@ -512,8 +875,18 @@ async def stop_loss_monitor_loop() -> None:
 
                 # 检查每个持仓的止损
                 for pos in positions:
+                    pos_id = pos.id
+                    pos_exchange = pos.exchange
+                    pos_symbol = pos.symbol
+                    pos_side = pos.side
+                    pos_qty = pos.qty
+                    pos_sl = pos.sl
+                    pos_customer_id = pos.customer_id
+                    pos_entry_price = pos.entry_price
+                    pos_realized_pnl = pos.realized_pnl
+                    pos_exchange_account_id = pos.exchange_account_id
                     try:
-                        key = (pos.exchange, pos.symbol)
+                        key = (pos_exchange, pos_symbol)
                         current_price = price_cache.get(key, 0)
                         if not current_price or current_price <= 0:
                             continue
@@ -521,31 +894,73 @@ async def stop_loss_monitor_loop() -> None:
                         # 检查止损触发
                         if should_trigger_sl(pos, current_price):
                             # Redis锁:跳过正在平仓中的仓位,防止重复触发(跨进程)
-                            if not await _add_closing_position(pos.id):
+                            if not await _add_closing_position(pos_id):
                                 continue
                             logger.info(
-                                f"[1s止损] 触发 pos={pos.id} {pos.symbol} "
-                                f"price={current_price} sl={pos.sl}"
+                                f"[1s止损] 触发 pos={pos_id} {pos_symbol} "
+                                f"price={current_price} sl={pos_sl}"
                             )
                             try:
-                                await order_manager.close_position(db, pos.id, pos.qty)
+                                await order_manager.close_position(db, pos_id, pos_qty)
                                 await db.commit()
                             except Exception as close_err:
                                 err_msg = str(close_err)
                                 # 交易所返回"无持仓"时,说明仓位已在交易所端平掉,
                                 # 本地状态未同步 → 强制标记为closed防止无限循环
-                                if "don't have any positions" in err_msg or "no position" in err_msg.lower():
+                                if "don't have any positions" in err_msg.lower() or "no position" in err_msg.lower():
                                     logger.warning(
-                                        f"[1s止损] 仓位 {pos.id} 交易所无持仓,强制关闭本地记录"
+                                        f"[1s止损] 仓位 {pos_id} 交易所无持仓,强制关闭本地记录"
                                     )
                                     try:
                                         await db.rollback()
-                                        # 用新session直接更新状态
+                                        # 尝试从交易所获取最近成交记录计算realized_pnl
+                                        estimated_pnl = None
+                                        try:
+                                            ex_force, _ = await exchange_adapter.load_exchange(
+                                                db, pos_customer_id, pos_exchange,
+                                                exchange_account_id=pos_exchange_account_id,
+                                            )
+                                            try:
+                                                # 仅取最近5分钟内的成交, 避免包含其他仓位的交易
+                                                since_ms = int((datetime.now(timezone.utc).timestamp() - 300) * 1000)
+                                                recent_trades = await ex_force.fetch_my_trades(
+                                                    pos_symbol, since=since_ms, limit=20
+                                                )
+                                                close_side = "sell" if pos_side == "long" else "buy"
+                                                close_trades = [t for t in recent_trades if t.get("side") == close_side]
+                                                if close_trades and pos_entry_price:
+                                                    total_qty = sum(float(t.get("amount", 0)) for t in close_trades)
+                                                    total_value = sum(float(t.get("amount", 0)) * float(t.get("price", 0)) for t in close_trades)
+                                                    if total_qty > 0:
+                                                        avg_close_price = total_value / total_qty
+                                                        # 用 pos_qty 限制盈亏计算的数量, 避免把其他仓位的成交算进来
+                                                        calc_qty = min(total_qty, pos_qty) if pos_qty else total_qty
+                                                        if pos_side == "long":
+                                                            estimated_pnl = (avg_close_price - pos_entry_price) * calc_qty
+                                                        else:
+                                                            estimated_pnl = (pos_entry_price - avg_close_price) * calc_qty
+                                                        logger.info(f"[1s止损] 仓位 {pos_id} 估算realized_pnl={estimated_pnl:.2f} (calc_qty={calc_qty})")
+                                            finally:
+                                                await exchange_adapter.close_exchange(ex_force)
+                                        except Exception as fetch_e:
+                                            logger.warning(f"[1s止损] 仓位 {pos_id} 无法从交易所获取成交记录计算realized_pnl: {fetch_e}")
+
+                                        if estimated_pnl is None:
+                                            logger.warning(f"[1s止损] 仓位 {pos_id} 无法计算realized_pnl,estimated_pnl=None,不设为0")
+
                                         from sqlalchemy import update as sa_update
+                                        update_values: dict = {
+                                            "status": "closed",
+                                            "qty": 0,
+                                            "closed_at": datetime.now(timezone.utc),
+                                        }
+                                        if estimated_pnl is not None:
+                                            update_values["realized_pnl"] = (pos_realized_pnl or 0) + estimated_pnl
+
                                         await db.execute(
                                             sa_update(Position)
-                                            .where(Position.id == pos.id)
-                                            .values(status="closed", qty=0, closed_at=datetime.now(timezone.utc))
+                                            .where(Position.id == pos_id)
+                                            .values(**update_values)
                                         )
                                         await db.commit()
                                     except Exception:
@@ -553,9 +968,9 @@ async def stop_loss_monitor_loop() -> None:
                                 else:
                                     raise
                             finally:
-                                await _remove_closing_position(pos.id)
+                                await _remove_closing_position(pos_id)
                     except Exception as e:
-                        logger.exception(f"[1s止损] 平仓失败 pos={pos.id}: {e}")
+                        logger.exception(f"[1s止损] 平仓失败 pos={pos_id}: {e}")
                         await db.rollback()
 
         except Exception as e:

@@ -28,6 +28,21 @@ class EventBus:
         if not self._queues[topic]:
             del self._queues[topic]
 
+    def clear(self) -> None:
+        """清理所有订阅(用于优雅关闭或测试重置)。"""
+        self._queues.clear()
+        self._dropped_count = 0
+
+    def clear_topic(self, topic: str) -> None:
+        """清理指定 topic 的所有订阅。"""
+        if topic in self._queues:
+            del self._queues[topic]
+
+    @property
+    def dropped_count(self) -> int:
+        """返回丢弃事件计数(用于监控)。"""
+        return self._dropped_count
+
     async def publish(self, topic: str, event: str, data: Any) -> None:
         payload = json.dumps({"event": event, "data": data}, default=str, ensure_ascii=False)
         for q in list(self._queues.get(topic, set())):

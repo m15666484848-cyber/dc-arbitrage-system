@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
 
 interface AuthUser {
   id: number;
@@ -21,17 +20,14 @@ interface AuthState {
   markInitialized: () => void;
 }
 
-export const useAuthStore = create<AuthState>()(
-  persist(
-    (set) => ({
-      token: null,
-      user: null,
-      initialized: false,
-      setAuth: (token, user) => set({ token, user, initialized: true }),
-      setUser: (user) => set({ user, initialized: true }),
-      logout: () => set({ token: null, user: null, initialized: true }),
-      markInitialized: () => set({ initialized: true }),
-    }),
-    { name: "dc-quant-auth" }
-  )
-);
+// S9修复: 移除persist中间件,token仅存储在内存中
+// 刷新页面时通过 /auth/refresh (HttpOnly Cookie) 重新获取access token
+export const useAuthStore = create<AuthState>()((set) => ({
+  token: null,
+  user: null,
+  initialized: false,
+  setAuth: (token, user) => set({ token, user, initialized: true }),
+  setUser: (user) => set({ user, initialized: true }),
+  logout: () => set({ token: null, user: null, initialized: true }),
+  markInitialized: () => set({ initialized: true }),
+}));

@@ -52,6 +52,33 @@ def decode_token(token: str) -> dict:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "令牌无效或已过期") from e
 
 
+
+def create_refresh_token(subject: str, role: Role, extra: dict | None = None) -> str:
+    """创建刷新令牌(较长有效期),存储在HttpOnly Cookie中。"""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": subject,
+        "role": role,
+        "type": "refresh",
+        "iat": now,
+        "exp": now + timedelta(days=settings.refresh_token_expire_days),
+    }
+    if extra:
+        payload.update(extra)
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_alg)
+
+
+def decode_refresh_token(token: str) -> dict:
+    """解码刷新令牌,验证类型为refresh。"""
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_alg])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "无效的刷新令牌")
+        return payload
+    except JWTError as e:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "刷新令牌无效或已过期") from e
+
+
 async def get_current_user(
     token: Annotated[str, Depends(oauth2_scheme)],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -89,13 +116,18 @@ async def require_admin(current=Depends(get_current_user)):
 
 
 async def require_customer(current=Depends(get_current_user)):
-    if getattr(current, "role", None) != "customer":
+    if getattr(current, "role", None) not in ("customer", "admin"):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要客户权限")
     return current
 
 
 def _fernet() -> Fernet:
     return Fernet(settings.fernet_key.encode())
+
+
+class DecryptError(Exception):
+    """密钥解密失败异常(P0-2修复: 非 HTTP 上下文不应抛 HTTPException)。"""
+    pass
 
 
 def encrypt_secret(plain: str) -> str:
@@ -110,4 +142,4 @@ def decrypt_secret(token: str) -> str:
     try:
         return _fernet().decrypt(token.encode()).decode()
     except InvalidToken as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "密钥解密失败") from e
+        raise DecryptError(f"密钥解密失败: {e}") from e

@@ -1,5 +1,6 @@
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -12,7 +13,10 @@ from app.models.kol import Kol, KolFollow
 
 async def main():
     username = "kol_ui_test"
-    password = "KolUiTest@123"
+    password = os.environ.get("KOL_TEST_PASSWORD", "")  # L-7修复: 从环境变量读取
+    if not password:
+        print("ERROR: 请设置 KOL_TEST_PASSWORD 环境变量")
+        return
     async with AsyncSessionLocal() as db:
         customer = (await db.execute(select(Customer).where(Customer.username == username))).scalar_one_or_none()
         if not customer:
@@ -58,12 +62,11 @@ async def main():
         await db.commit()
         print({
             "username": username,
-            "password": password,
             "customer_id": customer.id,
             "kol_id": kol.id,
             "kol_name": kol.name,
             "paused_until": follow.paused_until.isoformat(),
-        })
+        })  # L-7修复: 不输出密码到 stdout
 
 
 asyncio.run(main())

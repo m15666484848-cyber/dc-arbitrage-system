@@ -1,5 +1,5 @@
 """策略配置模型:普通/马丁格尔/反马丁格尔。"""
-from sqlalchemy import Float, ForeignKey, Integer, String
+from sqlalchemy import Numeric, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -40,7 +40,7 @@ class Strategy(Base, TimestampMixin):
     # 马丁格尔运行状态(每策略独立追踪)
     martingale_round: Mapped[int] = mapped_column(Integer, default=0)
     last_result: Mapped[str] = mapped_column(String(16), default="")  # win|loss|""
-    last_qty: Mapped[float] = mapped_column(Float, default=0.0)
+    last_qty: Mapped[float] = mapped_column(default=0.0)
     # 按 KOL + 币种隔离的马丁状态。
     # key 示例: "5:BTC/USDT" -> {"round": 1, "last_result": "loss", "last_qty": 100.0}
     martingale_state: Mapped[dict] = mapped_column(JSONB, default=dict)

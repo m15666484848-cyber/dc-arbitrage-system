@@ -4,7 +4,7 @@
 最终倍率优先级: 客户自定义币种 > 客户分类覆盖 > 管理员默认 > 1.0
 """
 
-from sqlalchemy import Float, ForeignKey, String, UniqueConstraint
+from sqlalchemy import text, Index, Numeric, ForeignKey, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -21,11 +21,11 @@ class CustomerSymbolMultiplier(Base, TimestampMixin):
     __tablename__ = "customer_symbol_multipliers"
     __table_args__ = (
         UniqueConstraint("customer_id", "config_id", name="uq_customer_config"),
-        UniqueConstraint("customer_id", "custom_symbol", name="uq_customer_symbol"),
+        Index("uq_customer_symbol_not_null", "customer_id", "custom_symbol", unique=True, postgresql_where=text("custom_symbol IS NOT NULL")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
     config_id: Mapped[int | None] = mapped_column(ForeignKey("symbol_notional_configs.id", ondelete="CASCADE"), nullable=True, index=True)
     custom_symbol: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
-    multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    multiplier: Mapped[float] = mapped_column(default=1.0)
