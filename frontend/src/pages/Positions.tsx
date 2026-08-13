@@ -87,7 +87,7 @@ const hasAbnormalRiskState = (p: any) => {
   const hasInvalidQty = Number(p.qty || 0) <= 0;
   const missingPrice = !p.entry_price || !p.current_price;
   const tpHitWithoutProtection = hasHitTp(p) && !p.breakeven_moved;
-  return p.status !== "open" || (isOpen && (!p.sl || hasInvalidQty || missingPrice || tpHitWithoutProtection));
+  return isOpen && (!p.sl || hasInvalidQty || missingPrice || tpHitWithoutProtection));
 };
 
 const matchPositionFilter = (p: any, filter: PositionFilter) => {

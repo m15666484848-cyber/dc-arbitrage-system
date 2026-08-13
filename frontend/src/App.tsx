@@ -105,6 +105,13 @@ function InitGate({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+
+function WildcardRedirect() {
+  const { user, token } = useAuthStore();
+  const dest = user?.role === "admin" ? "/admin/customers" : token ? "/dashboard" : "/login";
+  return <Navigate to={dest} replace />;
+}
+
 export default function App() {
   return (
     <ErrorBoundary>
@@ -130,15 +137,8 @@ export default function App() {
             <Route path="/admin/diagnosis" element={<Protected role="admin"><AdminDiagnosis /></Protected>} />
             <Route path="/admin/simulator" element={<Protected role="admin"><AdminSimulator /></Protected>} />
             <Route path="/admin/settings" element={<Protected role="admin"><AdminSettings /></Protected>} />
-              <Route
-              path="*"
-              element={
-                <Navigate
-                  to={useAuthStore.getState().user?.role === "admin" ? "/admin/customers" : useAuthStore.getState().token ? "/dashboard" : "/login"}
-                  replace
-                />
-              }
-            />
+              {/* S16: subscribe to store instead of getState() */}
+              <Route path="*" element={<WildcardRedirect />} />
           </Routes>
         </InitGate>
       </ToastProvider>

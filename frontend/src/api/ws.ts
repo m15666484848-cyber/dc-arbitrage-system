@@ -133,8 +133,19 @@ class WsClient {
     // 指数退避: 1s, 2s, 4s, 8s, 16s, 最大 30s
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
     this.reconnectAttempts++;
-    this.reconnectTimer = setTimeout(() => {
+    this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
+      // S16: refresh token before reconnecting to avoid expired token loops
+      const token = getToken();
+      if (!token) {
+        try {
+          const API = (await import("@/api/client")).API;
+          await API.refreshToken();
+        } catch {
+          console.warn("[WS] Token refresh failed, stopping reconnection");
+          return;
+        }
+      }
       this.connect();
     }, delay);
   }

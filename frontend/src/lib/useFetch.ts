@@ -7,6 +7,9 @@ export function useFetch<T>(fn: () => Promise<T>, deps: unknown[] = []) {
   const mountedRef = useRef(true);
   const requestIdRef = useRef(0);
   const inFlightRef = useRef<Promise<T | undefined> | null>(null);
+  // S16: use ref to store latest fn, avoid useCallback dep churn
+  const fnRef = useRef(fn);
+  fnRef.current = fn;
 
   const reload = useCallback(async () => {
     if (inFlightRef.current) return inFlightRef.current;
@@ -15,7 +18,7 @@ export function useFetch<T>(fn: () => Promise<T>, deps: unknown[] = []) {
     setLoading(true);
     setError(null);
 
-    const task = fn()
+    const task = fnRef.current()
       .then((res) => {
         if (mountedRef.current && requestId === requestIdRef.current) {
           setData(res);
@@ -39,7 +42,7 @@ export function useFetch<T>(fn: () => Promise<T>, deps: unknown[] = []) {
 
     inFlightRef.current = task;
     return task;
-  }, deps);
+  }, []); // S16: stable, no deps
 
   useEffect(() => {
     mountedRef.current = true;
@@ -48,10 +51,12 @@ export function useFetch<T>(fn: () => Promise<T>, deps: unknown[] = []) {
     };
   }, []);
 
+  // S16: deps drive the effect, not reload
   useEffect(() => {
     inFlightRef.current = null;
     reload();
-  }, [reload]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
 
   return { data, loading, error, reload };
 }
