@@ -552,3 +552,4 @@ async def _ensure_admin() -> None:
                 logger.error(f"创建默认管理员失败: {e}")
                 raise
             logger.info(f"已创建默认管理员: {cfg.admin_username} (请尽快修改密码)")
+

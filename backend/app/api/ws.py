@@ -179,3 +179,4 @@ async def websocket_endpoint(ws: WebSocket):
         if q is not None:
             bus.unsubscribe(topic, q)
 
+

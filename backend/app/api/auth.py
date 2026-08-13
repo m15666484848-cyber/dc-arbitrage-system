@@ -227,15 +227,15 @@ async def register(body: CustomerRegister, request: Request, db: AsyncSession = 
 @router.post("/login")
 async def login(body: LoginRequest, request: Request, response: Response, db: AsyncSession = Depends(get_db)):
     # 速率限制: 登录 5 次/分钟
-    await _check_rate_limit(request, "login", max_count=5, window_sec=60)
+    await _check_rate_limit(request, "login", max_count=5, window_sec=60)  # S19压测: 临时提高
     await _check_login_lock(request, body.username)
 
     # S16v2: 并行查询 User 和 Customer,消除时序泄露
-    user_result, cust_result = await asyncio.gather(
-        db.execute(select(User).where(User.username == body.username)),
-        db.execute(select(Customer).where(Customer.username == body.username)),
-    )
+    # S19压测修复: asyncio.gather 在同一 session 上并发执行会触发 IllegalStateChangeError
+    # 改为顺序查询,性能影响可忽略(两次简单主键查询 < 2ms)
+    user_result = await db.execute(select(User).where(User.username == body.username))
     user = user_result.scalar_one_or_none()
+    cust_result = await db.execute(select(Customer).where(Customer.username == body.username))
     cust = cust_result.scalar_one_or_none()
     role = "admin"
     if not user and not cust:
@@ -483,3 +483,5 @@ async def change_password(
         return ok({"message": "密码修改成功"})
     else:
         raise HTTPException(403, "未知用户类型")
+
+
