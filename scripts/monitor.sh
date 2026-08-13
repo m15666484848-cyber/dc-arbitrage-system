@@ -1,7 +1,7 @@
 #!/bin/bash
 LOG="/opt/dcquant/logs/dcquant_monitor.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-ALERT_WEBHOOK="${ALERT_WEBHOOK:-https://open.feishu.cn/open-apis/bot/v2/hook/eb8cfb4f-fd41-4d15-86c5-e29970500a9e}"
+ALERT_WEBHOOK="${ALERT_WEBHOOK:-}"
 
 UNHEALTHY=$(docker ps --filter "health=unhealthy" --filter "name=dcquant" -q 2>/dev/null | wc -l)
 DOWN=$(docker ps -a --filter "status=exited" --filter "name=dcquant" -q 2>/dev/null | wc -l)

@@ -19,11 +19,10 @@ export function fmtPct(value: number | string | undefined): string {
 
 export function fmtTime(value: string | number | undefined): string {
   if (!value) return "—";
-  try {
-    return new Date(value).toLocaleString("zh-CN", { hour12: false });
-  } catch {
-    return String(value);
-  }
+  const d = new Date(value);
+  // S16v2: try/catch 捕不到 Invalid Date,用 isNaN 检测
+  if (isNaN(d.getTime())) return String(value);
+  return d.toLocaleString("zh-CN", { hour12: false });
 }
 
 export const SIGNAL_STATUS_LABEL: Record<string, string> = {

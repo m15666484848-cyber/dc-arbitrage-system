@@ -188,6 +188,7 @@ export default function ProfitStatsPage() {
       const token = useAuthStore.getState().token;
       const res = await fetch(url, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
+        credentials: "include",
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const blob = await res.blob();

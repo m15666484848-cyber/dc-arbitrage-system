@@ -54,6 +54,20 @@ function InitGate({ children }: { children: React.ReactNode }) {
     if (initialized) return;
     // S9修复: 页面刷新时通过HttpOnly Cookie中的refresh_token获取新access token
     // token不再持久化到localStorage,仅在内存中
+    // S16v2: 处理管理员模拟登录的impersonate_token (URL hash传递)
+    // 移到正常流程之前,匹配时直接 return 避免并行执行
+    const hash = window.location.hash;
+    const match = hash.match(/impersonate_token=([^&]+)/);
+    if (match) {
+      const impToken = decodeURIComponent(match[1]);
+      window.location.hash = "";
+      useAuthStore.getState().setAuth(impToken, { id: 0, username: "", role: "customer" });
+      API.me()
+        .then((u: any) => setUser(u))
+        .catch(() => logout())
+        .finally(() => markInitialized());
+      return;  // S16v2: 防止与正常流程并行执行
+    }
     if (token) {
       // 内存中已有token,直接验证
       API.me()
@@ -79,20 +93,7 @@ function InitGate({ children }: { children: React.ReactNode }) {
         })
         .finally(() => markInitialized());
     }
-    // S9修复: 处理管理员模拟登录的impersonate_token (URL hash传递)
-    const hash = window.location.hash;
-    const match = hash.match(/impersonate_token=([^&]+)/);
-    if (match) {
-      const impToken = decodeURIComponent(match[1]);
-      // 清除URL hash中的token
-      window.location.hash = "";
-      // 使用impersonate token获取用户信息
-      useAuthStore.getState().setAuth(impToken, { id: 0, username: "", role: "customer" });
-      API.me()
-        .then((u: any) => setUser(u))
-        .catch(() => logout())
-        .finally(() => markInitialized());
-    }
+
   }, [token, initialized, setUser, setAuth, markInitialized, logout]);
 
   if (!initialized) {

@@ -321,7 +321,7 @@ async def inject_signal(
 ):
     """手动注入信号(测试用:模拟 KOL 消息)。仅管理员可用,防止客户伪造 KOL 信号触发跟单。"""
     # M-3修复: 生产环境禁用信号注入
-    if settings.app_env == "production":
+    if settings.app_env not in ("development", "dev"):
         raise HTTPException(403, "生产环境禁止信号注入,请在测试环境使用")
     from datetime import datetime, timezone
 

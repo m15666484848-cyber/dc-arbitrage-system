@@ -1,4 +1,5 @@
 """认证路由:登录、自助注册、当前用户信息。"""
+import asyncio
 import re
 from datetime import datetime, timezone
 
@@ -229,13 +230,17 @@ async def login(body: LoginRequest, request: Request, response: Response, db: As
     await _check_rate_limit(request, "login", max_count=5, window_sec=60)
     await _check_login_lock(request, body.username)
 
-    user = (await db.execute(select(User).where(User.username == body.username))).scalar_one_or_none()
+    # S16v2: 并行查询 User 和 Customer,消除时序泄露
+    user_result, cust_result = await asyncio.gather(
+        db.execute(select(User).where(User.username == body.username)),
+        db.execute(select(Customer).where(Customer.username == body.username)),
+    )
+    user = user_result.scalar_one_or_none()
+    cust = cust_result.scalar_one_or_none()
     role = "admin"
-    if not user:
-        cust = (await db.execute(select(Customer).where(Customer.username == body.username))).scalar_one_or_none()
-        if not cust:
-            await _record_login_failure(request, body.username)
-            raise HTTPException(401, "用户名或密码错误")
+    if not user and not cust:
+        await _record_login_failure(request, body.username)
+        raise HTTPException(401, "用户名或密码错误")
         if not verify_password(body.password, cust.password_hash):
             await _record_login_failure(request, body.username)
             raise HTTPException(401, "用户名或密码错误")

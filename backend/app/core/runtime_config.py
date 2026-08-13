@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import hashlib
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ from app.models.config import DiscordAccount, SystemConfig
 _CACHE_TTL = 5  # 秒
 _cache_ts: float = 0
 _cache: Optional[SystemConfig] = None
+# S16v2: 防止多 worker 并发读库
+_cache_lock = asyncio.Lock()
 
 
 @dataclass
@@ -79,18 +82,22 @@ async def _load_db_config() -> Optional[SystemConfig]:
     now = time.time()
     if _cache and (now - _cache_ts) < _CACHE_TTL:
         return _cache
-    try:
-        async with AsyncSessionLocal() as db:
-            cfg = (await db.execute(select(SystemConfig).where(SystemConfig.id == 1))).scalar_one_or_none()
-            if cfg:
-                # M-4修复: expunge 使对象脱离 session,避免 detached 状态访问 relationship 时报错
-                db.expunge(cfg)
-            _cache = cfg
-            _cache_ts = now
-            return cfg
-    except Exception as e:
-        logger.debug(f"读取 SystemConfig 失败,回退到 .env: {e}")
-        return None
+    # S16v2: 加锁防止并发读库
+    async with _cache_lock:
+        # Double-check after acquiring lock
+        if _cache and (time.time() - _cache_ts) < _CACHE_TTL:
+            return _cache
+        try:
+            async with AsyncSessionLocal() as db:
+                cfg = (await db.execute(select(SystemConfig).where(SystemConfig.id == 1))).scalar_one_or_none()
+                if cfg:
+                    db.expunge(cfg)
+                _cache = cfg
+                _cache_ts = time.time()
+                return cfg
+        except Exception as e:
+            logger.debug(f"读取 SystemConfig 失败,回退到 .env: {e}")
+            return None
 
 
 def invalidate_cache() -> None:
