@@ -1,6 +1,10 @@
 #!/bin/bash
 LOG="/opt/dcquant/logs/dcquant_monitor.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+# S16v2: load env vars
+set -a
+source /opt/dcquant/.env 2>/dev/null || true
+set +a
 ALERT_WEBHOOK="${ALERT_WEBHOOK:-}"
 
 UNHEALTHY=$(docker ps --filter "health=unhealthy" --filter "name=dcquant" -q 2>/dev/null | wc -l)
