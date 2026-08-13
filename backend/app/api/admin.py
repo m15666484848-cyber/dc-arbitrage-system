@@ -38,8 +38,9 @@ router = APIRouter(prefix="/admin", tags=["管理端"])
 
 
 async def _audit(db: AsyncSession, user_id: int, action: str, target: str, detail: str = "") -> None:
+    # S16修复: 使用 flush 代替 commit,避免干扰调用方事务
     db.add(AuditLog(user_id=user_id, action=action, target=target, detail=detail))
-    await db.commit()
+    await db.flush()
 
 
 

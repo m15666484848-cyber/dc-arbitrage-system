@@ -116,7 +116,8 @@ async def require_admin(current=Depends(get_current_user)):
 
 
 async def require_customer(current=Depends(get_current_user)):
-    if getattr(current, "role", None) not in ("customer", "admin"):
+    # S16修复: 严格限制 customer 角色,防止 admin ID 混淆写入客户表
+    if getattr(current, "role", None) != "customer":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "需要客户权限")
     return current
 

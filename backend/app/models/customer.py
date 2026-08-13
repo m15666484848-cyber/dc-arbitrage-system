@@ -39,6 +39,8 @@ class Customer(Base, TimestampMixin):
     # 注册来源: self(自助注册) | admin(管理员创建) | invite(邀请码)
     register_source: Mapped[str] = mapped_column(String(16), default="self")
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # S16修复: 密码修改时间,用于校验旧 refresh_token 是否在改密前签发
+    password_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     # 管理员备注 / 拒绝原因
     note: Mapped[str] = mapped_column(Text, default="")
     reject_reason: Mapped[str] = mapped_column(String(500), default="")

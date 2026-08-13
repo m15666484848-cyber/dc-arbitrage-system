@@ -902,7 +902,8 @@ async def stop_loss_monitor_loop() -> None:
                             )
                             try:
                                 await order_manager.close_position(db, pos_id, pos_qty)
-                                await db.commit()
+                                # S16修复: 移除多余commit,close_position内部已管理事务
+                    # await db.commit()
                             except Exception as close_err:
                                 err_msg = str(close_err)
                                 # 交易所返回"无持仓"时,说明仓位已在交易所端平掉,

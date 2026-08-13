@@ -367,6 +367,13 @@ async def refresh_token(request: Request, db: AsyncSession = Depends(get_db)):
         cust = (await db.execute(select(Customer).where(Customer.username == sub))).scalar_one_or_none()
         if not cust or not cust.is_active:
             raise HTTPException(401, "用户不存在或已禁用")
+        # S16修复: 密码修改后旧的 refresh_token 失效
+        token_iat = payload.get("iat", 0)
+        if hasattr(cust, 'password_changed_at') and cust.password_changed_at:
+            from datetime import datetime as _dt
+            pwd_changed_ts = cust.password_changed_at.timestamp() if hasattr(cust.password_changed_at, 'timestamp') else 0
+            if token_iat and token_iat < pwd_changed_ts:
+                raise HTTPException(401, "密码已修改,请重新登录")
         auth_status = await get_authorization_status(db, cust.id)
         return ok({
             "access_token": access,
@@ -382,6 +389,12 @@ async def refresh_token(request: Request, db: AsyncSession = Depends(get_db)):
         user = (await db.execute(select(User).where(User.username == sub))).scalar_one_or_none()
         if not user or not user.is_active:
             raise HTTPException(401, "用户不存在或已禁用")
+        # S16修复: 密码修改后旧的 refresh_token 失效
+        token_iat = payload.get("iat", 0)
+        if hasattr(user, 'password_changed_at') and user.password_changed_at:
+            pwd_changed_ts = user.password_changed_at.timestamp() if hasattr(user.password_changed_at, 'timestamp') else 0
+            if token_iat and token_iat < pwd_changed_ts:
+                raise HTTPException(401, "密码已修改,请重新登录")
         return ok({
             "access_token": access,
             "role": "admin",
@@ -443,6 +456,7 @@ async def change_password(
         if not verify_password(old_password, current.password_hash):
             raise HTTPException(400, "旧密码错误")
         current.password_hash = hash_password(new_password)
+        current.password_changed_at = datetime.now(timezone.utc)
         try:
             await db.commit()
         except Exception:
@@ -454,6 +468,7 @@ async def change_password(
         if not verify_password(old_password, current.password_hash):
             raise HTTPException(400, "旧密码错误")
         current.password_hash = hash_password(new_password)
+        current.password_changed_at = datetime.now(timezone.utc)
         try:
             await db.commit()
         except Exception:
