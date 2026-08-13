@@ -73,11 +73,15 @@ def compute_pnl(position: Position, current_price: float) -> tuple[float, float]
     """返回 (未实现盈亏 USDT, 盈亏比例%)。"""
     if not current_price or current_price <= 0:
         return 0.0, 0.0
+    # S18: 强制 float 转换,防止 DB 返回 Decimal 导致类型混用
+    entry_price = float(position.entry_price or 0)
+    qty = float(position.qty or 0)
+    current_price = float(current_price)
     if position.side == "long":
-        pnl = (current_price - position.entry_price) * position.qty
+        pnl = (current_price - entry_price) * qty
     else:
-        pnl = (position.entry_price - current_price) * position.qty
-    cost = position.entry_price * position.qty
+        pnl = (entry_price - current_price) * qty
+    cost = entry_price * qty
     pct = (pnl / cost * 100) if cost > 0 else 0.0
     return pnl, pct
 
