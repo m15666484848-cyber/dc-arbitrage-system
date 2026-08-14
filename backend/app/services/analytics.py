@@ -417,26 +417,10 @@ async def calculate_advanced_metrics(
     loss_pnl = abs(float(loss_pnl or 0))
     profit_loss_ratio = round(win_pnl / loss_pnl, 2) if loss_pnl > 0 else 0.0
 
-    # S41: compute unrealized P&L from open positions
+    # S41: use latest snapshot's unrealized_pnl (already computed by take_equity_snapshot)
     unrealized_pnl = 0.0
-    try:
-        from app.services.position_manager import _get_cached_price, compute_pnl
-        _open_stmt = select(Position).where(
-            Position.customer_id == customer_id,
-            Position.status == "open",
-            Position.parent_id.is_not(None),
-        )
-        if exchange_account_id:
-            _open_stmt = _open_stmt.where(Position.exchange_account_id == exchange_account_id)
-        for pos in (await db.execute(_open_stmt)).scalars():
-            try:
-                _cp = await _get_cached_price(db, pos.symbol, pos.exchange)
-                _pnl, _ = compute_pnl(pos, _cp)
-                unrealized_pnl += _pnl
-            except Exception:
-                pass
-    except Exception:
-        pass
+    if snapshots:
+        unrealized_pnl = float(snapshots[-1].get("unrealized_pnl") or 0)
 
     return {
         "balance": round(balance, 2),
