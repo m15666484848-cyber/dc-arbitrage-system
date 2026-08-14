@@ -241,6 +241,9 @@ async def login(body: LoginRequest, request: Request, response: Response, db: As
     if not user and not cust:
         await _record_login_failure(request, body.username)
         raise HTTPException(401, "用户名或密码错误")
+
+    # 客户登录
+    if cust:
         if not verify_password(body.password, cust.password_hash):
             await _record_login_failure(request, body.username)
             raise HTTPException(401, "用户名或密码错误")
@@ -284,37 +287,39 @@ async def login(body: LoginRequest, request: Request, response: Response, db: As
             emergency_stop=cust.emergency_stop,
         )
 
-    if not verify_password(body.password, user.password_hash):
-        await _record_login_failure(request, body.username)
-        raise HTTPException(401, "用户名或密码错误")
-    if not user.is_active:
-        raise HTTPException(403, "账号已禁用")
-    user.last_login_at = datetime.now(timezone.utc)
-    try:
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        logger.exception("更新管理员登录时间失败")
-        raise HTTPException(500, "登录失败,请稍后重试")
-    token = create_access_token(user.username, "admin", {"user_id": user.id})
-    refresh = create_refresh_token(user.username, "admin", {"user_id": user.id})
-    response.set_cookie(
-        key="refresh_token",
-        value=refresh,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=settings.refresh_token_expire_days * 86400,
-        path="/api/auth",
-    )
-    await _clear_login_failures(request, body.username)
-    return TokenResponse(
-        access_token=token,
-        role="admin",
-        user_id=user.id,
-        username=user.username,
-        display_name=user.username,
-    )
+    # 管理员登录
+    if user:
+        if not verify_password(body.password, user.password_hash):
+            await _record_login_failure(request, body.username)
+            raise HTTPException(401, "用户名或密码错误")
+        if not user.is_active:
+            raise HTTPException(403, "账号已禁用")
+        user.last_login_at = datetime.now(timezone.utc)
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("更新管理员登录时间失败")
+            raise HTTPException(500, "登录失败,请稍后重试")
+        token = create_access_token(user.username, "admin", {"user_id": user.id})
+        refresh = create_refresh_token(user.username, "admin", {"user_id": user.id})
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=settings.refresh_token_expire_days * 86400,
+            path="/api/auth",
+        )
+        await _clear_login_failures(request, body.username)
+        return TokenResponse(
+            access_token=token,
+            role="admin",
+            user_id=user.id,
+            username=user.username,
+            display_name=user.username,
+        )
 
 
 @router.get("/me")
