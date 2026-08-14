@@ -3664,6 +3664,7 @@ async def _place_entry(
                     )
 
                 except Exception as orphan_e:
+                    await db.rollback()
 
                     logger.critical(
                         f"无法创建孤儿持仓记录 exchange_order_id={ex_order.get('id', '')} "
@@ -3965,6 +3966,7 @@ async def _place_entry(
                     )
 
                 except Exception as orphan_e:
+                    await db.rollback()
 
                     logger.critical(
                         f"无法创建孤儿持仓记录 exchange_order_id={ex_order.get('id', '')} "
