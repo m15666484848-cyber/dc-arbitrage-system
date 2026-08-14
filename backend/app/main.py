@@ -286,11 +286,16 @@ async def _migrate_schema(conn) -> None:
             "UPDATE system_config SET text_llm_api_base = llm_api_base "
             "WHERE text_llm_api_base = '' AND llm_api_base IS NOT NULL AND llm_api_base != ''"
         ))
-        # kols:把旧 llm_image_analysis 复制到 vision_llm_enabled
-        await conn.execute(text(
-            "UPDATE kols SET vision_llm_enabled = llm_image_analysis "
-            "WHERE vision_llm_enabled = FALSE AND llm_image_analysis = TRUE"
+        # kols:把旧 llm_image_analysis 复制到 vision_llm_enabled (仅当旧列存在时执行)
+        col_exists = await conn.execute(text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'kols' AND column_name = 'llm_image_analysis'"
         ))
+        if col_exists.scalar():
+            await conn.execute(text(
+                "UPDATE kols SET vision_llm_enabled = llm_image_analysis "
+                "WHERE vision_llm_enabled = FALSE AND llm_image_analysis = TRUE"
+            ))
         # 多 API 语义修正:每个客户只保留 1 个默认下单 API。
         # 优先保留:原默认账号 > 无验证错误账号 > 最近验证成功账号 > 最早账号。
         await conn.execute(text(

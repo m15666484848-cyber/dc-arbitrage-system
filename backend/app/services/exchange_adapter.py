@@ -81,24 +81,42 @@ def _get_pooled_exchange(key: str) -> Any | None:
         return None
     ex, created = entry
     if time.time() - created > _EXCHANGE_POOL_TTL:
-        # 过期, 异步关闭 (不阻塞当前调用)
         _exchange_pool.pop(key, None)
+        task = asyncio.ensure_future(_safe_close_exchange(ex))
+        _pending_closes.add(task)
+        task.add_done_callback(_pending_closes.discard)
         return None
     return ex
 
 
+_pending_closes: set = set()
+
+
+async def _safe_close_exchange(ex) -> None:
+    try:
+        await ex.close()
+    except Exception:
+        pass
+
+
 def _pool_exchange(key: str, ex) -> None:
     """将交易所对象放入连接池。"""
+    # 如果同 key 已有旧实例(API Key 变更场景), 先关闭旧实例
+    old_entry = _exchange_pool.pop(key, None)
+    if old_entry is not None:
+        old_ex, _ = old_entry
+        task = asyncio.ensure_future(_safe_close_exchange(old_ex))
+        _pending_closes.add(task)
+        task.add_done_callback(_pending_closes.discard)
     # 如果池已满, 移除最旧的
     if len(_exchange_pool) >= _EXCHANGE_POOL_MAX:
         oldest_key = min(_exchange_pool, key=lambda k: _exchange_pool[k][1])
         old_entry = _exchange_pool.pop(oldest_key, None)
         if old_entry is not None:
             old_ex, _ = old_entry
-            try:
-                asyncio.ensure_future(old_ex.close())
-            except Exception:
-                pass
+            task = asyncio.ensure_future(_safe_close_exchange(old_ex))
+            _pending_closes.add(task)
+            task.add_done_callback(_pending_closes.discard)
     ex._dcq_pooled = True
     _exchange_pool[key] = (ex, time.time())
     logger.debug(f"交易所连接池新增: {key} (池大小={len(_exchange_pool)})")

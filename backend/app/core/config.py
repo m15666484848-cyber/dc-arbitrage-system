@@ -208,11 +208,11 @@ def get_settings() -> Settings:
     if s.db_max_overflow < 0:
         raise RuntimeError("CONFIG ERROR: db_max_overflow 不能为负数")
 
-    # S10新增: Discord token 验证(生产环境必须配置)
+    # S10新增: Discord token 提示(.env 未配置时从数据库加载多账号)
     if not s.discord_token:
-        warnings.warn(
-            "CONFIG WARNING: discord_token 未配置,系统将无法监听 KOL 信号!",
-            stacklevel=2,
+        import logging
+        logging.getLogger(__name__).info(
+            "discord_token 未在 .env 配置,系统将从数据库加载 Discord 账号"
         )
 
     return s
