@@ -158,7 +158,7 @@ async def take_equity_snapshot(
             customer_id=customer_id,
             exchange_account_id=exchange_account_id,
             exchange=exchange,
-            equity=float(bal.get("equity", 0)),
+            equity=float(bal.get("balance", 0)) + total_unrealized,
             balance=float(bal.get("balance", 0)),
             unrealized_pnl=total_unrealized,
             snapshot_at=datetime.now(timezone.utc),
