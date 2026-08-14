@@ -2490,11 +2490,11 @@ async def reset_test_data(
         # ===== 按客户清除模式 =====
         # 有 customer_id 的表直接按客户删除
         cust_tables = [
-            ("equity_snapshots", "TRUNCATE TABLE equity_snapshots CASCADE WHERE customer_id = :cid"),
-            ("trades", "TRUNCATE TABLE trades CASCADE WHERE customer_id = :cid"),
-            ("pending_orders", "TRUNCATE TABLE pending_orders CASCADE WHERE customer_id = :cid"),
-            ("orders", "TRUNCATE TABLE orders CASCADE WHERE customer_id = :cid"),
-            ("positions", "TRUNCATE TABLE positions CASCADE WHERE customer_id = :cid"),
+            ("equity_snapshots", "DELETE FROM equity_snapshots WHERE customer_id = :cid"),
+            ("trades", "DELETE FROM trades WHERE customer_id = :cid"),
+            ("pending_orders", "DELETE FROM pending_orders WHERE customer_id = :cid"),
+            ("orders", "DELETE FROM orders WHERE customer_id = :cid"),
+            ("positions", "DELETE FROM positions WHERE customer_id = :cid"),
         ]
         for name, sql in cust_tables:
             result = await db.execute(text(sql), {"cid": cid})
@@ -2502,7 +2502,7 @@ async def reset_test_data(
 
         # alert_logs 通过 alert_configs 关联客户
         result = await db.execute(text(
-            "TRUNCATE TABLE alert_logs CASCADE WHERE alert_config_id IN "
+            "DELETE FROM alert_logs WHERE alert_config_id IN "
             "(SELECT id FROM alert_configs WHERE customer_id = :cid)"
         ), {"cid": cid})
         stats["alert_logs"] = result.rowcount
