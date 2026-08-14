@@ -32,7 +32,7 @@ from app.models.config import ExchangeAccount
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.0
 RETRY_MAX_DELAY = 10.0
-PRICE_CACHE_TTL = 5
+PRICE_CACHE_TTL = 15
 PRICE_CACHE_MAXSIZE = 200
 
 try:
@@ -48,6 +48,62 @@ _rate_limiters: dict[str, dict[str, Any]] = defaultdict(lambda: {
     "min_interval": 0.08,
 })
 # 限流锁:防止并发请求竞态导致间隔检查失效(多个协程同时读到旧 last_call)
+
+
+# ---------------------------------------------------------------------------
+# 交易所连接池 (避免每次 load_markets 的网络开销)
+# ---------------------------------------------------------------------------
+_exchange_pool: dict[str, tuple[Any, float]] = {}  # key -> (exchange_obj, created_time)
+_EXCHANGE_POOL_TTL = 300  # 5 分钟
+_EXCHANGE_POOL_MAX = 20  # 最大缓存数量
+
+
+async def _cleanup_exchange_pool():
+    """清理过期的交易所连接。"""
+    now = time.time()
+    expired_keys = [k for k, (_, t) in _exchange_pool.items() if now - t > _EXCHANGE_POOL_TTL]
+    for k in expired_keys:
+        entry = _exchange_pool.pop(k, None)
+        if entry is None:
+            continue
+        ex, _ = entry
+        try:
+            await ex.close()
+            logger.debug(f"交易所连接池清理过期连接: {k}")
+        except Exception:
+            pass
+
+
+def _get_pooled_exchange(key: str) -> Any | None:
+    """从连接池获取交易所对象。"""
+    entry = _exchange_pool.get(key)
+    if entry is None:
+        return None
+    ex, created = entry
+    if time.time() - created > _EXCHANGE_POOL_TTL:
+        # 过期, 异步关闭 (不阻塞当前调用)
+        _exchange_pool.pop(key, None)
+        return None
+    return ex
+
+
+def _pool_exchange(key: str, ex) -> None:
+    """将交易所对象放入连接池。"""
+    # 如果池已满, 移除最旧的
+    if len(_exchange_pool) >= _EXCHANGE_POOL_MAX:
+        oldest_key = min(_exchange_pool, key=lambda k: _exchange_pool[k][1])
+        old_entry = _exchange_pool.pop(oldest_key, None)
+        if old_entry is not None:
+            old_ex, _ = old_entry
+            try:
+                asyncio.ensure_future(old_ex.close())
+            except Exception:
+                pass
+        except Exception:
+            pass
+    ex._dcq_pooled = True
+    _exchange_pool[key] = (ex, time.time())
+    logger.debug(f"交易所连接池新增: {key} (池大小={len(_exchange_pool)})")
 _rate_locks: dict[str, "asyncio.Lock"] = defaultdict(asyncio.Lock)
 
 # 公开行情查询实例缓存(无 API Key,复用 HTTP 连接池)
@@ -358,6 +414,20 @@ async def load_exchange(
     api_key = decrypt_secret(acc.api_key_enc)
     api_secret = decrypt_secret(acc.api_secret_enc)
     passphrase = decrypt_secret(acc.passphrase_enc) if acc.passphrase_enc else ""
+    # ★ 优化: 检查交易所连接池
+    pool_key = f"{acc.exchange}:{acc.testnet}:{acc.id}"
+    pooled_ex = _get_pooled_exchange(pool_key)
+    if pooled_ex is not None:
+        # 验证 API Key 未变更
+        if getattr(pooled_ex, 'apiKey', '') == api_key:
+            logger.debug(f"交易所连接池命中: {pool_key}")
+            return pooled_ex, acc
+        else:
+            logger.info(f"交易所 API Key 已变更, 重建连接: {pool_key}")
+
+    # 清理过期连接 (惰性清理)
+    await _cleanup_exchange_pool()
+
     ex = _create_exchange(acc.exchange, api_key, api_secret, passphrase, acc.testnet, getattr(acc, "account_mode", "") or getattr(acc, "account_type", "") or "")
     try:
         await ex.load_markets()
@@ -365,6 +435,9 @@ async def load_exchange(
     except Exception as e:
         await ex.close()
         raise ValueError(f"加载 {exchange} 市场数据失败: {e}") from e
+    # ★ 优化: 将交易所对象加入连接池
+    _pool_exchange(pool_key, ex)
+
     return ex, acc
 
 
@@ -1011,10 +1084,15 @@ def extract_fee_from_order(
 
 
 async def close_exchange(ex) -> None:
+    """关闭交易所连接。如果是连接池中的对象,跳过关闭以复用。"""
+    # ★ 优化: 连接池中的交易所对象不关闭,以便复用
+    if getattr(ex, '_dcq_pooled', False):
+        logger.debug("交易所连接池对象,跳过关闭")
+        return
     try:
         await ex.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"关闭交易所连接失败: {e}")
 
 async def close_all_public_exchanges() -> None:
     """S11新增: 关闭所有缓存的公开行情交易所实例,防止HTTP连接池泄漏。"""

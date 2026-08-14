@@ -398,6 +398,17 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
             "不是双向持仓模式", "long_short_mode",
             "min notional", "min_notional",
             "小单被拒",
+            # P0修复: 扩展不可恢复错误token
+            "invalid symbol", "无效交易对",
+            "precision over limit", "lot size",
+            "market is closed", "交易暂停",
+            "no enough balance", "margin insufficient",
+            "leverage not changed", "杠杆设置失败",
+            "api key not found", "apikey invalid",
+            "signature", "签名错误",
+            "permission denied", "权限不足",
+            "ip not in whitelist", "ip限制",
+            "account suspended", "账户冻结",
         ))
         if non_retriable:
             logger.warning(f"待触发单 {pending.id} 因不可恢复错误自动取消,防止循环触发: {err_msg}")

@@ -62,7 +62,7 @@ def _extract_token(ws: WebSocket) -> tuple[str, str]:
 
 
 # S16修复: WebSocket 握手阶段 IP 频率限制
-WS_RATE_LIMIT_MAX = 30  # 每分钟最多 30 次连接
+WS_RATE_LIMIT_MAX = 30
 WS_RATE_LIMIT_WINDOW = 60  # 窗口 60 秒
 
 

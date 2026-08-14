@@ -70,3 +70,7 @@ backend/demo_*.py
 backend/reset_pwd.py
 backend/init_admin.py
 *.tsbuildinfo
+
+# P0 测试备份文件
+*.p0bak
+*.p0bak.*

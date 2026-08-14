@@ -15,6 +15,7 @@ from app.core.config import settings as _cfg
 from app.models.config import RiskConfig
 from app.models.trading import Position
 from app.services import exchange_adapter, order_manager, price_feed
+from app.services.circuit_breaker import get_breaker
 from app.services.event_bus import bus
 
 # 内存锁:记录正在平仓中的仓位ID,防止止损监控循环重复触发同一仓位
@@ -308,6 +309,221 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
                 await db.rollback()
 
 
+async def check_orphaned_master_positions(db: AsyncSession) -> int:
+    """检查孤立主仓位并自动平仓。
+
+    扫描所有 open 主仓位(parent_id IS NULL)，如果：
+    1. 没有任何 open 子仓位
+    2. 超过超时时间
+
+    则自动平仓。处理 KOL 信号创建了主仓位但子仓位从未创建、
+    或所有子仓位已关闭但主仓位遗留的情况。
+
+    Returns: 自动平仓的持仓数量
+    """
+    now = datetime.now(timezone.utc)
+
+    # 1. 收集所有需要处理的孤立主仓位
+    #    提前提取所有属性，避免后续 MissingGreenlet 错误
+    masters_raw = (
+        await db.execute(
+            select(Position).where(
+                Position.status == "open",
+                Position.parent_id.is_(None),
+            )
+        )
+    ).scalars().all()
+
+    if not masters_raw:
+        return 0
+
+    # 2. 筛选真正需要处理的孤立主仓位
+    candidates = []
+    for master in masters_raw:
+        # 检查是否有 open 子仓位
+        open_children = (
+            await db.execute(
+                select(Position.id).where(
+                    Position.parent_id == master.id,
+                    Position.status == "open",
+                )
+            )
+        ).scalars().all()
+
+        if open_children:
+            continue  # 有 open 子仓位，跳过
+
+        # 获取超时配置
+        cfg_stmt = select(RiskConfig).where(
+            RiskConfig.customer_id == master.customer_id,
+            RiskConfig.enabled.is_(True),
+        )
+        cfg = (await db.execute(cfg_stmt)).scalars().first()
+        timeout_hours = cfg.position_timeout_hours if cfg else DEFAULT_POSITION_TIMEOUT_HOURS
+
+        if timeout_hours <= 0:
+            continue
+
+        if not master.opened_at:
+            continue
+
+        opened_at = master.opened_at
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+
+        age_hours = (now - opened_at).total_seconds() / 3600
+        if age_hours < timeout_hours:
+            continue
+
+        # 提前提取所有 ORM 属性到普通变量，避免后续 MissingGreenlet
+        candidates.append({
+            "id": master.id,
+            "symbol": master.symbol,
+            "side": master.side,
+            "qty": float(master.qty) if master.qty else 0.0,
+            "customer_id": master.customer_id,
+            "kol_id": master.kol_id,
+            "exchange": master.exchange,
+            "opened_at": master.opened_at,
+            "timeout_hours": timeout_hours,
+            "age_hours": age_hours,
+        })
+
+    if not candidates:
+        return 0
+
+    logger.info(f"发现 {len(candidates)} 个孤立主仓位待处理")
+
+    # 3. 使用独立 session 逐个平仓（隔离异常影响）
+    closed_count = 0
+    for m in candidates:
+        if not await _add_closing_position(m["id"]):
+            logger.info(f"孤立主仓位平仓跳过:已有平仓进行中 pos={m['id']}")
+            continue
+
+        pos_id = m["id"]
+        symbol = m["symbol"]
+        side = m["side"]
+        qty = m["qty"]
+        timeout_h = m["timeout_hours"]
+        age_h = m["age_hours"]
+
+        try:
+            logger.warning(
+                f"孤立主仓位超时平仓 pos={pos_id} symbol={symbol} "
+                f"opened={m['opened_at']} timeout={timeout_h}h age={age_h:.1f}h "
+                f"(无open子仓位)"
+            )
+
+            # 使用新 session 进行平仓，隔离异常
+            async with AsyncSessionLocal() as close_db:
+                try:
+                    result = await order_manager.close_position(close_db, pos_id, qty)
+
+                    if result.get("ok"):
+                        closed_count += 1
+                        logger.info(
+                            f"孤立主仓位平仓成功 pos={pos_id} symbol={symbol} "
+                            f"pnl={result.get('pnl', 0)}"
+                        )
+                        # 发送通知
+                        try:
+                            from app.services.notification import notify
+                            from app.services.order_manager import _get_position_source_text, _get_kol_name
+                            _src = await _get_position_source_text(close_db, pos_id, m["kol_id"], symbol)
+                            _kol = await _get_kol_name(close_db, m["kol_id"])
+                            await notify(
+                                "tp_sl", "孤立主仓位超时自动平仓",
+                                f"品种: {symbol}\n方向: {side}\n"
+                                f"持仓时间: 超过 {timeout_h} 小时 (无子仓位)\n"
+                                f"盈亏: {float(result.get('pnl', 0)):.2f} USDT",
+                                m["customer_id"],
+                                source_text=_src,
+                                kol_name=_kol,
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        reason = str(result.get("reason", ""))
+                        logger.warning(f"孤立主仓位平仓未成功 pos={pos_id}: {reason}")
+
+                        # 交易所无持仓 -> 强制关闭本地记录
+                        reason_lower = reason.lower()
+                        if any(kw in reason_lower for kw in [
+                            "no position", "don't have", "not found",
+                            "does not exist", "no open", "position size is zero",
+                            "insufficient", "order does not exist"
+                        ]):
+                            from sqlalchemy import update as sa_update, text as sa_text
+                            await close_db.execute(
+                                sa_update(Position)
+                                .where(Position.id == pos_id)
+                                .values(
+                                    status="closed",
+                                    qty=0,
+                                    closed_at=datetime.now(timezone.utc),
+                                )
+                            )
+                            await close_db.commit()
+                            closed_count += 1
+                            logger.info(
+                                f"孤立主仓位强制关闭(交易所无持仓) "
+                                f"pos={pos_id} symbol={symbol}"
+                            )
+                        else:
+                            await close_db.rollback()
+
+                except Exception as inner_e:
+                    err_msg = str(inner_e).lower()
+                    logger.exception(
+                        f"孤立主仓位平仓异常 pos={pos_id} symbol={symbol}: {inner_e}"
+                    )
+                    await close_db.rollback()
+
+                    # 交易所无持仓 -> 强制关闭
+                    if any(kw in err_msg for kw in [
+                        "no position", "don't have", "not found",
+                        "does not exist", "no open", "position size is zero",
+                        "insufficient", "order does not exist",
+                        "bad symbol", "invalid symbol", "market"
+                    ]):
+                        try:
+                            async with AsyncSessionLocal() as fix_db:
+                                from sqlalchemy import update as sa_update
+                                await fix_db.execute(
+                                    sa_update(Position)
+                                    .where(Position.id == pos_id)
+                                    .values(
+                                        status="closed",
+                                        qty=0,
+                                        closed_at=datetime.now(timezone.utc),
+                                    )
+                                )
+                                await fix_db.commit()
+                                closed_count += 1
+                                logger.info(
+                                    f"孤立主仓位强制关闭(异常-交易所无持仓) "
+                                    f"pos={pos_id} symbol={symbol}"
+                                )
+                        except Exception as fix_err:
+                            logger.error(
+                                f"孤立主仓位强制关闭失败 pos={pos_id}: {fix_err}"
+                            )
+
+        except Exception as outer_e:
+            logger.exception(
+                f"孤立主仓位处理失败 pos={pos_id} symbol={symbol}: {outer_e}"
+            )
+        finally:
+            await _remove_closing_position(pos_id)
+
+    if closed_count > 0:
+        logger.info(f"孤立主仓位超时平仓完成: {closed_count}/{len(candidates)} 个持仓已关闭")
+    else:
+        logger.info(f"孤立主仓位扫描完成: 0/{len(candidates)} 个持仓被关闭")
+    return closed_count
+
+
 async def check_and_close_timeout_positions(db: AsyncSession) -> int:
     """检查超时持仓并自动平仓。
 
@@ -415,6 +631,16 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
 
     if closed_count > 0:
         logger.info(f"超时平仓完成: {closed_count} 个持仓已自动关闭")
+
+
+
+    # 检查孤立主仓位
+    try:
+        orphan_closed = await check_orphaned_master_positions(db)
+        closed_count += orphan_closed
+    except Exception as e:
+        logger.exception(f"孤立主仓位检查失败: {e}")
+
     return closed_count
 
 
@@ -866,11 +1092,19 @@ async def stop_loss_monitor_loop() -> None:
                         missing_by_exchange.setdefault(pos.exchange, set()).add(pos.symbol)
 
                 for exchange, symbols in missing_by_exchange.items():
-                    try:
-                        prices = await exchange_adapter.fetch_market_prices_batch(exchange, list(symbols))
-                    except Exception as e:
-                        logger.debug(f"批量获取价格失败 {exchange}:{symbols}: {e}")
+                    # P0修复: 使用断路器保护,防止交易所API超时拖垮1秒止损循环
+                    cb = get_breaker(f"price_fetch:{exchange}", threshold=3, recovery_time=60)
+                    if not cb.can_call():
+                        logger.debug(f"[断路器] {exchange} API暂停中,使用缓存价格")
                         prices = {}
+                    else:
+                        try:
+                            prices = await exchange_adapter.fetch_market_prices_batch(exchange, list(symbols))
+                            cb.record_success()
+                        except Exception as e:
+                            cb.record_failure()
+                            logger.warning(f"批量获取价格失败 {exchange}:{symbols}: {e} (断路器: {cb.state.value})")
+                            prices = {}
                     for symbol in symbols:
                         price = prices.get(symbol) if prices else None
                         if price and price > 0:

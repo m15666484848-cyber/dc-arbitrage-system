@@ -165,6 +165,7 @@ async def take_equity_snapshot(
         await db.commit()
     except Exception as e:
         logger.warning(f"净值快照失败 customer={customer_id} exchange={exchange} testnet={testnet}: {e}")
+        logger.exception(f"净值快照完整堆栈 customer={customer_id} exchange={exchange}: {e}")
         await db.rollback()
 
 

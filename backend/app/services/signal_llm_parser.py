@@ -55,6 +55,51 @@ def _strip_urls(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# LLM 解析结果缓存 (Redis)
+# ---------------------------------------------------------------------------
+import hashlib as _hashlib
+from app.core.redis import get_redis as _get_redis
+
+_LLM_CACHE_TTL = 3600  # 缓存 1 小时
+
+
+def _llm_cache_key(text: str) -> str:
+    """从信号文本生成 Redis 缓存键。"""
+    normalized = (text or "").strip().lower()[:500]
+    text_hash = _hashlib.md5(normalized.encode()).hexdigest()
+    return f"dcq:llm_parse:{text_hash}"
+
+
+async def _get_cached_llm_result(text: str) -> dict | None:
+    """从 Redis 获取缓存的 LLM 解析结果。"""
+    try:
+        redis = await _get_redis()
+        if redis is None:
+            return None
+        cached = await redis.get(_llm_cache_key(text))
+        if cached:
+            import json as _json
+            return _json.loads(cached)
+    except Exception as e:
+        logger.debug(f"LLM cache get failed: {e}")
+    return None
+
+
+async def _set_cached_llm_result(text: str, result: dict, usage: dict) -> None:
+    """将 LLM 解析结果存入 Redis。"""
+    try:
+        redis = await _get_redis()
+        if redis is None:
+            return
+        import json as _json
+        payload = _json.dumps({"result": result, "usage": usage}, ensure_ascii=False)
+        await redis.setex(_llm_cache_key(text), _LLM_CACHE_TTL, payload)
+        logger.debug(f"LLM 结果已缓存, TTL={_LLM_CACHE_TTL}s")
+    except Exception as e:
+        logger.debug(f"LLM cache set failed: {e}")
+
 # 模型降级机制
 # ---------------------------------------------------------------------------
 
@@ -62,20 +107,20 @@ def _strip_urls(text: str) -> str:
 _FALLBACK_MODEL = "deepseek-v4-pro"
 
 # 主模型超时时间(秒,与 KOL 跟单系统一致)
-_PRIMARY_TIMEOUT = 15
+_PRIMARY_TIMEOUT = 8
 
 # ★ P1 修复: 备用模型超时时间(秒)
-_FALLBACK_TIMEOUT = 15
+_FALLBACK_TIMEOUT = 10
 
 # ★ P1 修复: LLM 调用重试次数(2 次重试 = 最多 3 次尝试)
-_MAX_RETRIES = 2
+_MAX_RETRIES = 1
 
 # ★ P1 修复: 指数退避延迟(秒): 2, 4
-_RETRY_DELAYS = [2, 4]
+_RETRY_DELAYS = [1, 2]
 
 # 低置信度重试：模型正常返回但 confidence 低于执行阈值时，重新解析几次。
 # 这类重试不同于网络/超时重试，目的是给模型第二次理解机会，减少误拦截。
-_LOW_CONFIDENCE_RETRY_COUNT = 2
+_LOW_CONFIDENCE_RETRY_COUNT = 1
 _DEFAULT_MIN_CONFIDENCE = 0.5
 
 # 全局降级状态:当天主模型失败后标记降级,后续直接走备用模型
@@ -451,24 +496,36 @@ async def parse_with_llm(
         #    - 未降级:主模型(15s 超时 + 2次失败重试) -> 失败则备用模型(15s 超时 + 2次失败重试)
         #    - 已降级:直接备用模型 deepseek-v4-pro
         #    - 有效信号但置信度低于阈值:额外重试 2 次,取最后一次返回
-        for low_conf_attempt in range(_LOW_CONFIDENCE_RETRY_COUNT + 1):
-            response = await _call_with_degradation(primary_client, final_text, kol_name=kol_name)
-            result = response.get("result", {})
-            usage = response.get("usage", {})
+        # ★ 优化: 检查 LLM 解析缓存
+        _cached_llm = await _get_cached_llm_result(text or "")
+        if _cached_llm is not None:
+            result = _cached_llm.get("result", {})
+            usage = _cached_llm.get("usage", {})
+            logger.info(f"[{kol_name}] LLM 缓存命中,跳过 LLM 调用")
+        else:
+            for low_conf_attempt in range(_LOW_CONFIDENCE_RETRY_COUNT + 1):
+                response = await _call_with_degradation(primary_client, final_text, kol_name=kol_name)
+                result = response.get("result", {})
+                usage = response.get("usage", {})
 
-            # 无效信号不做低置信度重试，避免闲聊/链接/复盘文本浪费 token。
-            if not _as_bool(result.get("is_valid_signal", False)):
-                break
+                # 无效信号不做低置信度重试，避免闲聊/链接/复盘文本浪费 token。
+                if not _as_bool(result.get("is_valid_signal", False)):
+                    break
 
-            confidence = max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0))
-            if confidence >= threshold:
-                break
+                confidence = max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0))
+                if confidence >= threshold:
+                    break
 
-            if low_conf_attempt < _LOW_CONFIDENCE_RETRY_COUNT:
-                logger.warning(
-                    f"文本 LLM 置信度偏低 {confidence:.2f} < 阈值 {threshold:.2f}, "
-                    f"重新解析 {low_conf_attempt + 1}/{_LOW_CONFIDENCE_RETRY_COUNT}"
-                )
+                if low_conf_attempt < _LOW_CONFIDENCE_RETRY_COUNT:
+                    logger.warning(
+                        f"文本 LLM 置信度偏低 {confidence:.2f} < 阈值 {threshold:.2f}, "
+                        f"重新解析 {low_conf_attempt + 1}/{_LOW_CONFIDENCE_RETRY_COUNT}"
+                    )
+
+
+            # ★ 优化: 缓存 LLM 解析结果
+            if _as_bool(result.get("is_valid_signal", False)) or result.get("confidence", 0) > 0:
+                await _set_cached_llm_result(text or "", result, usage)
 
         # 检查是否为有效信号
         if not _as_bool(result.get("is_valid_signal", False)):

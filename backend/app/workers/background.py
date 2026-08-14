@@ -503,8 +503,8 @@ async def stop_background_tasks() -> None:
 
         _scheduler = None
 
-    # 取消后台循环
-
+    # P0修复: 取消后台循环时添加5秒宽限期
+    # 止损监控循环可能在平仓操作中途,直接cancel会导致交易所侧已下单但本地未记录
     for name, task in list(_background_tasks.items()):
 
         if not task.done():
@@ -512,12 +512,18 @@ async def stop_background_tasks() -> None:
             task.cancel()
 
             try:
+                # 给予5秒宽限期让关键操作(平仓/下单)完成
+                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
 
-                await task
-
-            except (asyncio.CancelledError, Exception):
-
-                pass
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                # 宽限期结束后强制取消
+                if not task.done():
+                    logger.warning(f"后台循环 {name} 5秒宽限期后仍在运行,强制取消")
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
         _background_tasks.pop(name, None)
 

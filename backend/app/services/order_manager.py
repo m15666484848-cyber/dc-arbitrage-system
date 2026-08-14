@@ -1241,7 +1241,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
                 try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", str(cr.multiplier), ex=60)
 
-                except Exception: pass
+                except Exception as _e: logger.debug(f"Redis缓存写入失败(multiplier): {_e}")
 
             return cr.multiplier
 
@@ -1309,7 +1309,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
                         try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", str(cr.multiplier), ex=60)
 
-                        except Exception: pass
+                        except Exception as _e: logger.debug(f"Redis缓存写入失败(multiplier): {_e}")
 
                     return cr.multiplier
 
@@ -1351,7 +1351,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
             try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", "1.0", ex=60)
 
-            except Exception: pass
+            except Exception as _e: logger.debug(f"Redis缓存写入失败(multiplier): {_e}")
 
         return 1.0
 
@@ -1373,7 +1373,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
         try: await redis.set(f"dcq:multiplier:{customer_id}:{symbol_upper}", str(result), ex=60)
 
-        except Exception: pass
+        except Exception as _e: logger.debug(f"Redis缓存写入失败(multiplier): {_e}")
 
     return result
 

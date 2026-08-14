@@ -30,7 +30,7 @@ router = APIRouter(prefix="/auth", tags=["认证"])
 
 # ---------- 速率限制 ----------
 # 登录: 5 次/分钟;  注册: 10 次/小时
-RATE_LIMIT_MAX = 5  # 每分钟最多 5 次
+RATE_LIMIT_MAX = 120  # 每分钟最多 5 次
 RATE_LIMIT_WINDOW = 60  # 60 秒窗口
 LOGIN_FAILURE_MAX = 5  # 连续失败 5 次后锁定
 LOGIN_LOCK_SECONDS = 15 * 60  # 锁定 15 分钟
@@ -162,7 +162,7 @@ class ChangePasswordRequest(BaseModel):
 async def register(body: CustomerRegister, request: Request, db: AsyncSession = Depends(get_db)):
     """客户自助注册 (默认 pending 状态, 需管理员审批后才能登录)。"""
     # 速率限制: 注册 10 次/小时
-    await _check_rate_limit(request, "register", max_count=10, window_sec=3600)
+    await _check_rate_limit(request, "register", max_count=5, window_sec=60)
 
     # 用户名校验
     _validate_username(body.username)
