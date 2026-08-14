@@ -232,6 +232,15 @@ async def _snapshot_points(
     rows = (await db.execute(stmt)).scalars().all()
 
     if not exchange_account_id:
+        # 只统计当前激活的交易所账户,避免已禁用账户的旧快照导致余额虚高
+        active_acc_ids = (await db.execute(
+            select(ExchangeAccount.id).where(
+                ExchangeAccount.customer_id == customer_id,
+                ExchangeAccount.is_active.is_(True),
+            )
+        )).scalars().all()
+        if active_acc_ids:
+            rows = [r for r in rows if r.exchange_account_id in active_acc_ids]
         # 多 API 聚合不能简单按时间桶求和。
         # 快照通常是逐个 API 账号轮询写入的，如果某个时间桶只包含部分账号，
         # 会把“账号补齐后的权益增加”误判为真实收益/回撤。
