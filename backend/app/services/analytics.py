@@ -282,9 +282,9 @@ async def _snapshot_points(
                 key,
                 {"snapshot_at": key, "equity": 0.0, "balance": 0.0, "unrealized_pnl": 0.0},
             )
-            item["equity"] += float(r.equity or 0)
-            item["balance"] += float(r.balance or r.equity or 0)
-            item["unrealized_pnl"] += float(r.unrealized_pnl or 0)
+            item["equity"] = float(r.equity or 0)
+            item["balance"] = float(r.balance or r.equity or 0)
+            item["unrealized_pnl"] = float(r.unrealized_pnl or 0)
         return [buckets[k] for k in sorted(buckets)]
 
     return [
