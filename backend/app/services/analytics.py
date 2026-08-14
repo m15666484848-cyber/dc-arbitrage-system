@@ -119,9 +119,6 @@ async def take_equity_snapshot(
             bal = await exchange_adapter.fetch_balance(ex)
         finally:
             await exchange_adapter.close_exchange(ex)
-    except Exception as snap_err:
-        logger.warning(f"load_exchange/fetch_balance failed customer={customer_id} exchange={exchange}: {snap_err}")
-        bal = {"equity": 0.0, "balance": 0.0, "available_balance": 0.0, "unrealized_pnl": 0.0}
 
         # SU-S2 修复: 查询所有未平仓持仓的未实现盈亏并累加
         total_unrealized = 0.0
@@ -134,6 +131,7 @@ async def take_equity_snapshot(
                         Position.customer_id == customer_id,
                         Position.exchange == exchange,
                         Position.status == "open",
+                        Position.parent_id.is_not(None),
                         Position.parent_id.is_not(None),
                     )
                 )
@@ -479,6 +477,7 @@ async def dashboard_stats(db: AsyncSession, customer_id: int, exchange_account_i
             select(func.count(Position.id)).where(
                 Position.customer_id == customer_id,
                 Position.status == "open",
+                        Position.parent_id.is_not(None),
                 Position.parent_id.is_not(None),
                 account_filter_pos,
             )
@@ -736,6 +735,7 @@ async def take_daily_risk_snapshot(
     open_stmt = select(Position).where(
         Position.customer_id == customer_id,
         Position.status == "open",
+                        Position.parent_id.is_not(None),
         Position.parent_id.is_(None),
     )
     if exchange != "all":
