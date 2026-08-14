@@ -68,11 +68,27 @@ async def delete_strategy(sid: int, current=Depends(require_customer), db: Async
     s = (await db.execute(select(Strategy).where(Strategy.id == sid, Strategy.customer_id == current.id))).scalar_one_or_none()
     if not s:
         raise HTTPException(404, "策略不存在")
-    s.enabled = False
+    # 检查是否有关联的KOL关注
+    from sqlalchemy import func, select as sa_select
+    from app.models.kol import KolFollow
+    follow_count = (await db.execute(
+        sa_select(func.count()).select_from(KolFollow).where(KolFollow.strategy_id == sid)
+    )).scalar() or 0
+
+    # 实际删除策略(关联的kol_follows.strategy_id会自动SET NULL)
+    await db.delete(s)
     try:
         await db.commit()
     except Exception as e:
         await db.rollback()
         logger.exception(f"删除策略失败 sid={sid}: {e}")
         raise HTTPException(500, "删除策略失败")
-    return ok({"id": sid, "enabled": False})
+
+    # 失效策略缓存
+    try:
+        from app.services.order_manager import _invalidate_strategy_cache
+        _invalidate_strategy_cache(s.customer_id, None)
+    except Exception:
+        pass
+
+    return ok({"id": sid, "deleted": True, "unlinked_follows": follow_count})
