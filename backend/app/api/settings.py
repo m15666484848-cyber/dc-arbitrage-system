@@ -434,7 +434,11 @@ async def test_exchange_account(aid: int, current=Depends(get_current_user), db:
     except Exception as e:
         acc.last_error = str(e)[:500]
         _audit(db, "exchange_account_test_failed", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, error={acc.last_error}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("保存连接测试失败记录失败")
         logger.exception("交易所连接测试失败")
         raise HTTPException(400, "连接失败,请检查配置后重试")
     finally:
@@ -477,7 +481,11 @@ async def get_exchange_account_balance(aid: int, current=Depends(require_custome
     except Exception as e:
         acc.last_error = str(e)[:500]
         _audit(db, "exchange_account_balance_failed", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, error={acc.last_error}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("保存余额刷新失败记录失败")
         logger.exception("交易所余额刷新失败")
         raise HTTPException(400, f"余额刷新失败:{acc.last_error}")
     finally:
@@ -564,7 +572,11 @@ async def get_exchange_balance_summary(current=Depends(require_customer), db: As
         accounts.append(item)
 
     _audit(db, "exchange_balance_summary_refresh", f"customer:{current.id}", f"customer_id={current.id}, accounts={len(accounts)}, total_equity={total_equity}")
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("保存余额刷新审计失败")
     return ok({
         "total_equity": total_equity,
         "total_balance": total_balance,

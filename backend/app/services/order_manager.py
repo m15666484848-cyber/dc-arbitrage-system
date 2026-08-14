@@ -1441,7 +1441,12 @@ async def _process_cancel_order_signal(
         pending.status = "cancelled"
         pending.cancel_reason = parsed.reason or "KOL 撤挂单信号"
 
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("撤挂单提交失败")
+        raise
     ids = [p.id for p in pending_orders]
     reason = f"撤挂单完成: 已取消 {len(ids)} 个待触发挂单"
     logger.info(
@@ -1510,7 +1515,12 @@ async def _refresh_matching_pending_orders(
         pending.status = "cancelled"
         pending.cancel_reason = "刷新挂单:旧 pending 已由新信号替换"
 
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("刷新挂单提交失败")
+        raise
     ids = [p.id for p in pending_orders]
     logger.info(
         f"刷新挂单:已取消旧 pending,随后重新挂单: "
