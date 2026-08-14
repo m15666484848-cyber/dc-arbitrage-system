@@ -675,12 +675,12 @@ async def delete_customer(cid: int, db: AsyncSession = Depends(get_db), admin=De
 
     await db.delete(cust)
     try:
+        await _audit(db, admin.id, "delete_customer", f"customer:{cid}", f"删除客户 {cust_name}")
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("删除客户失败")
         raise HTTPException(500, "删除客户失败,请稍后重试")
-    await _audit(db, admin.id, "delete_customer", f"customer:{cid}", f"删除客户 {cust_name}")
     return ok({"message": f"客户 {cust_name} 已删除"})
 
 
@@ -740,8 +740,13 @@ async def revoke_authorization(aid: int, db: AsyncSession = Depends(get_db), adm
     if not auth:
         raise HTTPException(404, "授权不存在")
     auth.active = False
-    await db.commit()
-    await _audit(db, admin.id, "revoke_auth", str(aid))
+    try:
+        await _audit(db, admin.id, "revoke_auth", str(aid))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("撤销授权失败")
+        raise HTTPException(500, "撤销授权失败")
     return ok({"id": aid, "active": False})
 
 
@@ -811,8 +816,13 @@ async def delete_kol(kid: int, db: AsyncSession = Depends(get_db), admin=Depends
     if not kol:
         raise HTTPException(404, "KOL不存在")
     kol.enabled = False
-    await db.commit()
-    await _audit(db, admin.id, "delete_kol", str(kid))
+    try:
+        await _audit(db, admin.id, "delete_kol", str(kid))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("删除KOL失败")
+        raise HTTPException(500, "删除KOL失败")
     return ok({"id": kid, "enabled": False})
 
 
@@ -2019,9 +2029,14 @@ async def delete_parser_regression_import_report(
     if not batch_id:
         raise HTTPException(400, "缺少导入批次 ID")
     await _ensure_parser_import_report_table(db)
-    await db.execute(text("DELETE FROM parser_regression_import_reports WHERE import_batch_id = :batch"), {"batch": batch_id})
-    await db.commit()
-    await _audit(db, admin.id, "delete_parser_regression_import_report", batch_id)
+    try:
+        await db.execute(text("DELETE FROM parser_regression_import_reports WHERE import_batch_id = :batch"), {"batch": batch_id})
+        await _audit(db, admin.id, "delete_parser_regression_import_report", batch_id)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("删除导入报告失败")
+        raise HTTPException(500, "删除失败")
     return ok({"import_batch_id": batch_id})
 
 
