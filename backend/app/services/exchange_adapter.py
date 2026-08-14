@@ -99,8 +99,6 @@ def _pool_exchange(key: str, ex) -> None:
                 asyncio.ensure_future(old_ex.close())
             except Exception:
                 pass
-        except Exception:
-            pass
     ex._dcq_pooled = True
     _exchange_pool[key] = (ex, time.time())
     logger.debug(f"交易所连接池新增: {key} (池大小={len(_exchange_pool)})")
