@@ -705,12 +705,12 @@ async def grant_authorization(body: AuthorizationCreate, db: AsyncSession = Depe
     )
     db.add(auth)
     try:
+        await _audit(db, admin.id, "grant_auth", f"customer={body.customer_id} exchange={body.exchange}")
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("授权失败")
         raise HTTPException(500, "授权失败,请稍后重试")
-    await _audit(db, admin.id, "grant_auth", f"customer={body.customer_id} exchange={body.exchange}")
     return ok(AuthorizationOut.model_validate(auth).model_dump())
 
 
@@ -725,12 +725,12 @@ async def update_authorization(aid: int, body: AuthorizationCreate, db: AsyncSes
     auth.active = body.active
     auth.note = body.note
     try:
+        await _audit(db, admin.id, "update_auth", str(aid))
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("更新授权失败")
         raise HTTPException(500, "更新授权失败,请稍后重试")
-    await _audit(db, admin.id, "update_auth", str(aid))
     return ok(AuthorizationOut.model_validate(auth).model_dump())
 
 
@@ -896,6 +896,7 @@ async def create_discord_account(
     )
     db.add(acc)
     try:
+        await _audit(db, admin.id, "create_discord_account", acc.label)
         await db.commit()
     except Exception:
         await db.rollback()
@@ -906,7 +907,6 @@ async def create_discord_account(
     from app.core.runtime_config import invalidate_cache
 
     invalidate_cache()
-    await _audit(db, admin.id, "create_discord_account", acc.label)
     return ok(_discord_account_out(acc))
 
 
@@ -950,6 +950,7 @@ async def update_discord_account(
         acc.last_error = ""
 
     try:
+        await _audit(db, admin.id, "update_discord_account", str(account_id))
         await db.commit()
     except Exception:
         await db.rollback()
@@ -960,7 +961,6 @@ async def update_discord_account(
     from app.core.runtime_config import invalidate_cache
 
     invalidate_cache()
-    await _audit(db, admin.id, "update_discord_account", str(account_id))
     return ok(_discord_account_out(acc))
 
 
