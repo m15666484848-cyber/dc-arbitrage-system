@@ -1850,6 +1850,22 @@ async def process_signal(
             f"side={parsed.side} positions={same_lines}"
         )
 
+    # S24: 同币种同方向近价去重 — 已有open持仓且入场价偏差<1%时拒绝新信号
+    if same_side_customer_positions and parsed.entry_price:
+        for _pos in same_side_customer_positions:
+            _pos_entry = float(_pos.entry_price) if _pos.entry_price else 0
+            if _pos_entry > 0:
+                _deviation = abs(parsed.entry_price - _pos_entry) / _pos_entry
+                if _deviation < 0.01:
+                    reason = (
+                        f"同币种近价重复: {parsed.symbol} {parsed.side} "
+                        f"新信号入场={parsed.entry_price} 已有持仓#{_pos.id}入场={_pos_entry} "
+                        f"偏差={_deviation*100:.2f}%"
+                    )
+                    logger.info(f"signal rejected (duplicate position): customer={customer_id} signal={signal.id} {reason}")
+                    await _log_signal_status(db, signal, "rejected", reason, customer_id)
+                    return {"ok": False, "reason": reason}
+
     # 0.9 入场价缺失时,后续会用 market_price 兜底,此处不直接拒绝
 
     #     但若 entry_price 和 entry_prices 同时为 None,记录告警(仍允许走市价单)
