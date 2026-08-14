@@ -353,12 +353,12 @@ async def review_shadow_result(
     row.reviewer_id = admin.id
     row.reviewed_at = datetime.now(timezone.utc)
     try:
+        await _audit(db, admin.id, "review_shadow_result", str(result_id), f"status={body.status}")
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("审核影子解析结果失败")
         raise HTTPException(500, "审核失败,请稍后重试")
-    await _audit(db, admin.id, "review_shadow_result", str(result_id), f"status={body.status}")
     return ok({"id": row.id, "status": row.status, "review_note": row.review_note})
 
 
@@ -547,12 +547,12 @@ async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db), admi
     user = User(username=body.username, password_hash=hash_password(body.password))
     db.add(user)
     try:
+        await _audit(db, admin.id, "create_user", body.username)
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("创建用户失败")
         raise HTTPException(500, "创建用户失败,请稍后重试")
-    await _audit(db, admin.id, "create_user", body.username)
     return ok(UserOut.model_validate(user).model_dump())
 
 
@@ -593,12 +593,12 @@ async def create_customer(body: CustomerCreate, db: AsyncSession = Depends(get_d
     )
     db.add(cust)
     try:
+        await _audit(db, admin.id, "create_customer", body.username)
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("创建客户失败")
         raise HTTPException(500, "创建客户失败,请稍后重试")
-    await _audit(db, admin.id, "create_customer", body.username)
     return ok(CustomerOut.model_validate(cust).model_dump())
 
 
@@ -638,12 +638,12 @@ async def update_customer(cid: int, body: CustomerUpdate, db: AsyncSession = Dep
     if body.show_signal_summary is not None:
         cust.show_signal_summary = body.show_signal_summary
     try:
+        await _audit(db, admin.id, "update_customer", str(cid))
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("更新客户失败")
         raise HTTPException(500, "更新客户失败,请稍后重试")
-    await _audit(db, admin.id, "update_customer", str(cid))
     return ok(CustomerOut.model_validate(cust).model_dump())
 
 
@@ -782,12 +782,12 @@ async def create_kol(body: KolCreate, db: AsyncSession = Depends(get_db), admin=
     )
     db.add(kol)
     try:
+        await _audit(db, admin.id, "create_kol", body.name)
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("创建KOL失败")
         raise HTTPException(500, "创建KOL失败,请稍后重试")
-    await _audit(db, admin.id, "create_kol", body.name)
     return ok(KolOut.model_validate(kol).model_dump())
 
 
@@ -801,12 +801,12 @@ async def update_kol(kid: int, body: KolUpdate, db: AsyncSession = Depends(get_d
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(kol, k, v)
     try:
+        await _audit(db, admin.id, "update_kol", str(kid))
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("更新KOL失败")
         raise HTTPException(500, "更新KOL失败,请稍后重试")
-    await _audit(db, admin.id, "update_kol", str(kid))
     return ok(KolOut.model_validate(kol).model_dump())
 
 
@@ -1123,6 +1123,11 @@ async def update_system_config(
         cfg.discord_token_enc = encrypt_secret(body.discord_token) if body.discord_token else ""
 
     try:
+        await _audit(db, admin.id, "update_system_config",
+                     f"global_llm={cfg.llm_enabled} "
+                     f"text={cfg.text_llm_provider}/key={bool(cfg.text_llm_api_key_enc)} "
+                     f"vision={cfg.vision_llm_enabled}/{cfg.vision_llm_provider}/key={bool(cfg.vision_llm_api_key_enc)} "
+                     f"discord_set={bool(cfg.discord_token_enc)}")
         await db.commit()
     except Exception:
         await db.rollback()
@@ -1130,11 +1135,6 @@ async def update_system_config(
         raise HTTPException(500, "更新系统配置失败,请稍后重试")
     await db.refresh(cfg)
     invalidate_cache()  # 失效缓存,让下次读取拿到新值
-    await _audit(db, admin.id, "update_system_config",
-                 f"global_llm={cfg.llm_enabled} "
-                 f"text={cfg.text_llm_provider}/key={bool(cfg.text_llm_api_key_enc)} "
-                 f"vision={cfg.vision_llm_enabled}/{cfg.vision_llm_provider}/key={bool(cfg.vision_llm_api_key_enc)} "
-                 f"discord_set={bool(cfg.discord_token_enc)}")
     return ok({"updated": True})
 
 
