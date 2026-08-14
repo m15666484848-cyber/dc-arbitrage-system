@@ -369,34 +369,29 @@ async def calculate_advanced_metrics(
                 monthly_return = total_return * 100
                 annual_return = total_return * 100
 
-        # 夏普比:基于快照收益率的均值/标准差
-        # L-3修复: 从实际快照时间戳计算间隔,而非硬编码5分钟
-        if len(snapshots) >= 2:
-            actual_interval_seconds = (
-                snapshots[-1]["snapshot_at"] - snapshots[0]["snapshot_at"]
-            ).total_seconds() / max(len(snapshots) - 1, 1)
-            if actual_interval_seconds > 0:
-                periods_per_year = 365 * 24 * 3600 / actual_interval_seconds
-            else:
-                periods_per_year = 105120  # 回退到5分钟间隔
-        else:
-            periods_per_year = 105120
-        annualization_factor = math.sqrt(periods_per_year)
-        daily_returns = []
-        for i in range(1, len(snapshots)):
-            prev_eq = float(snapshots[i - 1].get("equity") or 0)
-            curr_eq = float(snapshots[i].get("equity") or 0)
-            if prev_eq > 0:
-                daily_returns.append((curr_eq - prev_eq) / prev_eq)
-        if len(daily_returns) >= 2:
-            avg_ret = sum(daily_returns) / len(daily_returns)
-            variance = sum((r - avg_ret) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
-            std_ret = math.sqrt(variance) if variance > 0 else 0
-            if std_ret > 0:
-                # 年化夏普比 (假设无风险利率为0)
-                sharpe_ratio = round((avg_ret / std_ret) * annualization_factor, 2)
+        # 夏普比: 基于日收益率,年化因子=sqrt(365)
+        # S41修正: 旧实现用5分钟快照年化(sqrt(105120)),数值虚高
+        # 改为按日聚合,至少7天数据才计算
+        _daily_eq = {}
+        for snap in snapshots:
+            _dk = snap["snapshot_at"].strftime("%Y-%m-%d")
+            _daily_eq[_dk] = float(snap.get("equity") or 0)
+        _sorted_days = sorted(_daily_eq.keys())
+        if len(_sorted_days) >= 7:
+            daily_returns = []
+            for i in range(1, len(_sorted_days)):
+                _prev = _daily_eq[_sorted_days[i - 1]]
+                _curr = _daily_eq[_sorted_days[i]]
+                if _prev > 0:
+                    daily_returns.append((_curr - _prev) / _prev)
+            if len(daily_returns) >= 2:
+                avg_ret = sum(daily_returns) / len(daily_returns)
+                variance = sum((r - avg_ret) ** 2 for r in daily_returns) / (len(daily_returns) - 1)
+                std_ret = math.sqrt(variance) if variance > 0 else 0
+                if std_ret > 0:
+                    sharpe_ratio = round((avg_ret / std_ret) * math.sqrt(365), 2)
 
-    # 3. 盈亏比 (平均盈利 / 平均亏损)
+        # 3. 盈亏比 (平均盈利 / 平均亏损)
     win_pnl = (
         await db.execute(
             select(sql_func.avg(Trade.realized_pnl)).where(
@@ -422,8 +417,30 @@ async def calculate_advanced_metrics(
     loss_pnl = abs(float(loss_pnl or 0))
     profit_loss_ratio = round(win_pnl / loss_pnl, 2) if loss_pnl > 0 else 0.0
 
+    # S41: compute unrealized P&L from open positions
+    unrealized_pnl = 0.0
+    try:
+        from app.services.position_manager import _get_cached_price, compute_pnl
+        _open_stmt = select(Position).where(
+            Position.customer_id == customer_id,
+            Position.status == "open",
+            Position.parent_id.is_not(None),
+        )
+        if exchange_account_id:
+            _open_stmt = _open_stmt.where(Position.exchange_account_id == exchange_account_id)
+        for pos in (await db.execute(_open_stmt)).scalars():
+            try:
+                _cp = await _get_cached_price(db, pos.symbol, pos.exchange)
+                _pnl, _ = compute_pnl(pos, _cp)
+                unrealized_pnl += _pnl
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     return {
         "balance": round(balance, 2),
+        "unrealized_pnl": round(unrealized_pnl, 2),
         "max_drawdown": round(max_drawdown * 100, 2),
         "monthly_return": round(monthly_return, 2),
         "annual_return": round(annual_return, 2),

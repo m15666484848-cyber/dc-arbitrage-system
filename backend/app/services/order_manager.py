@@ -1923,7 +1923,7 @@ async def process_signal(
     symbol_multiplier = await _get_symbol_multiplier(db, customer_id, parsed.symbol)
 
     # 根据倍率推断币种分层,用于止盈止损 (自定义币种走对应分层而非默认altcoin)
-    from app.services.signal_filter import classify_coin, multiplier_to_tier
+    from app.services.signal_filter import compute_full_strategy_hash, classify_coin, multiplier_to_tier
     coin_tier = classify_coin(parsed.symbol)
     if coin_tier == "altcoin" and symbol_multiplier != 1.0:
         coin_tier = multiplier_to_tier(symbol_multiplier)

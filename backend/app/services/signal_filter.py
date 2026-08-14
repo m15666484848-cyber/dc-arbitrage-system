@@ -37,7 +37,7 @@ class FilterResult:
 
 
 DEDUP_WINDOW_SECONDS = 60  # 短期去重窗口
-DEDUP_LONG_TERM_WINDOW_SECONDS = 7 * 24 * 3600  # 全周期去重窗口 (7天)
+DEDUP_LONG_TERM_WINDOW_SECONDS = 24 * 3600  # 全周期去重窗口 (24小时)
 
 # ---------------------------------------------------------------------------
 # 币种分类与分层止盈止损配置
@@ -345,7 +345,7 @@ async def check_long_term_duplicate(
     redis, full_hash: str, kol_id: int | None, db=None
 ) -> tuple[bool, str]:
     """
-    全周期去重检查:用 Redis 作为唯一真相源,7 天 TTL。
+    全周期去重检查:用 Redis 作为唯一真相源,24 小时 TTL。
 
     设计决策:
       - 不查数据库(订单表未存 full_hash 字段)
@@ -359,7 +359,7 @@ async def check_long_term_duplicate(
     # 只检查是否存在，不设置(SET 操作移到 set_dedup_keys)
     exists = await redis.get(key)
     if exists is not None:
-        return True, "长期去重:该策略在过去7天内已执行"
+        return True, "长期去重:该策略在过去24小时内已执行"
 
     return False, ""
 
