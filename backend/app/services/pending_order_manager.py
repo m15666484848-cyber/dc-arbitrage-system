@@ -350,7 +350,7 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
     _lock_key = (int(_hashlib.md5(_lock_src.encode("utf-8")).hexdigest()[:8], 16) & 0x7FFFFFFF) or 1
     try:
         _lock_acquired = (await db.execute(
-            _text(f"SELECT pg_try_advisory_xact_lock({_lock_key})")
+            _text("SELECT pg_try_advisory_xact_lock(:key)").bindparams(key=_lock_key)
         )).scalar()
         if not _lock_acquired:
             logger.info(f"待触发单被并发锁阻止: cid={pending.customer_id} {pending.symbol} {pending.side}")
