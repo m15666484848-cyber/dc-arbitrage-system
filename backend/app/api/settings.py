@@ -71,7 +71,8 @@ def _account_mode(exchange: str, testnet: bool, account_mode: str | None = None)
 
 async def _audit(db: AsyncSession, user_id: int, action: str, target: str, detail: str) -> None:
     """记录客户侧设置操作审计。AuditLog.user_id 关联管理员用户表,客户操作不写 user_id。"""
-    db.add(AuditLog(action=action, target=target[:128], detail=detail[:2000], ip=""))
+    db.add(AuditLog(user_id=user_id, action=action, target=target[:128], detail=detail[:2000], ip=""))
+    await db.flush()
 
 
 # ---------- 交易所账号 ----------

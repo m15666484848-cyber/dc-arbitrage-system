@@ -857,10 +857,10 @@ async def _heartbeat_with_ack(ws, interval: int, seq: list[int], last_ack: list[
                     await ws.close()
 
 
-                except Exception:
+                except Exception as e:
 
 
-                    pass
+                    logger.warning(f"Unexpected error: {e}", exc_info=True)
 
 
                 return
@@ -882,10 +882,10 @@ async def _heartbeat_with_ack(ws, interval: int, seq: list[int], last_ack: list[
                 await ws.close()
 
 
-            except Exception:
+            except Exception as e:
 
 
-                pass
+                logger.warning(f"Unexpected error: {e}", exc_info=True)
 
 
             return  # 退出心跳循环,触发外层重连
@@ -1381,10 +1381,10 @@ async def _run_single_discord_account(account) -> None:
                 is_default_account = current.is_default
                 account_label = current.label
                 logger.info(f"Discord Token 已更新,使用新 Token 重连: id={account_id} label={account_label}")
-        except Exception:
+        except Exception as e:
 
 
-            pass
+            logger.warning(f"Unexpected error: {e}", exc_info=True)
 
 
 def _discord_account_task_key(account) -> str:

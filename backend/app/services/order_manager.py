@@ -1179,9 +1179,9 @@ def _contracts_to_coin(ex, symbol: str, contracts: float) -> float:
 
             return contracts * cs
 
-    except Exception:
+    except Exception as e:
 
-        pass
+        logger.warning(f"Unexpected error: {e}", exc_info=True)
 
     return contracts
 
@@ -1215,9 +1215,9 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
             return float(cached)
 
-    except Exception:
+    except Exception as e:
 
-        pass
+        logger.warning(f"Unexpected error: {e}", exc_info=True)
 
     # 1. 客户自定义币种覆盖 (custom_symbol 不为空)
 
@@ -4894,9 +4894,9 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             )
 
-        except Exception:
+        except Exception as e:
 
-            pass
+            logger.warning(f"Unexpected error: {e}", exc_info=True)
 
         await db.rollback()
 
