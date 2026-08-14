@@ -352,6 +352,7 @@ async def _data_archival_job() -> None:
                     f"trades={result4.rowcount}"
                 )
     except Exception as e:
+        await db.rollback()
         logger.exception(f"数据归档任务异常: {e}")
 
 async def _watchdog() -> None:

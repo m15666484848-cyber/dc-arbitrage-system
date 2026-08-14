@@ -385,6 +385,7 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
             strategy=strategy,
         )
     except Exception as e:
+        await db.rollback()
         logger.exception(f"触发待触发单 {pending.id} 下单失败: {e}")
         err_msg = str(e)
         err_low = err_msg.lower()

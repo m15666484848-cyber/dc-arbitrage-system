@@ -362,6 +362,7 @@ async def _fix_orphan_position(
             f"{symbol} {side} qty={exchange_qty} order_id={order_id}"
         )
     except Exception as e:
+        await db.rollback()
         msg = (
             f"孤儿持仓自动平仓失败 customer={customer_id} account={exchange_account_id} "
             f"{exchange} {symbol} {side} qty={exchange_qty}: {e}"
@@ -418,6 +419,7 @@ async def _fix_ghost_position(
                 f"已标记 closed (含 {len(children)} 个子仓位)"
             )
     except Exception as e:
+        await db.rollback()
         logger.error(f"[对账] 幽灵持仓修复失败 pos={master_pos_id}: {e}")
         report.errors.append(f"幽灵持仓修复失败 pos={master_pos_id}: {e}")
 
@@ -533,6 +535,7 @@ async def _fix_ghost_order(
                 f"exchange_order_id={exchange_order_id} 已标记 cancelled"
             )
     except Exception as e:
+        await db.rollback()
         logger.error(f"[对账] 幽灵挂单修复失败 order={order_id}: {e}")
         report.errors.append(f"幽灵挂单修复失败 order={order_id}: {e}")
 

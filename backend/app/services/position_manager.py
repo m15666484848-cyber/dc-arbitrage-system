@@ -511,6 +511,7 @@ async def check_orphaned_master_positions(db: AsyncSession) -> int:
                             )
 
         except Exception as outer_e:
+            await db.rollback()
             logger.exception(
                 f"孤立主仓位处理失败 pos={pos_id} symbol={symbol}: {outer_e}"
             )
