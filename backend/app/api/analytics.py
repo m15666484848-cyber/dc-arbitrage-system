@@ -168,7 +168,8 @@ async def dashboard(
 ):
     cid = current.id if current.role == "customer" else None
     if cid is None:
-        return ok({"open_positions": 0, "today_pnl": 0, "total_pnl": 0, "total_trades": 0, "win_rate": 0,
+        return ok({"open_positions": 0, "today_pnl": 0, "total_pnl": 0,
+        "unrealized_pnl": 0.0, "total_trades": 0, "win_rate": 0,
                     "equity_curve": [], "followed_kols": [], "open_positions_list": []})
     stats = await analytics.dashboard_stats(db, cid, exchange_account_id)
     curve = await analytics.equity_curve(db, cid, exchange_account_id=exchange_account_id)

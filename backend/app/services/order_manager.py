@@ -4481,6 +4481,23 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             position.closed_at = _utcnow()
 
+            # S41: clear dedup keys on close, allow re-entry with same strategy
+            try:
+                from app.core.redis_pool import get_redis as _get_redis
+                _redis = await _get_redis()
+                _tp_prices = [float(tp.get("price", 0)) for tp in (position.tp_levels or []) if tp.get("price")]
+                _full_hash = compute_full_strategy_hash(
+                    position.kol_id, position.symbol, position.side,
+                    position.entry_price, _tp_prices
+                )
+                if _full_hash and _redis:
+                    await _redis.delete(f"dedup_long:{_full_hash}")
+                    if position.exchange_account_id:
+                        await _redis.delete(f"dedup_long:acct:{position.exchange_account_id}:{_full_hash}")
+                    logger.info(f"cleared dedup on close pos={position.id}")
+            except Exception as _e:
+                logger.warning(f"dedup clear on close failed: {_e}")
+
             # 仅子仓位自行平仓(止盈止损/手动)时记录策略结果;
 
             # master 直接平仓时由下方 children 循环对各子仓位分别记录,避免重复记账
@@ -4532,6 +4549,22 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                 master.status = "closed"
 
                 master.closed_at = _utcnow()
+
+                # S41: clear dedup keys for master position
+                try:
+                    from app.core.redis_pool import get_redis as _get_redis
+                    _redis = await _get_redis()
+                    _tp_prices = [float(tp.get("price", 0)) for tp in (master.tp_levels or []) if tp.get("price")]
+                    _full_hash = compute_full_strategy_hash(
+                        master.kol_id, master.symbol, master.side,
+                        master.entry_price, _tp_prices
+                    )
+                    if _full_hash and _redis:
+                        await _redis.delete(f"dedup_long:{_full_hash}")
+                        if master.exchange_account_id:
+                            await _redis.delete(f"dedup_long:acct:{master.exchange_account_id}:{_full_hash}")
+                except Exception as _e:
+                    logger.warning(f"dedup clear on master close failed: {_e}")
 
         elif position.parent_id is None and position.status == "closed":
 
