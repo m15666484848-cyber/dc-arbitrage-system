@@ -12,6 +12,7 @@ from app.core.database import AsyncSessionLocal
 from app.models.pending_order import PendingOrder
 from app.schemas.signal import ParsedSignal
 from app.services import exchange_adapter, order_manager
+from app.models.trading import Position
 from app.services.event_bus import bus
 from app.services.notification import notify
 
@@ -444,6 +445,13 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
             source_text=_src_text,
         )
         return {"ok": False, "reason": f"下单异常: {e}"}
+
+    # 标记持仓来源为待触发单触发(不计入冷却)
+    _triggered_pos_id = result.get("position_id")
+    if _triggered_pos_id:
+        _pos = await db.get(Position, _triggered_pos_id)
+        if _pos:
+            _pos.source = "pending_trigger"
 
     # 更新待触发单状态
     pending.status = "triggered"

@@ -105,6 +105,8 @@ class RiskConfig(Base, TimestampMixin):
     # ---- 追踪止损 ----
     enable_trailing_stop: Mapped[bool] = mapped_column(Boolean, default=False)
     trailing_callback_pct: Mapped[float] = mapped_column(default=1.0)  # 百分比
+    # ---- 同KOL同币种冷却时长 ----
+    cooldown_minutes: Mapped[int] = mapped_column(Integer, default=60)  # 0=禁用
 
 
 class AlertConfig(Base, TimestampMixin):

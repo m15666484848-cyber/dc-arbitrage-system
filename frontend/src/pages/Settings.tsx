@@ -1213,6 +1213,7 @@ function AdvancedRiskTab() {
     consecutive_loss_threshold: 3,
     consecutive_loss_pause_hours: 24,
     kol_frequency_per_hour: 20,
+    cooldown_minutes: 60,
   });
   const [loaded, setLoaded] = useState(false);
 
@@ -1335,6 +1336,39 @@ function AdvancedRiskTab() {
       </Card>
 
       <div className="flex justify-end gap-2">
+      {/* 同KOL同币种冷却时长 */}
+      <Card>
+        <CardTitle>
+          <div className="flex items-center gap-2">
+            <Clock size={16} className="text-accent" />
+            <span>同KOL同币种冷却时长</span>
+          </div>
+        </CardTitle>
+        <div className="space-y-3">
+          <p className="text-xs text-slate-500">
+            同KOL同币种同方向开仓后，在冷却时长内拒绝新的普通信号（补仓信号不受限）。待触发单触发的持仓不计入冷却。
+          </p>
+          <div className="glass-soft p-3 rounded-xl">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <div className="text-sm text-slate-200">冷却时长</div>
+                <div className="text-xs text-slate-500 mt-0.5">0 = 禁用。推荐 30-60 分钟。</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min="0"
+                  max="360"
+                  value={f.cooldown_minutes}
+                  onChange={(e) => update("cooldown_minutes", Number(e.target.value))}
+                  className="w-24 text-center font-mono"
+                />
+                <span className="text-slate-500 text-sm">分钟</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Card>
         <Button variant="ghost" onClick={reload}>重置</Button>
         <Button onClick={save}>
           <Shield size={15} /> 保存KOL风控配置

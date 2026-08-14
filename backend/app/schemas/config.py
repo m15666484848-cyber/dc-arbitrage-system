@@ -97,6 +97,7 @@ class RiskConfigOut(BaseModel):
     auto_stop_loss_pct: float = Field(5.0, ge=0, le=100)
     enable_trailing_stop: bool = False
     trailing_callback_pct: float = Field(1.0, ge=0, le=100)
+    cooldown_minutes: int = Field(60, ge=0)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -118,6 +119,7 @@ class RiskConfigUpdate(BaseModel):
     auto_stop_loss_pct: float = 5.0
     enable_trailing_stop: bool = False
     trailing_callback_pct: float = 1.0
+    cooldown_minutes: int = 60
 
 
 class AlertConfigOut(BaseModel):

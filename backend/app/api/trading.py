@@ -80,7 +80,14 @@ async def _build_follow_status(db: AsyncSession, customer_id: int, follow: KolFo
     cooldown_reset_at = getattr(follow, "cooldown_reset_at", None)
     is_paused = bool(paused_until and paused_until > now)
 
-    cooldown_since = now - timedelta(hours=1)
+    # 读取可配置冷却时长
+    from app.models.config import RiskConfig
+    _rc = (await db.execute(
+        select(RiskConfig).where(RiskConfig.customer_id == customer_id, RiskConfig.enabled.is_(True))
+    )).scalar_one_or_none()
+    cooldown_minutes = getattr(_rc, "cooldown_minutes", 60) or 60 if _rc else 60
+
+    cooldown_since = now - timedelta(minutes=cooldown_minutes)
     if cooldown_reset_at and cooldown_reset_at > cooldown_since:
         cooldown_since = cooldown_reset_at
 
@@ -91,12 +98,13 @@ async def _build_follow_status(db: AsyncSession, customer_id: int, follow: KolFo
                 Position.customer_id == customer_id,
                 Position.kol_id == follow.kol_id,
                 Position.opened_at >= cooldown_since,
+                Position.source != "pending_trigger",
             )
             .order_by(Position.opened_at.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
-    cooldown_until = (recent_pos.opened_at + timedelta(hours=1)) if recent_pos else None
+    cooldown_until = (recent_pos.opened_at + timedelta(minutes=cooldown_minutes)) if recent_pos else None
     is_cooldown = bool(cooldown_until and cooldown_until > now)
 
     if is_paused:

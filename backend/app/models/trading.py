@@ -72,7 +72,8 @@ class Position(Base, TimestampMixin):
     breakeven_moved: Mapped[bool] = mapped_column(Boolean, default=False)
     trailing_stop: Mapped[bool] = mapped_column(Boolean, default=False)
     trailing_callback: Mapped[float] = mapped_column(default=0.0)  # 回撤比例
-    tp_sl_source: Mapped[str] = mapped_column(String(16), default="kol")  # kol|default|timeout
+    tp_sl_source: Mapped[str] = mapped_column(String(16), default="kol")
+    source: Mapped[str] = mapped_column(String(24), default="direct")  # direct|pending_trigger  # kol|default|timeout
     # status: open(持仓中) / closed(已平仓) / liquidated(强平)
     status: Mapped[str] = mapped_column(String(16), default="open", index=True)
     realized_pnl: Mapped[float] = mapped_column(default=0.0)

@@ -2061,7 +2061,8 @@ async def process_signal(
 
     # 补仓/加仓信号不走新单冷却拒绝,后续进入分批建仓。
 
-    one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+    cooldown_minutes = getattr(risk_cfg, "cooldown_minutes", 60) or 60
+    one_hour_ago = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
     cooldown_reset_at = None
     try:
         _follow_for_cooldown = (
@@ -2100,6 +2101,7 @@ async def process_signal(
                 Position.exchange_account_id == exchange_account_id,
 
                 Position.opened_at >= effective_cooldown_since,
+                Position.source != "pending_trigger",
 
             ).limit(1)
 
@@ -2109,7 +2111,7 @@ async def process_signal(
 
     if recent_pos and not is_add_position:
 
-        reason = f"1小时冷却: 同KOL同币种同方向 {recent_pos.opened_at.strftime('%H:%M')} 已开仓"
+        reason = f"{cooldown_minutes}分钟冷却: 同KOL同币种同方向 {recent_pos.opened_at.strftime('%H:%M')} 已开仓"
 
         logger.info(f"信号被拒(冷却期): customer={customer_id} signal={signal.id} {reason}")
 
