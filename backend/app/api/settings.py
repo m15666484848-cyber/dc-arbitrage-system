@@ -421,7 +421,12 @@ async def test_exchange_account(aid: int, current=Depends(get_current_user), db:
         acc.last_error = ""
         acc.last_verified_at = datetime.now(timezone.utc)
         _audit(db, "exchange_account_test_success", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, equity={bal.get('equity', 0)}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
         return ok({
             "success": True,
             "exchange": acc.exchange,
@@ -466,7 +471,12 @@ async def get_exchange_account_balance(aid: int, current=Depends(require_custome
         acc.last_error = ""
         acc.last_verified_at = datetime.now(timezone.utc)
         _audit(db, "exchange_account_balance_refresh", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, equity={bal.get('equity', 0)}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
         return ok({
             "id": acc.id,
             "exchange": acc.exchange,

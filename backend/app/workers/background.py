@@ -342,7 +342,11 @@ async def _data_archival_job() -> None:
             result4 = await db.execute(
                 delete(Trade).where(Trade.executed_at < cutoff_180)
             )
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
 
             total = result1.rowcount + result2.rowcount + result3.rowcount + result4.rowcount
             if total > 0:

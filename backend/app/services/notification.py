@@ -249,4 +249,9 @@ async def notify(
                 response=resp,
             )
             db.add(log)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise

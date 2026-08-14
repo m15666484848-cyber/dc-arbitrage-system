@@ -292,7 +292,12 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
             try:
                 if hasattr(db, "flush"):
                     await db.flush()
-                await db.commit()
+                try:
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("db commit failed")
+                    raise
             except Exception as e:
                 logger.warning(f"追踪止损提交失败 pos={locked.id}: {e}")
                 await db.rollback()
@@ -303,7 +308,12 @@ async def _update_trailing_stop(db: AsyncSession, position: Position, current_pr
             try:
                 if hasattr(db, "flush"):
                     await db.flush()
-                await db.commit()
+                try:
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("db commit failed")
+                    raise
             except Exception as e:
                 logger.warning(f"追踪止损提交失败 pos={locked.id}: {e}")
                 await db.rollback()
@@ -877,7 +887,12 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
             try:
                 if pos.trailing_stop and pos.trailing_callback > timeout_cfg["trailing_p2"]:
                     pos.trailing_callback = timeout_cfg["trailing_p2"]
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("db commit failed")
+                        raise
                     logger.info(
                         f"超时分级保护 Phase2 pos={pos.id} {pos.symbol} "
                         f"trailing_callback -> {timeout_cfg['trailing_p2']}"
@@ -886,7 +901,12 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                 elif not pos.trailing_stop:
                     pos.trailing_stop = True
                     pos.trailing_callback = timeout_cfg["trailing_p2"]
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("db commit failed")
+                        raise
                     logger.info(
                         f"超时分级保护 Phase2 pos={pos.id} {pos.symbol} "
                         f"启用追踪止损 callback={timeout_cfg['trailing_p2']}"
@@ -920,7 +940,12 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                     pos.trailing_stop = True
                     pos.trailing_callback = timeout_cfg["trailing_p1"]
                     pos.tp_sl_source = "timeout"
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("db commit failed")
+                        raise
                     logger.info(
                         f"超时分级保护 Phase1 pos={pos.id} {pos.symbol} "
                         f"启用追踪止损 callback={timeout_cfg['trailing_p1']}"
@@ -1202,7 +1227,12 @@ async def stop_loss_monitor_loop() -> None:
                                             .where(Position.id == pos_id)
                                             .values(**update_values)
                                         )
-                                        await db.commit()
+                                        try:
+                                            await db.commit()
+                                        except Exception:
+                                            await db.rollback()
+                                            logger.exception("db commit failed")
+                                            raise
                                     except Exception:
                                         await db.rollback()
                                 else:

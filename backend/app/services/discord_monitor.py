@@ -542,7 +542,12 @@ async def _handle_message(
                     correct_log=f"解析异常: {str(parse_err)[:500]}",
                 )
                 db.add(err_signal)
-                await db.commit()
+                try:
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("db commit failed")
+                    raise
             except Exception:
                 await db.rollback()
         return
@@ -902,7 +907,12 @@ async def _mark_discord_account_connected(account_id: int | None) -> None:
             if acc:
                 acc.last_connected_at = datetime.now(timezone.utc)
                 acc.last_error = ""
-                await db.commit()
+                try:
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("db commit failed")
+                    raise
     except Exception as e:
         logger.debug(f"更新 Discord 账号连接状态失败: id={account_id} err={e}")
 
@@ -916,7 +926,12 @@ async def _mark_discord_account_error(account_id: int | None, error: str) -> Non
             acc = (await db.execute(select(DiscordAccount).where(DiscordAccount.id == account_id))).scalar_one_or_none()
             if acc:
                 acc.last_error = error[:1000]
-                await db.commit()
+                try:
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    logger.exception("db commit failed")
+                    raise
     except Exception as e:
         logger.debug(f"更新 Discord 账号错误状态失败: id={account_id} err={e}")
 

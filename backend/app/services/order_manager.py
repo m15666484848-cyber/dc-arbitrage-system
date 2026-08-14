@@ -3656,7 +3656,12 @@ async def _place_entry(
 
                     db.add(orphan_pos)
 
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("db commit failed")
+                        raise
 
                     logger.warning(
                         f"已创建孤儿持仓记录 pos={orphan_pos.id} exchange_order_id={ex_order.get('id', '')} "
@@ -3958,7 +3963,12 @@ async def _place_entry(
 
                     db.add(orphan_pos)
 
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("db commit failed")
+                        raise
 
                     logger.warning(
                         f"已创建孤儿持仓记录 pos={orphan_pos.id} exchange_order_id={ex_order.get('id', '')} "
@@ -4797,7 +4807,12 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
                     pos_retry.status = "close_failed"
 
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("db commit failed")
+                        raise
 
             except Exception as commit_e:
 
@@ -5364,7 +5379,12 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
 
                             sib_retry.status = "close_failed"
 
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("db commit failed")
+                        raise
 
                 except Exception:
 
@@ -5481,7 +5501,12 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
 
                         pos_retry.status = "close_failed"
 
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("db commit failed")
+                        raise
 
                 except Exception:
 

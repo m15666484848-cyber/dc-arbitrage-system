@@ -157,7 +157,12 @@ async def record_shadow_parse(
             signal_received_at=signal_received_at or signal.received_at,
         )
         db.add(row)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise
         logger.info(
             f"影子解析已记录: signal_id={signal.id} kol_id={kol_id} "
             f"diff_fields={mismatch_fields}"

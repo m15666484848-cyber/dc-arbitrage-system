@@ -338,7 +338,12 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
             f"默认下单 API 验证失败,取消触发: "
             f"{ex_acc.exchange.upper()} {'测试网' if ex_acc.testnet else '实盘'}"
         )
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise
         return {"ok": False, "reason": pending.cancel_reason}
     testnet = ex_acc.testnet if ex_acc else False
 
@@ -365,7 +370,12 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
     if customer and getattr(customer, "emergency_stop", False):
         pending.status = "cancelled"
         pending.cancel_reason = "客户急停已激活,待触发单自动取消"
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise
         logger.warning(f"待触发单 {pending.id} 因客户急停自动取消")
         return {"ok": False, "reason": "客户急停已激活,待触发单已取消"}
 

@@ -354,7 +354,12 @@ async def review_shadow_result(
     row.reviewed_at = datetime.now(timezone.utc)
     try:
         await _audit(db, admin.id, "review_shadow_result", str(result_id), f"status={body.status}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("审核影子解析结果失败")
@@ -548,7 +553,12 @@ async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db), admi
     db.add(user)
     try:
         await _audit(db, admin.id, "create_user", body.username)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("创建用户失败")
@@ -594,7 +604,12 @@ async def create_customer(body: CustomerCreate, db: AsyncSession = Depends(get_d
     db.add(cust)
     try:
         await _audit(db, admin.id, "create_customer", body.username)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("创建客户失败")
@@ -639,7 +654,12 @@ async def update_customer(cid: int, body: CustomerUpdate, db: AsyncSession = Dep
         cust.show_signal_summary = body.show_signal_summary
     try:
         await _audit(db, admin.id, "update_customer", str(cid))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("更新客户失败")
@@ -676,7 +696,12 @@ async def delete_customer(cid: int, db: AsyncSession = Depends(get_db), admin=De
     await db.delete(cust)
     try:
         await _audit(db, admin.id, "delete_customer", f"customer:{cid}", f"删除客户 {cust_name}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("删除客户失败")
@@ -706,7 +731,12 @@ async def grant_authorization(body: AuthorizationCreate, db: AsyncSession = Depe
     db.add(auth)
     try:
         await _audit(db, admin.id, "grant_auth", f"customer={body.customer_id} exchange={body.exchange}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("授权失败")
@@ -726,7 +756,12 @@ async def update_authorization(aid: int, body: AuthorizationCreate, db: AsyncSes
     auth.note = body.note
     try:
         await _audit(db, admin.id, "update_auth", str(aid))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("更新授权失败")
@@ -742,7 +777,12 @@ async def revoke_authorization(aid: int, db: AsyncSession = Depends(get_db), adm
     auth.active = False
     try:
         await _audit(db, admin.id, "revoke_auth", str(aid))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("撤销授权失败")
@@ -783,7 +823,12 @@ async def create_kol(body: KolCreate, db: AsyncSession = Depends(get_db), admin=
     db.add(kol)
     try:
         await _audit(db, admin.id, "create_kol", body.name)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("创建KOL失败")
@@ -802,7 +847,12 @@ async def update_kol(kid: int, body: KolUpdate, db: AsyncSession = Depends(get_d
         setattr(kol, k, v)
     try:
         await _audit(db, admin.id, "update_kol", str(kid))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("更新KOL失败")
@@ -818,7 +868,12 @@ async def delete_kol(kid: int, db: AsyncSession = Depends(get_db), admin=Depends
     kol.enabled = False
     try:
         await _audit(db, admin.id, "delete_kol", str(kid))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("删除KOL失败")
@@ -897,7 +952,12 @@ async def create_discord_account(
     db.add(acc)
     try:
         await _audit(db, admin.id, "create_discord_account", acc.label)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("创建Discord账号失败")
@@ -951,7 +1011,12 @@ async def update_discord_account(
 
     try:
         await _audit(db, admin.id, "update_discord_account", str(account_id))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("更新Discord账号失败")
@@ -977,7 +1042,12 @@ async def delete_discord_account(
     acc.is_default = False
     try:
         await _audit(db, admin.id, "delete_discord_account", str(account_id))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("删除Discord账号失败")
@@ -1002,7 +1072,12 @@ async def get_system_config(db: AsyncSession = Depends(get_db), admin=Depends(re
         # 首次访问,创建默认行
         cfg = SystemConfig(id=1)
         db.add(cfg)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
         await db.refresh(cfg)
 
     text_key = ""
@@ -1128,7 +1203,12 @@ async def update_system_config(
                      f"text={cfg.text_llm_provider}/key={bool(cfg.text_llm_api_key_enc)} "
                      f"vision={cfg.vision_llm_enabled}/{cfg.vision_llm_provider}/key={bool(cfg.vision_llm_api_key_enc)} "
                      f"discord_set={bool(cfg.discord_token_enc)}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("更新系统配置失败")
@@ -1264,7 +1344,12 @@ async def create_symbol_notional_config(
     db.add(cfg)
     try:
         await _audit(db, admin.id, "create_symbol_notional", body.name)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("创建品种分类倍率失败")
@@ -1296,7 +1381,12 @@ async def update_symbol_notional_config(
         cfg.note = body.note
     try:
         await _audit(db, admin.id, "update_symbol_notional", str(cfg_id))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("更新品种分类倍率失败")
@@ -1317,7 +1407,12 @@ async def delete_symbol_notional_config(
     await db.delete(cfg)
     try:
         await _audit(db, admin.id, "delete_symbol_notional", str(cfg_id))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("删除品种分类倍率失败")
@@ -1809,7 +1904,12 @@ async def create_parser_regression_case(
     db.add(case)
     try:
         await _audit(db, admin.id, "create_parser_regression_case", case.name)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
         await db.refresh(case)
     except Exception:
         await db.rollback()
@@ -1839,7 +1939,12 @@ async def update_parser_regression_case(
         raise HTTPException(400, "KOL 消息原文不能为空")
     try:
         await _audit(db, admin.id, "update_parser_regression_case", str(case_id))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
         await db.refresh(case)
     except Exception:
         await db.rollback()
@@ -1934,7 +2039,12 @@ async def save_parser_regression_import_report(
             "report": json.dumps(body.report or {}, ensure_ascii=False),
         })
         await _audit(db, admin.id, "save_parser_regression_import_report", batch_id)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("保存解析导入报告失败")
@@ -2006,7 +2116,12 @@ async def refresh_parser_regression_import_report(
     })
     try:
         await _audit(db, admin.id, "refresh_parser_regression_import_report", batch_id)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("刷新解析导入报告失败")
@@ -2032,7 +2147,12 @@ async def delete_parser_regression_import_report(
     try:
         await db.execute(text("DELETE FROM parser_regression_import_reports WHERE import_batch_id = :batch"), {"batch": batch_id})
         await _audit(db, admin.id, "delete_parser_regression_import_report", batch_id)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("删除导入报告失败")
@@ -2091,7 +2211,12 @@ async def bulk_delete_parser_regression_cases(
         result = await db.execute(delete_stmt)
         deleted_count = int(result.rowcount if result.rowcount is not None else total)
         await _audit(db, admin.id, "bulk_delete_parser_regression_cases", mode_label, f"deleted={deleted_count}, q={body.q}, enabled={body.enabled}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("批量删除解析回归用例失败")
@@ -2115,7 +2240,12 @@ async def delete_parser_regression_case(
     await db.delete(case)
     try:
         await _audit(db, admin.id, "delete_parser_regression_case", str(case_id))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("删除解析回归用例失败")
@@ -2165,7 +2295,12 @@ async def bulk_import_parser_regression_cases(
 
     try:
         await _audit(db, admin.id, "bulk_import_parser_regression_cases", f"created={len(created)}")
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
         for case in created:
             await db.refresh(case)
     except Exception:
@@ -2681,7 +2816,12 @@ async def reset_customer_password(
     cust.password_hash = hash_password(new_password)
     try:
         await _audit(db, admin.id, "reset_customer_password", str(cid))
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise HTTPException(500, "操作失败,请稍后重试")
     except Exception:
         await db.rollback()
         logger.exception("重置客户密码失败")

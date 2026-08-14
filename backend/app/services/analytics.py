@@ -162,7 +162,12 @@ async def take_equity_snapshot(
             snapshot_at=datetime.now(timezone.utc),
         )
         db.add(snapshot)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise
     except Exception as e:
         logger.warning(f"净值快照失败 customer={customer_id} exchange={exchange} testnet={testnet}: {e}")
         logger.exception(f"净值快照完整堆栈 customer={customer_id} exchange={exchange}: {e}")
@@ -802,7 +807,12 @@ async def take_daily_risk_snapshot(
     # M11修复: 添加try/except/rollback,防止upsert失败导致session脏状态
     try:
         await db.execute(stmt)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception("db commit failed")
+            raise
     except Exception as e:
         await db.rollback()
         logger.error(f"日风控快照写入失败 customer={customer_id} day={local_day}: {e}")

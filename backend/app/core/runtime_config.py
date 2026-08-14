@@ -292,7 +292,11 @@ async def get_discord_account_settings() -> list[DiscordAccountSettings]:
                     is_default=True,
                 )
                 db.add(acc)
-                await db.commit()
+                try:
+                    await db.commit()
+                except Exception:
+                    await db.rollback()
+                    raise
                 await db.refresh(acc)
                 accounts = [acc]
                 logger.info("已从旧 SystemConfig.discord_token_enc 初始化默认 Discord 账号")
@@ -307,7 +311,11 @@ async def get_discord_account_settings() -> list[DiscordAccountSettings]:
                 token_hash = acc.token_hash or hashlib.sha256(token.encode("utf-8")).hexdigest()
                 if not acc.token_hash:
                     acc.token_hash = token_hash
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        raise
                 result.append(
                     DiscordAccountSettings(
                         id=acc.id,
@@ -347,6 +355,10 @@ async def ensure_system_config_row() -> SystemConfig:
             return cfg
         cfg = SystemConfig(id=1)
         db.add(cfg)
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
         logger.info("已初始化 SystemConfig 单行记录")
         return cfg

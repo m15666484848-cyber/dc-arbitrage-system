@@ -354,7 +354,12 @@ async def _fix_orphan_position(
                     f"{symbol} {side} qty={exchange_qty}, close_order_id={order_id}"
                 ),
             ))
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.exception("db commit failed")
+                raise
         report.auto_fixed += 1
         logger.warning(
             f"[对账] 测试/模拟孤儿持仓已自动平仓: customer={customer_id} "
@@ -412,7 +417,12 @@ async def _fix_ghost_position(
                 target=f"position:{master_pos_id}",
                 detail=f"对账自动修复: 持仓 #{master_pos_id} ({master_pos_symbol} {master_pos_side}) 交易所无持仓,已标记 closed (含 {len(children)} 个子仓位)",
             ))
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.exception("db commit failed")
+                raise
             report.auto_fixed += 1 + len(children)
             logger.info(
                 f"[对账] 幽灵持仓修复: pos={master_pos_id} {master_pos_symbol} {master_pos_side} "
@@ -528,7 +538,12 @@ async def _fix_ghost_order(
                 target=f"order:{order_id}",
                 detail=f"对账自动修复: 挂单 #{order_id} ({order_symbol} exchange_id={exchange_order_id}) 交易所无记录,已标记 cancelled",
             ))
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.exception("db commit failed")
+                raise
             report.auto_fixed += 1
             logger.info(
                 f"[对账] 幽灵挂单修复: order={order_id} {order_symbol} "
@@ -631,7 +646,12 @@ async def _recover_close_failed_positions() -> int:
                                 closed_at=datetime.now(timezone.utc),
                             )
                         )
-                        await db.commit()
+                        try:
+                            await db.commit()
+                        except Exception:
+                            await db.rollback()
+                            logger.exception("db commit failed")
+                            raise
                         recovered += 1
                         logger.info(f"[对账] close_failed 持仓 {pos_id} 已恢复为 closed (交易所无持仓)")
 
@@ -644,7 +664,12 @@ async def _recover_close_failed_positions() -> int:
                             detail=f"对账恢复: 交易所无持仓,自动标记closed. symbol={pos_symbol}",
                         )
                         db.add(audit)
-                        await db.commit()
+                        try:
+                            await db.commit()
+                        except Exception:
+                            await db.rollback()
+                            logger.exception("db commit failed")
+                            raise
                     else:
                         # 交易所仍有持仓,告警
                         logger.warning(
