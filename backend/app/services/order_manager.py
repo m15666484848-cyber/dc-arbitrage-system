@@ -4483,7 +4483,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             # S41: clear dedup keys on close, allow re-entry with same strategy
             try:
-                from app.core.redis_pool import get_redis as _get_redis
+                from app.core.redis import get_redis as _get_redis
                 _redis = await _get_redis()
                 _tp_prices = [float(tp.get("price", 0)) for tp in (position.tp_levels or []) if tp.get("price")]
                 _full_hash = compute_full_strategy_hash(
@@ -4552,7 +4552,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
                 # S41: clear dedup keys for master position
                 try:
-                    from app.core.redis_pool import get_redis as _get_redis
+                    from app.core.redis import get_redis as _get_redis
                     _redis = await _get_redis()
                     _tp_prices = [float(tp.get("price", 0)) for tp in (master.tp_levels or []) if tp.get("price")]
                     _full_hash = compute_full_strategy_hash(
