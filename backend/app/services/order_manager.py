@@ -2239,7 +2239,7 @@ async def process_signal(
 
     # ---- 第4层过滤: KOL 频率限制(分发改拦截) ----
 
-    # 5 分钟内同 KOL 超过 3 条开仓信号 -> 跳过
+    # 5 分钟内同 KOL 超过 5 条开仓信号 -> 跳过
 
     five_min_ago = datetime.now(timezone.utc) - timedelta(minutes=5)
 
@@ -2261,9 +2261,9 @@ async def process_signal(
 
     ).scalar_one()
 
-    if recent_signal_count > 3:
+    if recent_signal_count > 5:
 
-        reason = f"KOL频率限制: 5分钟内已发 {recent_signal_count} 条信号(上限3条)"
+        reason = f"KOL频率限制: 5分钟内已发 {recent_signal_count} 条信号(上限5条)"
 
         logger.warning(f"信号被拒(KOL频率): customer={customer_id} signal={signal.id} {reason}")
 
@@ -2748,9 +2748,9 @@ async def process_signal(
 
     # 8.5 市价单偏差校验(仅对市价单生效,待触发单已在上一步处理):
 
-    # - 有利偏离: 多单当前价低于/等于报价,空单当前价高于/等于报价,放宽到 0.2%
+    # - 有利偏离: 多单当前价低于/等于报价,空单当前价高于/等于报价,放宽到 1.0%
 
-    # - 不利偏离: 多单当前价高于报价,空单当前价低于报价,保持 0.1%
+    # - 不利偏离: 多单当前价高于报价,空单当前价低于报价,保持 0.5%
 
     if parsed.entry_price and market_price and market_price > 0:
 
@@ -2764,7 +2764,7 @@ async def process_signal(
 
         )
 
-        deviation_limit = 0.2 if is_favorable_price else 0.1
+        deviation_limit = 1.0 if is_favorable_price else 0.5
 
         deviation_type = "有利偏离" if is_favorable_price else "不利偏离"
 
