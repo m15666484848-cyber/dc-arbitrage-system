@@ -392,7 +392,7 @@ async def list_orders(
     db: AsyncSession = Depends(get_db),
 ):
     cid = _resolve_customer(current, customer_id)
-    stmt = select(Order).where(Order.customer_id == cid)
+    stmt = select(Order).where(Order.customer_id == cid, Order.status != "deleted")
     if status:
         stmt = stmt.where(Order.status == status)
     if exchange_account_id:

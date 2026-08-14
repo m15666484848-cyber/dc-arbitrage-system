@@ -2757,8 +2757,8 @@ async def process_signal(
             try:
                 _full_hash = getattr(fr.signal, 'dedup_full_hash', '')
                 await signal_filter.clear_dedup_keys(redis, fr.dedup_hash, _full_hash)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"去重key清理失败: {e}")
 
             await _log_signal_status(db, signal, "rejected", po_result.get("reason", ""), customer_id, fr.dedup_hash)
 
@@ -2802,8 +2802,8 @@ async def process_signal(
             try:
                 _full_hash = getattr(fr.signal, 'dedup_full_hash', '')
                 await signal_filter.clear_dedup_keys(redis, fr.dedup_hash, _full_hash)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"去重key清理失败: {e}")
 
             await _log_signal_status(db, signal, "rejected", reason, customer_id, fr.dedup_hash)
 
@@ -2851,8 +2851,8 @@ async def process_signal(
         try:
             _full_hash = getattr(fr.signal, 'dedup_full_hash', '') if fr else ''
             await signal_filter.clear_dedup_keys(redis, fr.dedup_hash if fr else "", _full_hash)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"去重key清理失败: {e}")
 
         await _log_signal_status(db, signal, "rejected", f"下单异常: {e}", customer_id, fr.dedup_hash)
 

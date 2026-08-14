@@ -16,9 +16,9 @@ router = APIRouter(prefix="/strategies", tags=["策略"])
 @router.get("")
 async def list_strategies(current=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     if current.role == "admin":
-        rows = (await db.execute(select(Strategy).order_by(Strategy.id))).scalars().all()
+        rows = (await db.execute(select(Strategy).where(Strategy.enabled.is_(True)).order_by(Strategy.id))).scalars().all()
     else:
-        rows = (await db.execute(select(Strategy).where(Strategy.customer_id == current.id).order_by(Strategy.id))).scalars().all()
+        rows = (await db.execute(select(Strategy).where(Strategy.customer_id == current.id, Strategy.enabled.is_(True)).order_by(Strategy.id))).scalars().all()
     return ok([StrategyOut.model_validate(s).model_dump() for s in rows])
 
 

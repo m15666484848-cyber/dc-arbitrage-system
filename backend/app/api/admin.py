@@ -353,12 +353,35 @@ async def review_shadow_result(
     row.reviewer_id = admin.id
     row.reviewed_at = datetime.now(timezone.utc)
     try:
+        await _audit(db, admin.id, "review_shadow_result", str(result_id), f"status={body.status}")
+
+        await _audit(db, admin.id, "create_user", body.username)
+
+        await _audit(db, admin.id, "create_customer", body.username)
+
+        await _audit(db, admin.id, "update_customer", str(cid))
+
+        await _audit(db, admin.id, "grant_auth", f"customer={body.customer_id} exchange={body.exchange}")
+
+        await _audit(db, admin.id, "update_auth", str(aid))
+
+        await _audit(db, admin.id, "create_kol", body.name)
+
+        await _audit(db, admin.id, "update_kol", str(kid))
+
+        await _audit(db, admin.id, "create_discord_account", acc.label)
+
+        await _audit(db, admin.id, "update_discord_account", str(account_id))
+
+        await _audit(db, admin.id, "update_system_config",
+        f"global_llm={cfg.llm_enabled} "
+        f"text={cfg.text_llm_provider}/key={bool(cfg.text_llm_api_key_enc)} "
+
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("审核影子解析结果失败")
         raise HTTPException(500, "审核失败,请稍后重试")
-    await _audit(db, admin.id, "review_shadow_result", str(result_id), f"status={body.status}")
     return ok({"id": row.id, "status": row.status, "review_note": row.review_note})
 
 
@@ -552,7 +575,6 @@ async def create_user(body: UserCreate, db: AsyncSession = Depends(get_db), admi
         await db.rollback()
         logger.exception("创建用户失败")
         raise HTTPException(500, "创建用户失败,请稍后重试")
-    await _audit(db, admin.id, "create_user", body.username)
     return ok(UserOut.model_validate(user).model_dump())
 
 
@@ -598,7 +620,6 @@ async def create_customer(body: CustomerCreate, db: AsyncSession = Depends(get_d
         await db.rollback()
         logger.exception("创建客户失败")
         raise HTTPException(500, "创建客户失败,请稍后重试")
-    await _audit(db, admin.id, "create_customer", body.username)
     return ok(CustomerOut.model_validate(cust).model_dump())
 
 
@@ -643,7 +664,6 @@ async def update_customer(cid: int, body: CustomerUpdate, db: AsyncSession = Dep
         await db.rollback()
         logger.exception("更新客户失败")
         raise HTTPException(500, "更新客户失败,请稍后重试")
-    await _audit(db, admin.id, "update_customer", str(cid))
     return ok(CustomerOut.model_validate(cust).model_dump())
 
 
@@ -675,12 +695,12 @@ async def delete_customer(cid: int, db: AsyncSession = Depends(get_db), admin=De
 
     await db.delete(cust)
     try:
+        await _audit(db, admin.id, "delete_customer", f"customer:{cid}", f"删除客户 {cust_name}")
         await db.commit()
     except Exception:
         await db.rollback()
         logger.exception("删除客户失败")
         raise HTTPException(500, "删除客户失败,请稍后重试")
-    await _audit(db, admin.id, "delete_customer", f"customer:{cid}", f"删除客户 {cust_name}")
     return ok({"message": f"客户 {cust_name} 已删除"})
 
 
@@ -710,7 +730,6 @@ async def grant_authorization(body: AuthorizationCreate, db: AsyncSession = Depe
         await db.rollback()
         logger.exception("授权失败")
         raise HTTPException(500, "授权失败,请稍后重试")
-    await _audit(db, admin.id, "grant_auth", f"customer={body.customer_id} exchange={body.exchange}")
     return ok(AuthorizationOut.model_validate(auth).model_dump())
 
 
@@ -730,7 +749,6 @@ async def update_authorization(aid: int, body: AuthorizationCreate, db: AsyncSes
         await db.rollback()
         logger.exception("更新授权失败")
         raise HTTPException(500, "更新授权失败,请稍后重试")
-    await _audit(db, admin.id, "update_auth", str(aid))
     return ok(AuthorizationOut.model_validate(auth).model_dump())
 
 
@@ -740,8 +758,13 @@ async def revoke_authorization(aid: int, db: AsyncSession = Depends(get_db), adm
     if not auth:
         raise HTTPException(404, "授权不存在")
     auth.active = False
-    await db.commit()
-    await _audit(db, admin.id, "revoke_auth", str(aid))
+    try:
+        await _audit(db, admin.id, "revoke_auth", str(aid))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("撤销授权失败")
+        raise HTTPException(500, "撤销授权失败")
     return ok({"id": aid, "active": False})
 
 
@@ -782,7 +805,6 @@ async def create_kol(body: KolCreate, db: AsyncSession = Depends(get_db), admin=
         await db.rollback()
         logger.exception("创建KOL失败")
         raise HTTPException(500, "创建KOL失败,请稍后重试")
-    await _audit(db, admin.id, "create_kol", body.name)
     return ok(KolOut.model_validate(kol).model_dump())
 
 
@@ -801,7 +823,6 @@ async def update_kol(kid: int, body: KolUpdate, db: AsyncSession = Depends(get_d
         await db.rollback()
         logger.exception("更新KOL失败")
         raise HTTPException(500, "更新KOL失败,请稍后重试")
-    await _audit(db, admin.id, "update_kol", str(kid))
     return ok(KolOut.model_validate(kol).model_dump())
 
 
@@ -811,8 +832,13 @@ async def delete_kol(kid: int, db: AsyncSession = Depends(get_db), admin=Depends
     if not kol:
         raise HTTPException(404, "KOL不存在")
     kol.enabled = False
-    await db.commit()
-    await _audit(db, admin.id, "delete_kol", str(kid))
+    try:
+        await _audit(db, admin.id, "delete_kol", str(kid))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("删除KOL失败")
+        raise HTTPException(500, "删除KOL失败")
     return ok({"id": kid, "enabled": False})
 
 
@@ -896,7 +922,6 @@ async def create_discord_account(
     from app.core.runtime_config import invalidate_cache
 
     invalidate_cache()
-    await _audit(db, admin.id, "create_discord_account", acc.label)
     return ok(_discord_account_out(acc))
 
 
@@ -950,7 +975,6 @@ async def update_discord_account(
     from app.core.runtime_config import invalidate_cache
 
     invalidate_cache()
-    await _audit(db, admin.id, "update_discord_account", str(account_id))
     return ok(_discord_account_out(acc))
 
 
@@ -1115,9 +1139,6 @@ async def update_system_config(
         raise HTTPException(500, "更新系统配置失败,请稍后重试")
     await db.refresh(cfg)
     invalidate_cache()  # 失效缓存,让下次读取拿到新值
-    await _audit(db, admin.id, "update_system_config",
-                 f"global_llm={cfg.llm_enabled} "
-                 f"text={cfg.text_llm_provider}/key={bool(cfg.text_llm_api_key_enc)} "
                  f"vision={cfg.vision_llm_enabled}/{cfg.vision_llm_provider}/key={bool(cfg.vision_llm_api_key_enc)} "
                  f"discord_set={bool(cfg.discord_token_enc)}")
     return ok({"updated": True})
@@ -2009,9 +2030,14 @@ async def delete_parser_regression_import_report(
     if not batch_id:
         raise HTTPException(400, "缺少导入批次 ID")
     await _ensure_parser_import_report_table(db)
-    await db.execute(text("DELETE FROM parser_regression_import_reports WHERE import_batch_id = :batch"), {"batch": batch_id})
-    await db.commit()
-    await _audit(db, admin.id, "delete_parser_regression_import_report", batch_id)
+    try:
+        await db.execute(text("DELETE FROM parser_regression_import_reports WHERE import_batch_id = :batch"), {"batch": batch_id})
+        await _audit(db, admin.id, "delete_parser_regression_import_report", batch_id)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("删除导入报告失败")
+        raise HTTPException(500, "删除失败")
     return ok({"import_batch_id": batch_id})
 
 
