@@ -1,11 +1,6 @@
 #!/bin/bash
 LOG="/opt/dcquant/logs/dcquant_monitor.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-# S16v2: load env vars
-set -a
-source /opt/dcquant/.env 2>/dev/null || true
-set +a
-ALERT_WEBHOOK="${ALERT_WEBHOOK:-}"
 
 UNHEALTHY=$(docker ps --filter "health=unhealthy" --filter "name=dcquant" -q 2>/dev/null | wc -l)
 DOWN=$(docker ps -a --filter "status=exited" --filter "name=dcquant" -q 2>/dev/null | wc -l)
@@ -24,8 +19,5 @@ if [ "$REDIS_OK" -ne 1 ]; then STATUS="WARNING"; ISSUES="$ISSUES redis_down"; fi
 echo "[$TIMESTAMP] status=$STATUS backend=$BACKEND_OK db=$DB_OK redis=$REDIS_OK issues=$ISSUES" >> $LOG
 
 if [ "$STATUS" = "CRITICAL" ]; then
-    curl -sf -X POST "$ALERT_WEBHOOK" \
-        -H "Content-Type: application/json" \
-        -d "{\"msg_type\":\"text\",\"content\":{\"text\":\"DCQuant ALERT [$TIMESTAMP]\nStatus: $STATUS\nIssues:$ISSUES\"}}" \
-        >/dev/null 2>&1
+    docker exec dcquant-backend python /app/scripts/send_alert.py "DCQuant 服务告警" "Status: $STATUS Issues:$ISSUES" >/dev/null 2>&1
 fi

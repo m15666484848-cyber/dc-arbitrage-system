@@ -30,6 +30,8 @@ class ParsedSignal(BaseModel):
     raw_text: str = ""
     confidence: float = Field(0.0, ge=0, le=1)
     has_image: bool = False
+    ocr_text: str = ""  # OCR识别文本
+
     dedup_full_hash: str = ""  # 全周期去重指纹
     is_exit_signal: bool = False  # 是否为平仓信号
     exit_reason: str = ""  # 平仓原因

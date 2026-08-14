@@ -2295,6 +2295,7 @@ async def parse_message(
     3. LLM 解析失败时，回退到规则解析(正则表达式)
     """
     combined = raw_text or ""
+    ocr_text = ""  # Fix: 初始化OCR文本变量
     parsed = ParsedSignal()
     has_image = bool(image_url or image_base64)
 
@@ -2393,7 +2394,7 @@ async def parse_message(
             _ocr_success = True
         else:
             ocr_text = ""
-            _ocr_success = True
+            _ocr_success = False  # Fix: OCR无结果应为False
 
     # 1c. 如果 OCR 失败但启用了 vision LLM,尝试用 GLM-4V 分析图片
     #     这解决了 OCR 不可用时的图片信号丢失问题
@@ -2413,6 +2414,7 @@ async def parse_message(
                 )
                 llm_parsed.has_image = True
                 llm_parsed = apply_actions_to_parsed(combined, llm_parsed)
+                llm_parsed.ocr_text = ocr_text
                 return llm_parsed
         except Exception as e:
             logger.warning(f"[{kol_name}] 图片 LLM (OCR fallback) 解析失败: {e}")
@@ -2423,7 +2425,7 @@ async def parse_message(
     pre_scene_exit, _pre_scene_exit_reason = check_exit_intent(combined_for_parse)
     if scene in ("analysis", "conditional_observe", "narrative", "noise") and not pre_scene_exit:
         logger.info(f"[{kol_name}] 检测到非交易场景({scene}),跳过: {scene_reason}")
-        return ParsedSignal(raw_text=combined, confidence=0.0, reason=scene_reason)
+        return ParsedSignal(raw_text=combined, confidence=0.0, reason=scene_reason, ocr_text=ocr_text)
     if combined_for_parse and combined_for_parse != combined:
         logger.info(
             f"[{kol_name}] 已截掉盘面分析段,仅解析交易操作段: "
@@ -2442,11 +2444,13 @@ async def parse_message(
         guarded = apply_cancel_context_if_needed(combined_for_parse, rule_parsed, recent_texts)
         if guarded.action == "cancel_order" and guarded.reason.startswith("撤单上下文命中"):
             logger.info(f"[{kol_name}] 撤单上下文锁命中,当前策略单改判为撤单定位信息: {guarded.reason}")
+            guarded.ocr_text = ocr_text
             return guarded
 
         followed = apply_position_context_if_needed(combined_for_parse, guarded, recent_texts)
         if followed.action in ("open_long", "open_short") and followed.reason.startswith("持仓上下文跟进命中"):
             logger.info(f"[{kol_name}] 持仓上下文跟进命中,当前短消息补全为开仓: {followed.reason}")
+            followed.ocr_text = ocr_text
             return followed
 
     # ============ 阶段 1.9: 明确止盈止损更新优先走规则 ============
@@ -2458,6 +2462,7 @@ async def parse_message(
         rule_parsed.has_image = has_image
         if rule_parsed.is_update_signal or "update_tp_sl" in rule_parsed.actions:
             logger.info(f"[{kol_name}] 明确更新场景命中规则优先: {rule_parsed.update_reason}")
+            rule_parsed.ocr_text = ocr_text
             return rule_parsed
 
     # ============ 阶段 2: LLM 文本解析（主要方式） ============
@@ -2492,6 +2497,7 @@ async def parse_message(
                         logger.info(
                             f"[{kol_name}] 规则解析器检测到撤单指令,优先于 LLM 结果: {rule_cancel_check.reason}"
                         )
+                        rule_cancel_check.ocr_text = ocr_text
                         return rule_cancel_check
 
                 # ★ 关键修复: LLM 判定为无效信号(confidence<=0)时,不运行后续补充检测
@@ -2503,6 +2509,7 @@ async def parse_message(
                         f"[{kol_name}] LLM 判定为无效信号(confidence={llm_parsed.confidence:.2f}),"
                         f"跳过平仓/更新信号补充检测"
                     )
+                    llm_parsed.ocr_text = ocr_text
                     return llm_parsed
 
                 # LLM 解析后,补充检查是否为平仓信号(LLM prompt 可能未识别模糊表达)
@@ -2576,6 +2583,7 @@ async def parse_message(
                     llm_parsed.take_profits = []
                     llm_parsed.stop_loss = None
                     llm_parsed.reason = "撤销未成交挂单"
+                llm_parsed.ocr_text = ocr_text
                 return llm_parsed
             else:
                 logger.debug(f"[{kol_name}] LLM 未能识别有效信号，回退到规则解析")
@@ -2599,11 +2607,13 @@ async def parse_message(
         ):
             parsed.confidence = 0.0
 
+        parsed.ocr_text = ocr_text
         return parsed
 
     # LLM 启用但回退禁用,且 LLM 解析失败 → 返回空结果
     parsed.has_image = has_image
     parsed.confidence = 0.0
+    parsed.ocr_text = ocr_text
     return parsed
 
 
@@ -2618,4 +2628,5 @@ def parse_message_sync(
         logger.warning("同步解析不支持 OCR，仅解析文本")
     parsed = parse_text(combined)
     parsed.has_image = bool(image_url)
+    parsed.ocr_text = ocr_text
     return parsed

@@ -568,6 +568,7 @@ async def _handle_message(
             side=parsed.side,
             entry_price=parsed.entry_price,
             confidence=parsed.confidence,
+            ocr_text=parsed.ocr_text,
         )
         db.add(signal)
         # M10修复: Signal入库添加try/except,防止commit失败导致信号丢失且无日志
