@@ -210,8 +210,8 @@ async def set_follows(
         if inactive_kols:
             inactive_names = [k.name for k in inactive_kols]
             raise HTTPException(400, f"以下 KOL 已停用,无法跟随: {inactive_names}")
-        # S16v2: 验证 KOL Discord 绑定,未绑定的无法接收信号
-        no_discord_kols = [k for k in active_kols if k.enabled and (not k.discord_account_id or not k.discord_channel_id)]
+        # S16v2: 验证 KOL Discord 频道绑定 (discord_account_id 可选,None=使用默认账号)
+        no_discord_kols = [k for k in active_kols if k.enabled and not k.discord_channel_id]
         if no_discord_kols:
             no_discord_names = [k.name for k in no_discord_kols]
             raise HTTPException(400, f"以下 KOL 未绑定 Discord 频道,无法跟单: {no_discord_names}")
