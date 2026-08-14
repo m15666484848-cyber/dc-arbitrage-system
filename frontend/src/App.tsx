@@ -19,7 +19,6 @@ import StrategiesPage from "@/pages/Strategies";
 import SettingsPage from "@/pages/Settings";
 import AdminCustomers from "@/pages/admin/Customers";
 import AdminKols from "@/pages/admin/KolMgmt";
-import AdminSignals from "@/pages/admin/AdminSignals";
 import AdminSettings from "@/pages/admin/Settings";
 import ProfitStatsPage from "@/pages/admin/ProfitStats";
 import AdminDiagnosis from "@/pages/admin/Diagnosis";
@@ -134,7 +133,6 @@ export default function App() {
             <Route path="/admin/customers" element={<Protected role="admin"><AdminCustomers /></Protected>} />
             <Route path="/admin/profit-stats" element={<Protected role="admin"><ProfitStatsPage /></Protected>} />
             <Route path="/admin/kols" element={<Protected role="admin"><AdminKols /></Protected>} />
-            <Route path="/admin/signals" element={<Protected role="admin"><AdminSignals /></Protected>} />
             <Route path="/admin/diagnosis" element={<Protected role="admin"><AdminDiagnosis /></Protected>} />
             <Route path="/admin/simulator" element={<Protected role="admin"><AdminSimulator /></Protected>} />
             <Route path="/admin/settings" element={<Protected role="admin"><AdminSettings /></Protected>} />

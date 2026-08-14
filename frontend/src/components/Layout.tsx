@@ -51,7 +51,6 @@ const NAV: NavItem[] = [
   { to: "/admin/customers", label: "客户管理", icon: Users, roles: ["admin"] },
   { to: "/admin/profit-stats", label: "利润统计", icon: TrendingUp, roles: ["admin"] },
   { to: "/admin/kols", label: "KOL 管理", icon: Crown, roles: ["admin"] },
-  { to: "/admin/signals", label: "信号监控", icon: Radio, roles: ["admin"] },
   { to: "/admin/diagnosis", label: "跟单诊断", icon: ShieldAlert, roles: ["admin"] },
   { to: "/admin/simulator", label: "模拟测试", icon: FlaskConical, roles: ["admin"] },
   { to: "/admin/settings", label: "系统设置", icon: Cog, roles: ["admin"] },
