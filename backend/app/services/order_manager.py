@@ -2071,53 +2071,56 @@ async def process_signal(
 
     # 补仓/加仓信号不走新单冷却拒绝,后续进入分批建仓。
 
-    cooldown_minutes = getattr(risk_cfg, "cooldown_minutes", 60) or 60
-    one_hour_ago = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
-    cooldown_reset_at = None
-    try:
-        _follow_for_cooldown = (
-            await db.execute(
-                select(KolFollow).where(
-                    KolFollow.customer_id == customer_id,
-                    KolFollow.kol_id == signal.kol_id,
-                )
-            )
-        ).scalar_one_or_none()
-        cooldown_reset_at = (
-            getattr(_follow_for_cooldown, "cooldown_reset_at", None)
-            if _follow_for_cooldown
-            else None
-        )
-    except Exception:
+    cooldown_minutes = getattr(risk_cfg, "cooldown_minutes", 60)
+    if cooldown_minutes <= 0:
+        recent_pos = None
+    else:
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(minutes=cooldown_minutes)
         cooldown_reset_at = None
-    effective_cooldown_since = one_hour_ago
-    if cooldown_reset_at and cooldown_reset_at > effective_cooldown_since:
-        effective_cooldown_since = cooldown_reset_at
+        try:
+            _follow_for_cooldown = (
+                await db.execute(
+                    select(KolFollow).where(
+                        KolFollow.customer_id == customer_id,
+                        KolFollow.kol_id == signal.kol_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            cooldown_reset_at = (
+                getattr(_follow_for_cooldown, "cooldown_reset_at", None)
+                if _follow_for_cooldown
+                else None
+            )
+        except Exception:
+            cooldown_reset_at = None
+        effective_cooldown_since = one_hour_ago
+        if cooldown_reset_at and cooldown_reset_at > effective_cooldown_since:
+            effective_cooldown_since = cooldown_reset_at
 
-    recent_pos = (
+        recent_pos = (
 
-        await db.execute(
+            await db.execute(
 
-            select(Position).where(
+                select(Position).where(
 
-                Position.customer_id == customer_id,
+                    Position.customer_id == customer_id,
 
-                Position.kol_id == signal.kol_id,
+                    Position.kol_id == signal.kol_id,
 
-                Position.symbol == parsed.symbol,
+                    Position.symbol == parsed.symbol,
 
-                Position.side == parsed.side,
+                    Position.side == parsed.side,
 
-                Position.exchange_account_id == exchange_account_id,
+                    Position.exchange_account_id == exchange_account_id,
 
-                Position.opened_at >= effective_cooldown_since,
-                Position.source != "pending_trigger",
+                    Position.opened_at >= effective_cooldown_since,
+                    Position.source != "pending_trigger",
 
-            ).limit(1)
+                ).limit(1)
 
-        )
+            )
 
-    ).scalar_one_or_none()
+        ).scalar_one_or_none()
 
     if recent_pos and not is_add_position:
 
