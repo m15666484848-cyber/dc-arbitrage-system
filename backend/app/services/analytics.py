@@ -119,6 +119,9 @@ async def take_equity_snapshot(
             bal = await exchange_adapter.fetch_balance(ex)
         finally:
             await exchange_adapter.close_exchange(ex)
+    except Exception as snap_err:
+        logger.warning(f"load_exchange/fetch_balance failed customer={customer_id} exchange={exchange}: {snap_err}")
+        bal = {"equity": 0.0, "balance": 0.0, "available_balance": 0.0, "unrealized_pnl": 0.0}
 
         # SU-S2 修复: 查询所有未平仓持仓的未实现盈亏并累加
         total_unrealized = 0.0
@@ -131,6 +134,7 @@ async def take_equity_snapshot(
                         Position.customer_id == customer_id,
                         Position.exchange == exchange,
                         Position.status == "open",
+                        Position.parent_id.is_not(None),
                     )
                 )
             ).scalars().all()
@@ -328,17 +332,44 @@ async def calculate_advanced_metrics(
     from datetime import datetime, timedelta, timezone
 
     # 1. 最大回撤 + 余额 (基于净值快照)
+    # No closed trades: metrics are meaningless, return zeros
+    closed_count = (
+        await db.execute(
+            select(sql_func.count(Trade.id)).where(
+                Trade.customer_id == customer_id,
+                Trade.is_close.is_(True),
+                (Trade.exchange_account_id == exchange_account_id) if exchange_account_id else True,
+            )
+        )
+    ).scalar_one()
+    if closed_count == 0:
+        snaps = await _snapshot_points(db, customer_id, days=90, exchange_account_id=exchange_account_id)
+        _bal = 0.0
+        _unr = 0.0
+        if snaps:
+            _bal = float(snaps[-1].get("balance") or snaps[-1].get("equity") or 0)
+            _unr = float(snaps[-1].get("unrealized_pnl") or 0)
+        return {
+            "balance": round(_bal, 2),
+            "unrealized_pnl": round(_unr, 2),
+            "max_drawdown": 0.0,
+            "monthly_return": 0.0,
+            "annual_return": 0.0,
+            "profit_loss_ratio": 0.0,
+            "sharpe_ratio": 0.0,
+        }
+
     since_90d = datetime.now(timezone.utc) - timedelta(days=90)
     snapshots = await _snapshot_points(db, customer_id, days=90, exchange_account_id=exchange_account_id)
 
     max_drawdown = 0.0
     peak = 0.0
     for snap in snapshots:
-        eq = float(snap.get("equity") or 0)
-        if eq > peak:
-            peak = eq
+        bal = float(snap.get("balance") or 0)
+        if bal > peak:
+            peak = bal
         if peak > 0:
-            dd = (peak - eq) / peak
+            dd = (peak - bal) / peak
             if dd > max_drawdown:
                 max_drawdown = dd
 
@@ -352,10 +383,10 @@ async def calculate_advanced_metrics(
     annual_return = 0.0
     sharpe_ratio = 0.0
     if len(snapshots) >= 2:
-        first_eq = float(snapshots[0].get("equity") or 0)
-        last_eq = float(snapshots[-1].get("equity") or 0)
-        if first_eq > 0:
-            total_return = (last_eq - first_eq) / first_eq
+        first_bal = float(snapshots[0].get("balance") or 0)
+        last_bal = float(snapshots[-1].get("balance") or 0)
+        if first_bal > 0:
+            total_return = (last_bal - first_bal) / first_bal
             elapsed_seconds = (snapshots[-1]["snapshot_at"] - snapshots[0]["snapshot_at"]).total_seconds()
             days = elapsed_seconds / 86400 if elapsed_seconds > 0 else 0
             if days >= 7:
@@ -372,16 +403,16 @@ async def calculate_advanced_metrics(
         # 夏普比: 基于日收益率,年化因子=sqrt(365)
         # S41修正: 旧实现用5分钟快照年化(sqrt(105120)),数值虚高
         # 改为按日聚合,至少7天数据才计算
-        _daily_eq = {}
+        _daily_bal = {}
         for snap in snapshots:
             _dk = snap["snapshot_at"].strftime("%Y-%m-%d")
-            _daily_eq[_dk] = float(snap.get("equity") or 0)
-        _sorted_days = sorted(_daily_eq.keys())
+            _daily_bal[_dk] = float(snap.get("balance") or 0)
+        _sorted_days = sorted(_daily_bal.keys())
         if len(_sorted_days) >= 7:
             daily_returns = []
             for i in range(1, len(_sorted_days)):
-                _prev = _daily_eq[_sorted_days[i - 1]]
-                _curr = _daily_eq[_sorted_days[i]]
+                _prev = _daily_bal[_sorted_days[i - 1]]
+                _curr = _daily_bal[_sorted_days[i]]
                 if _prev > 0:
                     daily_returns.append((_curr - _prev) / _prev)
             if len(daily_returns) >= 2:

@@ -161,7 +161,7 @@ export default function DashboardPage() {
     },
     [s.total_pnl, trades]
   );
-  const totalPnl = useMemo(() => openPnl + realizedPnl, [openPnl, realizedPnl]);
+  const totalPnl = realizedPnl;
   const openCount = positions.filter((p: any) => p.status === "open").length;
 
   // 订阅的 KOL
@@ -266,7 +266,7 @@ export default function DashboardPage() {
       value: fmtMoney(totalPnl),
       tone: totalPnl >= 0 ? ("profit" as const) : ("loss" as const),
       icon: TrendingUp,
-      sub: "累计表现",
+      sub: "已实现盈亏",
     },
     {
       label: "今日盈亏",

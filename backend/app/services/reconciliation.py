@@ -682,8 +682,8 @@ async def _recover_close_failed_positions() -> int:
                                 f"需人工确认平仓操作是否完成",
                                 pos_customer_id,
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.warning(f"Unexpected error: {e}", exc_info=True)
                 finally:
                     await exchange_adapter.close_exchange(ex)
             except Exception as e:

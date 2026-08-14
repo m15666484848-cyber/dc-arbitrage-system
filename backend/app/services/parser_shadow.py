@@ -101,8 +101,8 @@ def _shadow_parse(raw_text: str, recent_texts: list[str] | None = None) -> Parse
         intent, intent_reason = signal_parser.classify_signal_intent(raw_text or "")
         scene, scene_reason = signal_parser.classify_signal_scene(raw_text or "")
         parsed.reason = parsed.reason or f"intent={intent}:{intent_reason}; scene={scene}:{scene_reason}"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Unexpected error: {e}", exc_info=True)
     return parsed
 
 

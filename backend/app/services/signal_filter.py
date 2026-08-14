@@ -236,8 +236,8 @@ async def get_atr_for_symbol(
                 val = float(cached)
                 if val > 0:
                     return val
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Unexpected error: {e}", exc_info=True)
 
     # 获取 K 线数据
     try:
@@ -255,8 +255,8 @@ async def get_atr_for_symbol(
             if redis:
                 cache_key = f"dcq:atr:{exchange}:{symbol}:{period}"
                 await redis.setex(cache_key, 300, str(atr))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Unexpected error: {e}", exc_info=True)
 
     return atr
 

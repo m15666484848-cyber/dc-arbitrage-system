@@ -2857,17 +2857,17 @@ async def process_signal(
         )
 
     except Exception as e:
-
+        _outer_e = str(e)
         logger.exception(f"下单失败 customer={customer_id} signal={signal.id}")
 
         # SP-S4修复: 下单失败时清除去重key,允许后续重试
         try:
             _full_hash = getattr(fr.signal, 'dedup_full_hash', '') if fr else ''
             await signal_filter.clear_dedup_keys(redis, fr.dedup_hash if fr else "", _full_hash)
-        except Exception as e:
-            logger.warning(f"去重key清理失败: {e}")
+        except Exception as inner_e:
+            logger.warning(f"去重key清理失败: {inner_e}")
 
-        await _log_signal_status(db, signal, "rejected", f"下单异常: {e}", customer_id, fr.dedup_hash)
+        await _log_signal_status(db, signal, "rejected", f"下单异常: {_outer_e}", customer_id, fr.dedup_hash)
 
         await notify(
             "error",
@@ -2881,14 +2881,14 @@ async def process_signal(
             f"下单参考市价: {_fmt_value(market_price)}\n"
             f"名义价值: {_fmt_value(decision.notional_usdt, 4)} USDT\n"
             f"执行结果: 未创建持仓\n"
-            f"失败原因: {e}\n"
-            f"判断依据: {_failure_hint(e)}",
+            f"失败原因: {_outer_e}\n"
+            f"判断依据: {_failure_hint(_outer_e)}",
             customer_id,
             source_text=signal.raw_text,
             kol_name=kol_name,
         )
 
-        return {"ok": False, "reason": f"下单异常: {e}"}
+        return {"ok": False, "reason": f"下单异常: {_outer_e}"}
 
     # 10. 更新信号状态
 

@@ -1287,8 +1287,8 @@ async def _run_single_discord_account(account) -> None:
                         await watcher
                     except asyncio.CancelledError:
                         pass
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Unexpected error: {e}", exc_info=True)
                     if heartbeat_task and not heartbeat_task.done():
                         heartbeat_task.cancel()
                         try:
@@ -1310,16 +1310,16 @@ async def _run_single_discord_account(account) -> None:
                     await heartbeat_task
                 except asyncio.CancelledError:
                     pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Unexpected error: {e}", exc_info=True)
             if watcher and not watcher.done():
                 watcher.cancel()
                 try:
                     await watcher
                 except asyncio.CancelledError:
                     pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Unexpected error: {e}", exc_info=True)
 
 
             reconnect_count += 1

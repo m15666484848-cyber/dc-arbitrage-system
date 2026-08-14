@@ -2628,5 +2628,5 @@ def parse_message_sync(
         logger.warning("同步解析不支持 OCR，仅解析文本")
     parsed = parse_text(combined)
     parsed.has_image = bool(image_url)
-    parsed.ocr_text = ocr_text
+    parsed.ocr_text = ""
     return parsed

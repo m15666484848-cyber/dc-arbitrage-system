@@ -70,8 +70,8 @@ async def _cleanup_exchange_pool():
         try:
             await ex.close()
             logger.debug(f"交易所连接池清理过期连接: {k}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Unexpected error: {e}", exc_info=True)
 
 
 def _get_pooled_exchange(key: str) -> Any | None:
@@ -95,8 +95,8 @@ _pending_closes: set = set()
 async def _safe_close_exchange(ex) -> None:
     try:
         await ex.close()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Unexpected error: {e}", exc_info=True)
 
 
 def _pool_exchange(key: str, ex) -> None:
@@ -229,8 +229,8 @@ async def get_min_order_notional(ex, symbol: str) -> tuple[float, str]:
             price = ticker.get("last", 0) or ticker.get("close", 0)
             if price > 0:
                 min_notional = min_qty * price
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Unexpected error: {e}", exc_info=True)
 
     if reason == "" and min_notional > 0:
         reason = f"{ex_name.upper()}最小下单额{min_notional:.2f}USDT"
@@ -996,11 +996,22 @@ async def _fetch_bybit_balance_native(ex) -> dict:
 async def fetch_balance(ex) -> dict:
     if (getattr(ex, "id", "") or "").lower() == "bybit":
         try:
-            return await _fetch_bybit_balance_native(ex)
+            return await asyncio.wait_for(_fetch_bybit_balance_native(ex), timeout=15)
+        except asyncio.TimeoutError:
+            logger.warning("Bybit 原生余额查询超时(15s),回退 ccxt fetch_balance")
+        except asyncio.CancelledError:
+            logger.warning("Bybit 原生余额查询被取消,回退 ccxt fetch_balance")
         except Exception as e:
             logger.warning(f"Bybit 原生余额查询失败,回退 ccxt fetch_balance: {e}")
-    balance = await ex.fetch_balance()
-    return _extract_balance_from_ccxt(balance)
+    try:
+        balance = await asyncio.wait_for(ex.fetch_balance(), timeout=15)
+        return _extract_balance_from_ccxt(balance)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        logger.warning("ccxt fetch_balance 超时或被取消,返回默认值")
+        return {"equity": 0.0, "balance": 0.0, "available_balance": 0.0, "unrealized_pnl": 0.0}
+    except Exception as e:
+        logger.warning(f"ccxt fetch_balance 失败: {e}")
+        return {"equity": 0.0, "balance": 0.0, "available_balance": 0.0, "unrealized_pnl": 0.0}
 
 
 async def close_position_market(ex, symbol: str, side: str, amount: float) -> dict:
@@ -1120,8 +1131,8 @@ async def close_all_public_exchanges() -> None:
         try:
             await ex.close()
             count += 1
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Unexpected error: {e}", exc_info=True)
     _public_exchanges.clear()
     if count > 0:
         logger.info(f"已关闭 {count} 个公开行情交易所实例")

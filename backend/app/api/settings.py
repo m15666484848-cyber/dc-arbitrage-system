@@ -69,7 +69,7 @@ def _account_mode(exchange: str, testnet: bool, account_mode: str | None = None)
     return mode
 
 
-def _audit(db: AsyncSession, action: str, target: str, detail: str) -> None:
+async def _audit(db: AsyncSession, user_id: int, action: str, target: str, detail: str) -> None:
     """记录客户侧设置操作审计。AuditLog.user_id 关联管理员用户表,客户操作不写 user_id。"""
     db.add(AuditLog(action=action, target=target[:128], detail=detail[:2000], ip=""))
 
@@ -218,7 +218,7 @@ async def add_exchange_account(
         is_default=not has_default,
     )
     db.add(acc)
-    _audit(db, "exchange_account_create", f"exchange_account:{current.id}:{body.exchange}", f"customer_id={current.id}, exchange={body.exchange}, account_mode={body_mode}")
+    await _audit(db, current.id, "exchange_account_create", f"exchange_account:{current.id}:{body.exchange}", f"customer_id={current.id}, exchange={body.exchange}, account_mode={body_mode}")
     try:
         await db.commit()
     except IntegrityError:
@@ -270,7 +270,7 @@ async def set_default_exchange_account(aid: int, customer_id: int | None = None,
     ).scalars().all()
     for row in rows:
         row.is_default = row.id == aid
-    _audit(db, "exchange_account_set_default", f"exchange_account:{aid}", f"customer_id={cid}, exchange={acc.exchange}, testnet={acc.testnet}")
+    await _audit(db, current.id, "exchange_account_set_default", f"exchange_account:{aid}", f"customer_id={cid}, exchange={acc.exchange}, testnet={acc.testnet}")
     try:
         await db.commit()
     except Exception:
@@ -327,8 +327,9 @@ async def update_exchange_account_follow(
         if field in data:
             setattr(acc, field, data[field])
 
-    _audit(
+    await _audit(
         db,
+        current.id,
         "exchange_account_follow_update",
         f"exchange_account:{aid}",
         (
@@ -392,7 +393,7 @@ async def delete_exchange_account(aid: int, current=Depends(get_current_user), d
         if replacement:
             replacement.is_default = True
             replacement_id = replacement.id
-    _audit(db, "exchange_account_delete", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={exchange}, testnet={testnet}, was_default={was_default}, replacement_id={replacement_id}")
+    await _audit(db, current.id, "exchange_account_delete", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={exchange}, testnet={testnet}, was_default={was_default}, replacement_id={replacement_id}")
     try:
         await db.commit()
     except Exception:
@@ -420,7 +421,7 @@ async def test_exchange_account(aid: int, current=Depends(get_current_user), db:
         bal = await exchange_adapter.fetch_balance(ex)
         acc.last_error = ""
         acc.last_verified_at = datetime.now(timezone.utc)
-        _audit(db, "exchange_account_test_success", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, equity={bal.get('equity', 0)}")
+        await _audit(db, current.id, "exchange_account_test_success", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, equity={bal.get('equity', 0)}")
         try:
             await db.commit()
         except Exception:
@@ -438,7 +439,7 @@ async def test_exchange_account(aid: int, current=Depends(get_current_user), db:
         })
     except Exception as e:
         acc.last_error = str(e)[:500]
-        _audit(db, "exchange_account_test_failed", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, error={acc.last_error}")
+        await _audit(db, current.id, "exchange_account_test_failed", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, error={acc.last_error}")
         try:
             await db.commit()
         except Exception:
@@ -470,7 +471,7 @@ async def get_exchange_account_balance(aid: int, current=Depends(require_custome
         bal = await exchange_adapter.fetch_balance(ex)
         acc.last_error = ""
         acc.last_verified_at = datetime.now(timezone.utc)
-        _audit(db, "exchange_account_balance_refresh", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, equity={bal.get('equity', 0)}")
+        await _audit(db, current.id, "exchange_account_balance_refresh", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, equity={bal.get('equity', 0)}")
         try:
             await db.commit()
         except Exception:
@@ -490,7 +491,7 @@ async def get_exchange_account_balance(aid: int, current=Depends(require_custome
         })
     except Exception as e:
         acc.last_error = str(e)[:500]
-        _audit(db, "exchange_account_balance_failed", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, error={acc.last_error}")
+        await _audit(db, current.id, "exchange_account_balance_failed", f"exchange_account:{aid}", f"customer_id={current.id}, exchange={acc.exchange}, testnet={acc.testnet}, error={acc.last_error}")
         try:
             await db.commit()
         except Exception:
@@ -581,7 +582,7 @@ async def get_exchange_balance_summary(current=Depends(require_customer), db: As
                 await exchange_adapter.close_exchange(ex)
         accounts.append(item)
 
-    _audit(db, "exchange_balance_summary_refresh", f"customer:{current.id}", f"customer_id={current.id}, accounts={len(accounts)}, total_equity={total_equity}")
+    await _audit(db, current.id, "exchange_balance_summary_refresh", f"customer:{current.id}", f"customer_id={current.id}, accounts={len(accounts)}, total_equity={total_equity}")
     try:
         await db.commit()
     except Exception:
