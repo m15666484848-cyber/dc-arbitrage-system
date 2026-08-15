@@ -133,7 +133,7 @@ SYMBOL_ALIASES = {
     # 常见错别字/大小写修正
     "SOl": "SOL", "s0l": "SOL", "ETHH": "ETH", "BTCC": "BTC",
     "PEPEE": "PEPE", "SHIBB": "SHIB", "WIFW": "WIF",
-    "GOLD": "XAU", "XAUUSD": "XAU",
+    "GOLD": "XAU", "XAUUSD": "XAU", "SILVER": "XAG", "XAGUSD": "XAG",
     "INTEL": "INTC",
 }
 
@@ -146,7 +146,7 @@ CN_COIN_NAMES = {
     "瑞波": "XRP", "艾达币": "ADA", "艾达": "ADA", "波场": "TRX",
     "抹茶": "MX", "柚子": "EOS", "莱特币": "LTC", "莱特": "LTC",
     "比特币现金": "BCH", "比特现金": "BCH", "门罗币": "XMR",
-    "黄金": "XAU",
+    "黄金": "XAU", "白银": "XAG",
     "恒星币": "XLM", "恒星": "XLM", "eos": "EOS", "以太经典": "ETC",
     "经典币": "ETC", "小蚁": "NEO", "本体": "ONT", "量子": "QTUM",
     "小蚁币": "NEO", "本体币": "ONT", "量子币": "QTUM",
@@ -173,6 +173,9 @@ CN_COIN_NAMES = {
     "超微": "SMCI", "台积电": "TSM", "德州仪器": "TXN", "联合健康": "UNH",
     "沃尔玛": "WMT", "埃克森": "XOM", "游戏驿站": "GME",
     "诺基亚": "NOK", "索尼": "SONY", "诺和诺德": "NVO",
+
+    # 爱丽丝/爱丽士 -> ALICE
+    "爱丽丝": "ALICE", "爱丽士": "ALICE",
 
     # P1-6: 补充 KOL 俗称
     "大阳": "BTC", "大阴": "BTC", "饼子": "BTC", "以太王": "ETH",
@@ -1709,7 +1712,8 @@ def extract_symbol(text: str) -> str:
         "LINK", "LTC", "AVAX", "UNI", "ATOM", "ETC", "BCH", "FIL", "APT",
         "ARB", "OP", "DYDX", "AAVE", "MKR", "COMP", "CRV", "SNX", "INJ",
         "SUI", "TIA", "SEI", "ORDI", "PEPE", "WIF", "FLOKI", "JUP", "BONK",
-        "XAU",
+        "ALICE",
+        "XAU", "XAG",
         # 美股永续合约 (BYBIT)
         "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "META", "MSFT", "NFLX",
         "AMD", "INTC", "SNDK", "COIN", "MSTR", "PLTR", "SHOP", "DASH",
