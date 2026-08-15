@@ -4492,7 +4492,9 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                     position.entry_price, _tp_prices
                 )
                 if _full_hash and _redis:
+                    await _redis.delete(f"dedup_long:{_full_hash}")
                     if position.exchange_account_id:
+                        await _redis.delete(f"dedup_long:acct:{position.exchange_account_id}:{_full_hash}")
                     logger.info(f"cleared dedup on close pos={position.id}")
             except Exception as _e:
                 logger.warning(f"dedup clear on close failed: {_e}")
@@ -4559,7 +4561,9 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                         master.entry_price, _tp_prices
                     )
                     if _full_hash and _redis:
+                        await _redis.delete(f"dedup_long:{_full_hash}")
                         if master.exchange_account_id:
+                            await _redis.delete(f"dedup_long:acct:{master.exchange_account_id}:{_full_hash}")
                 except Exception as _e:
                     logger.warning(f"dedup clear on master close failed: {_e}")
 
@@ -4756,11 +4760,6 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
         try:
 
             await db.commit()
-            # Redis去重key清理(移到commit后,防止回滚后重复入场)
-                    await _redis.delete(f"dedup_long:{_full_hash}")
-                        await _redis.delete(f"dedup_long:acct:{position.exchange_account_id}:{_full_hash}")
-                        await _redis.delete(f"dedup_long:{_full_hash}")
-                            await _redis.delete(f"dedup_long:acct:{master.exchange_account_id}:{_full_hash}")
             _db_committed = True  # OM-S2修复: 标记DB已成功提交
 
         except Exception as e:
