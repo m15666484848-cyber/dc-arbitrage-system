@@ -104,6 +104,24 @@ async def test_close_position_caps_qty_to_position_size(monkeypatch):
     monkeypatch.setattr(order_manager.strategy_engine, "record_trade_result", fake_record_trade_result)
     monkeypatch.setattr(order_manager, "_create_referral_commission", fake_create_referral_commission)
 
+    # Mock notify 和 bus 防止测试发送真实告警和事件
+    async def fake_notify(*args, **kwargs):
+        pass
+
+    async def fake_publish(*args, **kwargs):
+        pass
+
+    async def fake_get_source_text(*args, **kwargs):
+        return ""
+
+    async def fake_get_kol_name(*args, **kwargs):
+        return ""
+
+    monkeypatch.setattr(order_manager, "notify", fake_notify)
+    monkeypatch.setattr(order_manager, "bus", type("FakeBus", (), {"publish_customer": fake_publish, "publish": fake_publish})())
+    monkeypatch.setattr(order_manager, "_get_position_source_text", fake_get_source_text)
+    monkeypatch.setattr(order_manager, "_get_kol_name", fake_get_kol_name)
+
     result = await order_manager.close_position(FakeDb(pos), position_id=1, qty=5)
 
     assert result["ok"] is True
