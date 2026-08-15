@@ -2334,7 +2334,8 @@ async def parse_message(
     parsed = ParsedSignal()
     has_image = bool(image_url or image_base64)
 
-    if _is_pure_discord_cdn_url(combined):
+    if _is_pure_discord_cdn_url(combined) and not (image_url or image_base64):
+        # 消息带图片附件时,即使文本只是 CDN 链接也要走图片解析(GLM-4V/OCR),不能忽略。
         logger.info(f"[{kol_name}] 纯 Discord/CDN 链接,标记为非交易信号")
         return ParsedSignal(raw_text=combined, confidence=0.0, reason="Round7纯Discord/CDN链接")
 
