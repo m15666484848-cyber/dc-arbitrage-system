@@ -134,6 +134,7 @@ SYMBOL_ALIASES = {
     "SOl": "SOL", "s0l": "SOL", "ETHH": "ETH", "BTCC": "BTC",
     "PEPEE": "PEPE", "SHIBB": "SHIB", "WIFW": "WIF",
     "GOLD": "XAU", "XAUUSD": "XAU", "SILVER": "XAG", "XAGUSD": "XAG",
+    "NVIDIA": "NVDA", "HYNIX": "SKHYNIX",
     "INTEL": "INTC",
 }
 
@@ -146,7 +147,7 @@ CN_COIN_NAMES = {
     "瑞波": "XRP", "艾达币": "ADA", "艾达": "ADA", "波场": "TRX",
     "抹茶": "MX", "柚子": "EOS", "莱特币": "LTC", "莱特": "LTC",
     "比特币现金": "BCH", "比特现金": "BCH", "门罗币": "XMR",
-    "黄金": "XAU", "白银": "XAG",
+    "黄金": "XAU", "白银": "XAG", "海力士": "SKHYNIX",
     "恒星币": "XLM", "恒星": "XLM", "eos": "EOS", "以太经典": "ETC",
     "经典币": "ETC", "小蚁": "NEO", "本体": "ONT", "量子": "QTUM",
     "小蚁币": "NEO", "本体币": "ONT", "量子币": "QTUM",
@@ -1713,7 +1714,7 @@ def extract_symbol(text: str) -> str:
         "ARB", "OP", "DYDX", "AAVE", "MKR", "COMP", "CRV", "SNX", "INJ",
         "SUI", "TIA", "SEI", "ORDI", "PEPE", "WIF", "FLOKI", "JUP", "BONK",
         "ALICE",
-        "XAU", "XAG",
+        "XAU", "XAG", "SKHYNIX",
         # 美股永续合约 (BYBIT)
         "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "META", "MSFT", "NFLX",
         "AMD", "INTC", "SNDK", "COIN", "MSTR", "PLTR", "SHOP", "DASH",
