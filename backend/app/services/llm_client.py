@@ -362,13 +362,13 @@ class LLMClient:
     def _get_system_prompt(self, kol_name: str = "") -> str:
         """获取精简系统提示词，按 KOL 动态追加少量个性化提示。"""
         kol_hint = self._get_kol_parse_hint(kol_name)
-        return f"""你是加密货币交易信号解析器。只从 KOL 消息中提取“当前可执行”的交易动作，返回严格 JSON，不要输出解释文字。
+        return f"""你是交易信号解析器（加密货币+美股永续合约）。只从 KOL 消息中提取“当前可执行”的交易动作，返回严格 JSON，不要输出解释文字。
 
 核心输出字段：is_valid_signal, is_exit_signal, is_update_signal, has_cancel_order, symbol, side, entry_price, entry_prices, condition_price, breakeven_after_tp, position_pct, take_profits, stop_loss, confidence, reasoning。
 
 优先级：平仓 close_position > 撤单 cancel_order > 更新止盈止损 update_tp_sl > 开仓 open_long/open_short > none。混合消息取最高优先级主动作。
 
-币种：BTC/比特币/大饼/皇上=BTC/USDT；ETH/以太/以太坊/姨太=ETH/USDT；SOL/DOGE/XRP/BNB 等按 XXX/USDT；黄金/XAU=XAU/USDT。无明确币种时 symbol=""，不要猜。
+币种：BTC/比特币/大饼/皇上=BTC/USDT；ETH/以太/以太坊/姨太=ETH/USDT；SOL/DOGE/XRP/BNB 等按 XXX/USDT；黄金/XAU=XAU/USDT。美股：NVDA/英伟达=NVDA/USDT；TSLA/特斯拉=TSLA/USDT；AAPL/苹果=AAPL/USDT；AMZN/亚马逊=AMZN/USDT；GOOGL/谷歌=GOOGL/USDT；MSFT/微软=MSFT/USDT；META=META/USDT；NFLX/奈飞=NFLX/USDT；SNDK/闪迪=SNDK/USDT；COIN=COIN/USDT；MSTR/微策略=MSTR/USDT；ADBE/Adobe=ADBE/USDT；ARM/安谋=ARM/USDT；ASML/阿斯麦=ASML/USDT；AVGO/博通=AVGO/USDT；TSM/台积电=TSM/USDT；SMCI/超微=SMCI/USDT；IBM=IBM/USDT；JPM/摩根大通=JPM/USDT；GS/高盛=GS/USDT；KO/可口可乐=KO/USDT；PEP/百事=PEP/USDT；V/Visa=V/USDT；MA/万事达=MA/USDT；WMT/沃尔玛=WMT/USDT；ORCL/甲骨文=ORCL/USDT；CRM/Salesforce=CRM/USDT；CSCO/思科=CSCO/USDT；DELL/戴尔=DELL/USDT；QCOM/高通=QCOM/USDT；TXN/德州仪器=TXN/USDT；UNH/联合健康=UNH/USDT；GE/通用电气=GE/USDT；GILD/吉利德=GILD/USDT；BAC/美国银行=BAC/USDT；NET/Cloudflare=NET/USDT；CRWD/CrowdStrike=CRWD/USDT；其他美股代码同样按 XXX/USDT 映射。无明确币种时 symbol=""，不要猜。
 价格：64k/64K=64000，6.4w=64000；价格区间和分批价写入 entry_prices，entry_price 取第一个；现价/市价开仓 entry_price=null。
 
 方向判定：
@@ -402,7 +402,7 @@ class LLMClient:
 - "打底仓/建底仓/先打一层/先入半仓/打个底仓" = 轻仓试探开仓，confidence 降至 0.6-0.7。
 - "市价入场/市价进场/已入场/已进场/触发入场/多单触发入场/空单触发入场" = 开仓已成交，is_valid_signal=true。
 - "分批入场/分批进场" + 方向 + 价格区间 = 开仓，entry_prices 填入区间各点，entry_price 取第一点。
-- 小众币种按 XXX/USDT 映射：THETA、XAG、MEW、FLOKI、BOME、SSV、QNT、PEPE、DOGE、UNI、AAVE、SOL。
+- 小众币种按 XXX/USDT 映射：THETA、XAG、MEW、FLOKI、BOME、SSV、QNT、PEPE、DOGE、UNI、AAVE、SOL。美股代码同样按 XXX/USDT 映射：PLTR、SHOP、DASH、HOOD、RDDT、RIVN、SNOW、SOFI、SPOT、UBER、ZM、BABA、PYPL、BB、AMC、INTC、AMD、ADBE、ARM、ASML、AVGO、TSM、SMCI、IBM、JPM、GS、KO、PEP、V、MA、WMT、ORCL、CRM、CSCO、DELL、QCOM、TXN、UNH、GE、GILD、BAC、NET、CRWD、DKNG、MARA、IONQ、NVO、SONY、REGN、RIOT、PANW、MRVL、MU、WDC、VST、XOM。
 - "自动止盈/自动结束/自动平仓/自动到达目标" = 平仓（到达预设目标自动触发）。
 - "止盈了一些/止盈了部分/止盈了一半/止盈了X%/止盈掉X层/止盈掉一层/止盈掉两层" = 部分平仓；能提取百分比时填 position_pct，无法确定比例时 position_pct=0 但保持 is_exit_signal=true。
 - "打了保护/做了保护" 接 "再开再说/再开" = 已部分平仓 + 设保本止损，主动作按 close_position，reasoning 标注保护。

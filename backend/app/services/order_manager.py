@@ -1896,45 +1896,6 @@ async def process_signal(
 
         decision.notional_usdt = notional_override
 
-    # KOL 文本仓位比例覆盖本次下单金额:
-
-    # 例如 "半仓"=50%, "三成仓"=30%, "轻仓"=30%, "重仓"=70%。
-
-    # 只影响本次信号，不修改客户默认策略金额。
-
-    position_pct = float(getattr(parsed, "position_pct", 0.0) or 0.0)
-
-    if 0 < position_pct <= 100:
-
-        original_notional = decision.notional_usdt
-
-        decision.notional_usdt = round(decision.notional_usdt * position_pct / 100.0, 2)
-
-        logger.info(
-
-            f"信号仓位比例: symbol={parsed.symbol} position_pct={position_pct}% "
-
-            f"notional={original_notional}->{decision.notional_usdt}"
-
-        )
-
-    # 1.1 应用品种分类倍率
-
-    symbol_multiplier = await _get_symbol_multiplier(db, customer_id, parsed.symbol)
-
-    # 根据倍率推断币种分层,用于止盈止损 (自定义币种走对应分层而非默认altcoin)
-    from app.services.signal_filter import compute_full_strategy_hash, classify_coin, multiplier_to_tier
-    coin_tier = classify_coin(parsed.symbol)
-    if coin_tier == "altcoin" and symbol_multiplier != 1.0:
-        coin_tier = multiplier_to_tier(symbol_multiplier)
-        logger.info(f"自定义币种分层推断: symbol={parsed.symbol} multiplier={symbol_multiplier} tier={coin_tier}")
-
-    if symbol_multiplier != 1.0:
-
-        decision.notional_usdt = round(decision.notional_usdt * symbol_multiplier, 2)
-
-        logger.info(f"品种分类倍率: symbol={parsed.symbol} multiplier={symbol_multiplier} notional={decision.notional_usdt}")
-
     defaults = strategy_engine.get_strategy_defaults(decision.params or {})
 
     # 2. 交易所账号
@@ -1995,6 +1956,45 @@ async def process_signal(
                 f"API级策略不存在或停用,回退KOL策略: customer={customer_id} "
                 f"account={exchange_account_id} strategy_id={ex_acc.strategy_id}"
             )
+
+    # KOL 文本仓位比例覆盖本次下单金额:
+
+    # 例如 "半仓"=50%, "三成仓"=30%, "轻仓"=30%, "重仓"=70%。
+
+    # 只影响本次信号，不修改客户默认策略金额。
+
+    position_pct = float(getattr(parsed, "position_pct", 0.0) or 0.0)
+
+    if 0 < position_pct <= 100:
+
+        original_notional = decision.notional_usdt
+
+        decision.notional_usdt = round(decision.notional_usdt * position_pct / 100.0, 2)
+
+        logger.info(
+
+            f"信号仓位比例: symbol={parsed.symbol} position_pct={position_pct}% "
+
+            f"notional={original_notional}->{decision.notional_usdt}"
+
+        )
+
+    # 1.1 应用品种分类倍率
+
+    symbol_multiplier = await _get_symbol_multiplier(db, customer_id, parsed.symbol)
+
+    # 根据倍率推断币种分层,用于止盈止损 (自定义币种走对应分层而非默认altcoin)
+    from app.services.signal_filter import compute_full_strategy_hash, classify_coin, multiplier_to_tier
+    coin_tier = classify_coin(parsed.symbol)
+    if coin_tier == "altcoin" and symbol_multiplier != 1.0:
+        coin_tier = multiplier_to_tier(symbol_multiplier)
+        logger.info(f"自定义币种分层推断: symbol={parsed.symbol} multiplier={symbol_multiplier} tier={coin_tier}")
+
+    if symbol_multiplier != 1.0:
+
+        decision.notional_usdt = round(decision.notional_usdt * symbol_multiplier, 2)
+
+        logger.info(f"品种分类倍率: symbol={parsed.symbol} multiplier={symbol_multiplier} notional={decision.notional_usdt}")
 
     # 多 API 独立倍率与单笔上限。
     follow_weight = float(getattr(ex_acc, "follow_weight", 1.0) or 1.0)
@@ -2058,6 +2058,7 @@ async def process_signal(
                     Position.customer_id == customer_id,
                     Position.exchange == exchange,
                     Position.status == "open",
+                    Position.parent_id.is_not(None),
                 )
             )
         ).scalar_one()

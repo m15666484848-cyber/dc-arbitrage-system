@@ -653,7 +653,8 @@ async def validate_symbol(exchange: str, symbol: str) -> bool:
     ex = ex_cls(kwargs)
     try:
         await ex.load_markets()
-        return symbol in ex.symbols
+        norm = _normalize_symbol(exchange, symbol)
+        return norm in ex.symbols
     except Exception:
         return False
     finally:

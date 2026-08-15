@@ -134,6 +134,7 @@ SYMBOL_ALIASES = {
     "SOl": "SOL", "s0l": "SOL", "ETHH": "ETH", "BTCC": "BTC",
     "PEPEE": "PEPE", "SHIBB": "SHIB", "WIFW": "WIF",
     "GOLD": "XAU", "XAUUSD": "XAU",
+    "INTEL": "INTC",
 }
 
 # 中文币种名映射(按优先级排序,避免子串误匹配)
@@ -157,6 +158,22 @@ CN_COIN_NAMES = {
     "皇上": "BTC", "姨太": "ETH", "二饼": "ETH", "蛤蟆鬼": "PEPE",
     "狗庄币": "DOGE", "辣条": "LTC", "太子": "BCH", "小姨太": "ETC",
     " pupper": "WIF",
+    # 美股代码中文名映射
+    "苹果": "AAPL", "特斯拉": "TSLA", "英伟达": "NVDA", "亚马逊": "AMZN",
+    "谷歌": "GOOGL", "微软": "MSFT", "奈飞": "NFLX", "网飞": "NFLX",
+    "阿里巴巴": "BABA", "闪迪": "SNDK", "微策略": "MSTR", "罗宾汉": "HOOD",
+    "英特尔": "INTC", "黑莓": "BB", "贝宝": "PYPL", "帕兰提尔": "PLTR",
+    "雪花": "SNOW", "外卖": "DASH",
+    # 美股补充中文名映射
+    "Adobe": "ADBE", "安谋": "ARM", "阿斯麦": "ASML", "博通": "AVGO",
+    "美国银行": "BAC", "花旗": "C", "思科": "CSCO", "戴尔": "DELL",
+    "易贝": "EBAY", "通用电气": "GE", "吉利德": "GILD", "高盛": "GS",
+    "摩根大通": "JPM", "强生": "JNJ", "可口可乐": "KO", "万事达": "MA",
+    "微芯": "MU", "甲骨文": "ORCL", "百事": "PEP", "高通": "QCOM",
+    "超微": "SMCI", "台积电": "TSM", "德州仪器": "TXN", "联合健康": "UNH",
+    "沃尔玛": "WMT", "埃克森": "XOM", "游戏驿站": "GME",
+    "诺基亚": "NOK", "索尼": "SONY", "诺和诺德": "NVO",
+
     # P1-6: 补充 KOL 俗称
     "大阳": "BTC", "大阴": "BTC", "饼子": "BTC", "以太王": "ETH",
     "芝麻开门": "SEI", "太阳": "SOL", "安银": "XMR",
@@ -1693,6 +1710,17 @@ def extract_symbol(text: str) -> str:
         "ARB", "OP", "DYDX", "AAVE", "MKR", "COMP", "CRV", "SNX", "INJ",
         "SUI", "TIA", "SEI", "ORDI", "PEPE", "WIF", "FLOKI", "JUP", "BONK",
         "XAU",
+        # 美股永续合约 (BYBIT)
+        "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "META", "MSFT", "NFLX",
+        "AMD", "INTC", "SNDK", "COIN", "MSTR", "PLTR", "SHOP", "DASH",
+        "HOOD", "RDDT", "RIVN", "SNOW", "SOFI", "SPOT", "UBER", "ZM",
+        "BABA", "PYPL", "BB", "AMC",
+        # 美股补充 (BYBIT)
+        "ADBE", "ARM", "ASML", "AVGO", "BAC", "C", "CSCO", "DELL",
+        "EBAY", "GE", "GILD", "GS", "IBM", "JNJ", "JPM", "KO", "MA",
+        "MRVL", "MU", "NET", "NVO", "ORCL", "PANW", "PEP", "QCOM",
+        "REGN", "RIOT", "SMCI", "TSM", "TXN", "UNH", "V", "VST",
+        "WMT", "WDC", "XOM", "CRWD", "DKNG", "MARA", "IONQ",
     ]
     for coin in common_coins:
         # 匹配: 前面是中文/标点/空格/边界,后面是中文/标点/空格/边界
