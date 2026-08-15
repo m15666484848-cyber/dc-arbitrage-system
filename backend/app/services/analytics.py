@@ -153,17 +153,24 @@ async def take_equity_snapshot(
         except Exception as e:
             logger.warning(f"获取持仓列表失败 customer={customer_id}: {e}")
 
-        snapshot = EquitySnapshot(
+        # TOCTOU 修复: 截断到分钟级 + ON CONFLICT DO NOTHING
+        # 与唯一索引 ix_equity_snapshots_unique_minute 对齐,防止重复快照
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        snapshot_ts = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+        stmt = pg_insert(EquitySnapshot).values(
             customer_id=customer_id,
             exchange_account_id=exchange_account_id,
             exchange=exchange,
             equity=float(bal.get("balance", 0)) + total_unrealized,
             balance=float(bal.get("balance", 0)),
             unrealized_pnl=total_unrealized,
-            snapshot_at=datetime.now(timezone.utc),
+            snapshot_at=snapshot_ts,
         )
-        db.add(snapshot)
+        stmt = stmt.on_conflict_do_nothing(
+            index_elements=["customer_id", "exchange_account_id", "snapshot_at"],
+        )
         try:
+            await db.execute(stmt)
             await db.commit()
         except Exception:
             await db.rollback()

@@ -74,3 +74,4 @@ backend/init_admin.py
 # P0 测试备份文件
 *.p0bak
 *.p0bak.*
+dcquant_backups/

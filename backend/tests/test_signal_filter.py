@@ -11,7 +11,7 @@ from app.services.signal_filter import (
     correct_direction,
     correct_price,
     filter_signal,
-    is_duplicate,
+    try_acquire_dedup,
 )
 from app.services.risk_manager import is_in_silent_period
 
@@ -98,17 +98,17 @@ def test_compute_dedup_hash_different_side():
 
 
 @pytest.mark.asyncio
-async def test_is_duplicate_first_time_false():
+async def test_try_acquire_dedup_first_time_true():
     redis = AsyncMock()
-    redis.set = AsyncMock(return_value="OK")  # SET NX 成功 → 首次
-    assert await is_duplicate(redis, "hash1") is False
+    redis.set = AsyncMock(return_value="OK")  # SET NX 成功 → 首次占用
+    assert await try_acquire_dedup(redis, "hash1") is True
 
 
 @pytest.mark.asyncio
-async def test_is_duplicate_second_time_true():
+async def test_try_acquire_dedup_second_time_false():
     redis = AsyncMock()
-    redis.set = AsyncMock(return_value=None)  # SET NX 失败 → 已存在
-    assert await is_duplicate(redis, "hash1") is True
+    redis.set = AsyncMock(return_value=None)  # SET NX 失败 → 重复
+    assert await try_acquire_dedup(redis, "hash1") is False
 
 
 # ---------- 静默时段 ----------

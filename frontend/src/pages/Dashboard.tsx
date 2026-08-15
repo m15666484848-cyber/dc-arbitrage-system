@@ -153,8 +153,11 @@ export default function DashboardPage() {
   const strategies: any[] = strategiesData || [];
 
   const openPnl = useMemo(
-    () => positions.reduce((sum: number, p: any) => sum + (p.unrealized_pnl || 0), 0),
-    [positions]
+    () => positions.reduce(
+      (sum: number, p: any) => sum + (p.net_unrealized_pnl ?? p.unrealized_pnl ?? 0),
+      0,
+    ),
+    [positions],
   );
   const realizedPnl = useMemo(
     () => {
@@ -265,6 +268,13 @@ export default function DashboardPage() {
   const primaryStats = [
     { label: "持仓数量", value: openCount, tone: "default" as const, icon: Radio, sub: "当前持仓" },
     {
+      label: "未盈亏",
+      value: fmtMoney(openPnl),
+      tone: openPnl >= 0 ? ("profit" as const) : ("loss" as const),
+      icon: Wallet,
+      sub: "未实现盈亏",
+    },
+    {
       label: "总盈亏",
       value: fmtMoney(totalPnl),
       tone: totalPnl >= 0 ? ("profit" as const) : ("loss" as const),
@@ -352,7 +362,7 @@ export default function DashboardPage() {
           </div>
 
           {/* 关键指标：单行行情栏 */}
-          <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-7 gap-2">
+          <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-2">
             {tickerStats.map((item: any) => (
               <div key={item.label} className="ticker-metric-card">
                 <div className="ticker-label">{item.label}</div>

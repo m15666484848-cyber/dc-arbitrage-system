@@ -331,53 +331,41 @@ def compute_full_strategy_hash(
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
-async def is_duplicate(redis, dedup_hash: str, window: int = DEDUP_WINDOW_SECONDS) -> bool:
-    """检查 Redis 是否已存在该 hash。"""
-    if not redis or not dedup_hash:
-        return False
-    key = f"dedup:{dedup_hash}"
-    # 只检查是否存在，不设置(SET 操作移到 set_dedup_keys)
-    exists = await redis.get(key)
-    return exists is not None
+async def try_acquire_dedup(
+    redis, dedup_hash: str, window: int = DEDUP_WINDOW_SECONDS
+) -> bool:
+    """原子去重: SET key 1 NX EX ttl。
 
+    返回 True  -> 成功占用(新信号)
+    返回 False -> key 已存在(重复信号)或 Redis 不可用时降级放行
 
-async def check_long_term_duplicate(
-    redis, full_hash: str, kol_id: int | None, db=None
-) -> tuple[bool, str]:
+    取代旧的 is_duplicate() + set_dedup_keys() 两步操作,
+    消除 GET -> 判断 -> SET 之间的 TOCTOU 窗口。
     """
-    全周期去重检查:用 Redis 作为唯一真相源,24 小时 TTL。
+    if not redis or not dedup_hash:
+        return True  # 无 Redis 或无 hash 时放行(保持原降级行为)
+    key = f"dedup:{dedup_hash}"
+    result = await redis.set(key, "1", ex=window, nx=True)
+    return result is not None
 
-    设计决策:
-      - 不查数据库(订单表未存 full_hash 字段)
-      - Redis 重启会丢失长期去重数据,但可接受(概率低,且 60 秒短去重仍在)
-      - 如需更强保证,可在 Position 表加 full_hash 字段并在此查询
+
+async def try_acquire_long_term_dedup(
+    redis, full_hash: str, kol_id: int | None = None
+) -> tuple[bool, str]:
+    """原子长期去重: SET key 1 NX EX 24h。
+
+    返回 (True, "")  -> 成功占用(新策略)
+    返回 (False, reason) -> 24h 内已执行过(重复策略)
+
+    取代旧的 check_long_term_duplicate() + set_dedup_keys() 两步操作。
     """
     if not full_hash or not redis:
-        return False, ""
-
+        return True, ""
     key = f"dedup_long:{full_hash}"
-    # 只检查是否存在，不设置(SET 操作移到 set_dedup_keys)
-    exists = await redis.get(key)
-    if exists is not None:
-        return True, "长期去重:该策略在过去24小时内已执行"
-
-    return False, ""
-
-
-async def set_dedup_keys(
-    redis,
-    dedup_hash: str = "",
-    full_hash: str = "",
-    short_window: int = DEDUP_WINDOW_SECONDS,
-    long_window: int = DEDUP_LONG_TERM_WINDOW_SECONDS,
-) -> None:
-    """设置去重 key，在信号通过所有过滤后调用。"""
-    if not redis:
-        return
-    if dedup_hash:
-        await redis.set(f"dedup:{dedup_hash}", "1", ex=short_window, nx=True)
-    if full_hash:
-        await redis.set(f"dedup_long:{full_hash}", "1", ex=long_window, nx=True)
+    result = await redis.set(key, "1", ex=DEDUP_LONG_TERM_WINDOW_SECONDS, nx=True)
+    if result is None:
+        return False, "长期去重:该策略在过去24小时内已执行"
+    return True, ""
 
 
 async def clear_dedup_keys(redis, dedup_hash: str = "", full_hash: str = ""):
@@ -663,30 +651,35 @@ async def filter_signal(
     if default_log:
         logs.append(default_log)
 
-    # 1. 短期去重 (60秒窗口)
+    # 1. 短期去重 (原子 SET NX,消除 TOCTOU 窗口)
     dedup_hash = compute_dedup_hash(parsed.symbol, parsed.side, parsed.entry_price, kol_id)
     # SP-M2修复: 仅当 dedup_scope 和 dedup_hash 都非空时才加前缀,
     # 否则市价单(dedup_hash为空)会生成 "scope:" 这样的非空hash,导致同scope下所有市价单被误判为重复
     scoped_dedup_hash = f"{dedup_scope}:{dedup_hash}" if (dedup_scope and dedup_hash) else dedup_hash
     scoped_full_hash = ""
+    short_acquired = False
     if skip_duplicate and scoped_dedup_hash:
         try:
-            if await is_duplicate(redis, scoped_dedup_hash):
+            short_acquired = await try_acquire_dedup(redis, scoped_dedup_hash)
+            if not short_acquired:
                 return FilterResult(
                     "duplicate", parsed, dedup_hash=scoped_dedup_hash, reject_reason="重复信号(短期去重)"
                 )
         except Exception as _redis_err:
             logger.warning(f"Redis去重检查失败,降级跳过: {_redis_err}")
+            short_acquired = True
 
-    # 2. 全周期去重 (7天窗口,防止 KOL 隔日复盘相同策略)
+    # 2. 全周期去重 (原子 SET NX)
     if kol_id:
         full_hash = compute_full_strategy_hash(
             kol_id, parsed.symbol, parsed.side, parsed.entry_price, parsed.take_profits
         )
         scoped_full_hash = f"{dedup_scope}:{full_hash}" if dedup_scope else full_hash
         try:
-            is_long_dup, dup_reason = await check_long_term_duplicate(redis, scoped_full_hash, kol_id)
-            if is_long_dup:
+            long_acquired, dup_reason = await try_acquire_long_term_dedup(redis, scoped_full_hash, kol_id)
+            if not long_acquired:
+                if short_acquired:
+                    await clear_dedup_keys(redis, scoped_dedup_hash, "")
                 return FilterResult(
                     "duplicate",
                     parsed,
@@ -695,15 +688,9 @@ async def filter_signal(
                 )
         except Exception as _redis_err:
             logger.warning(f"Redis长期去重检查失败,降级跳过: {_redis_err}")
-        # 将 full_hash 存入 parsed 供后续下单流程使用
         parsed.dedup_full_hash = scoped_full_hash  # type: ignore
 
-    # 3. 信号通过所有过滤后设置去重 key (避免拒绝/下单失败后仍占用窗口)
-    if skip_duplicate:
-        try:
-            await set_dedup_keys(redis, scoped_dedup_hash, scoped_full_hash)
-        except Exception as _redis_err:
-            logger.warning(f"Redis去重key设置失败: {_redis_err}")
+    # 3. 去重 key 已在检查时原子设置,无需再调用 set_dedup_keys()
 
     decision = "corrected" if logs else "accept"
     return FilterResult(
