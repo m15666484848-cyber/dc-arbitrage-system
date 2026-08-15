@@ -1637,6 +1637,16 @@ async def process_signal(
         a for a in actions
         if a in ("close_position", "cancel_order", "update_tp_sl", "open_long", "open_short")
     ]
+    # 兜底保护: 离场信号中的开仓动作一律视为未来意图(如"出局后等信号再入场"),不执行。
+    if getattr(parsed, "is_exit_signal", False) and "close_position" in actionable_actions:
+        _exit_dropped = [a for a in actionable_actions if a in ("open_long", "open_short")]
+        if _exit_dropped:
+            logger.warning(
+                f"离场信号忽略开仓动作: signal={getattr(signal, 'id', '?')} dropped={_exit_dropped}"
+            )
+            actionable_actions = [
+                a for a in actionable_actions if a not in ("open_long", "open_short")
+            ]
     if len(actionable_actions) > 1:
         results: list[dict] = []
         any_ok = False
@@ -4487,6 +4497,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
             # S41: clear dedup keys on close, allow re-entry with same strategy
             try:
                 from app.core.redis import get_redis as _get_redis
+                from app.services.signal_filter import compute_full_strategy_hash
                 _redis = await _get_redis()
                 _tp_prices = [float(tp.get("price", 0)) for tp in (position.tp_levels or []) if tp.get("price")]
                 _full_hash = compute_full_strategy_hash(
@@ -4776,6 +4787,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
         if _dedup_keys_to_clear:
             try:
                 from app.core.redis import get_redis as _get_redis
+                from app.services.signal_filter import compute_full_strategy_hash
                 _redis = await _get_redis()
                 if _redis:
                     for _key in _dedup_keys_to_clear:

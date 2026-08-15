@@ -1116,7 +1116,9 @@ def detect_signal_actions(
         (has_explicit_open and (has_trade_block or not has_cancel or has_reopen_after_cancel))
         or (has_cancel and has_trade_block)
     ):
-        actions.append(f"open_{side}")
+        # 离场消息中的"再入场/等信号进"等词是未来意图,不是当前开仓指令。
+        if not is_exit:
+            actions.append(f"open_{side}")
     # refresh_pending 仅用于:有挂单状态描述+开仓词,但无完整交易参数块(只是刷新旧单状态)
     elif not actions and side in ("long", "short") and has_pending_status and has_explicit_open and not has_trade_block:
         actions.append("refresh_pending")
