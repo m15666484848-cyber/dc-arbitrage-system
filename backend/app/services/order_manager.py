@@ -4482,6 +4482,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             position.closed_at = _utcnow()
 
+            _dedup_keys_to_clear: list[str] = []  # OM-BUG4: 延迟到commit后清理
             # S41: clear dedup keys on close, allow re-entry with same strategy
             try:
                 from app.core.redis import get_redis as _get_redis
@@ -4491,11 +4492,11 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                     position.kol_id, position.symbol, position.side,
                     position.entry_price, _tp_prices
                 )
-                if _full_hash and _redis:
-                    await _redis.delete(f"dedup_long:{_full_hash}")
+                if _full_hash:
+                    _dedup_keys_to_clear.append(f"dedup_long:{_full_hash}")
                     if position.exchange_account_id:
-                        await _redis.delete(f"dedup_long:acct:{position.exchange_account_id}:{_full_hash}")
-                    logger.info(f"cleared dedup on close pos={position.id}")
+                        _dedup_keys_to_clear.append(f"dedup_long:acct:{position.exchange_account_id}:{_full_hash}")
+                    logger.info(f"queued dedup clear for pos={position.id}")
             except Exception as _e:
                 logger.warning(f"dedup clear on close failed: {_e}")
 
@@ -4560,10 +4561,10 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                         master.kol_id, master.symbol, master.side,
                         master.entry_price, _tp_prices
                     )
-                    if _full_hash and _redis:
-                        await _redis.delete(f"dedup_long:{_full_hash}")
+                    if _full_hash:
+                        _dedup_keys_to_clear.append(f"dedup_long:{_full_hash}")
                         if master.exchange_account_id:
-                            await _redis.delete(f"dedup_long:acct:{master.exchange_account_id}:{_full_hash}")
+                            _dedup_keys_to_clear.append(f"dedup_long:acct:{master.exchange_account_id}:{_full_hash}")
                 except Exception as _e:
                     logger.warning(f"dedup clear on master close failed: {_e}")
 
@@ -4769,6 +4770,18 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
             logger.error(f"数据库提交失败: {e}")
 
             raise
+
+        # OM-BUG4修复: commit成功后清理Redis去重key,防止回滚后重复入场
+        if _dedup_keys_to_clear:
+            try:
+                from app.core.redis import get_redis as _get_redis
+                _redis = await _get_redis()
+                if _redis:
+                    for _key in _dedup_keys_to_clear:
+                        await _redis.delete(_key)
+                    logger.info(f"cleared {len(_dedup_keys_to_clear)} dedup keys after commit, pos={position.id}")
+            except Exception as _e:
+                logger.warning(f"post-commit dedup clear failed: {_e}")
 
         await bus.publish_customer(position.customer_id, "position", {"id": position.id, "status": position.status, "pnl": pnl})
 
