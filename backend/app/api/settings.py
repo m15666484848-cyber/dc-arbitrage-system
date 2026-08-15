@@ -360,6 +360,20 @@ async def delete_exchange_account(aid: int, current=Depends(get_current_user), d
     acc = (await db.execute(select(ExchangeAccount).where(ExchangeAccount.id == aid, ExchangeAccount.customer_id == current.id))).scalar_one_or_none()
     if not acc:
         raise HTTPException(404, "账号不存在")
+    # 检查是否有未平仓持仓
+    from sqlalchemy import func as _func
+    from app.models.position import Position as _Position
+    _open_count = await db.scalar(
+        select(_func.count(_Position.id)).where(
+            _Position.exchange_account_id == aid,
+            _Position.status == "open",
+        )
+    )
+    if _open_count and _open_count > 0:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"该账户有{_open_count}个未平仓持仓,请先平仓再删除"},
+        )
     was_default = bool(acc.is_default)
     exchange = acc.exchange
     testnet = acc.testnet

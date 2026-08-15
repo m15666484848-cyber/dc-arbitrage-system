@@ -188,10 +188,12 @@ export default function PositionsPage() {
   const positions: any[] = data || [];
   const pendingOrders: any[] = Array.isArray(pendingData) ? pendingData : (pendingData?.items || []);
 
-  const totalUnrealized = useMemo(
-    () => positions.reduce((sum: number, p: any) => sum + (p.unrealized_pnl || 0), 0),
-    [positions]
-  );
+  const totalUnrealized = useMemo(() => {
+  const masterIds = new Set(positions.filter((p: any) => p.parent_id === null).map((p: any) => p.id));
+  return positions
+    .filter((p: any) => p.parent_id === null || !masterIds.has(p.parent_id))
+    .reduce((sum: number, p: any) => sum + (p.unrealized_pnl || 0), 0);
+}, [positions]);
 
   const { groups, independent } = useMemo(() => {
     const masters = positions.filter((p) => p.parent_id === null);
@@ -855,7 +857,7 @@ export default function PositionsPage() {
                 type="number"
                 step="0.001"
                 value={stopForm.trailing_callback}
-                onChange={(e) => setStopForm({ ...stopForm, trailing_callback: parseFloat(e.target.value) })}
+                onChange={(e) => setStopForm({ ...stopForm, trailing_callback: parseFloat(e.target.value) || 0 })}
               />
             </div>
           )}

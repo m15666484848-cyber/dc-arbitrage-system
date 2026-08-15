@@ -108,7 +108,10 @@ function getProtectionLabel(position: any) {
 function getPositionRoi(position: any, totalPnl: number, notional: number) {
   const backendRoi = position?.net_pnl_pct ?? position?.pnl_pct ?? position?.roi_pct;
   const parsed = Number(backendRoi);
-  if (Number.isFinite(parsed)) return parsed;
+  if (Number.isFinite(parsed)) {
+    return parsed < 1 ? parsed * 100 : parsed;
+  }
+  return notional > 0 ? (totalPnl / notional) * 100 : null;
   return notional > 0 ? (totalPnl / notional) * 100 : null;
 }
 
@@ -198,7 +201,7 @@ export default function DashboardPage() {
   const subsByParent = useMemo(() => {
     const map = new Map<number, any[]>();
     for (const p of positions) {
-      if (p.parent_id) {
+      if (p.parent_id && p.status === "open") {
         if (!map.has(p.parent_id)) map.set(p.parent_id, []);
         map.get(p.parent_id)!.push(p);
       }

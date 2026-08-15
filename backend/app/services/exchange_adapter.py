@@ -371,8 +371,8 @@ async def _ensure_okx_long_short_mode(ex) -> None:
                     _okx_mode_cache[cache_key] = now
                     logger.debug("OKX 持仓模式已是 long_short_mode,无需切换")
                     return
-    except Exception:
-        pass  # 查询失败时继续尝试 set_position_mode
+    except Exception as e:
+        logger.debug(f"操作异常: {e}")  # 查询失败时继续尝试 set_position_mode
 
     try:
         if hasattr(ex, "set_position_mode"):

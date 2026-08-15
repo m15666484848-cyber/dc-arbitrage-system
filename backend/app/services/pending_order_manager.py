@@ -365,8 +365,8 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
 
     # 调用 _place_entry 下单
     # ★ 急停检查: 急停状态下不允许触发待触发单
-    from app.models.user import User
-    customer = await db.get(User, pending.customer_id)
+    from app.models.customer import Customer
+    customer = await db.get(Customer, pending.customer_id)
     if customer and getattr(customer, "emergency_stop", False):
         pending.status = "cancelled"
         pending.cancel_reason = "客户急停已激活,待触发单自动取消"

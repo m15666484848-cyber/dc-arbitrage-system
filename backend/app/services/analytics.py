@@ -132,7 +132,6 @@ async def take_equity_snapshot(
                         Position.exchange == exchange,
                         Position.status == "open",
                         Position.parent_id.is_not(None),
-                        Position.parent_id.is_not(None),
                     )
                 )
             ).scalars().all()
@@ -363,7 +362,7 @@ async def calculate_advanced_metrics(
     max_drawdown = 0.0
     peak = 0.0
     for snap in snapshots:
-        bal = float(snap.get("balance") or 0)
+        bal = float(snap.get("equity") or 0)
         if bal > peak:
             peak = bal
         if peak > 0:
@@ -478,7 +477,6 @@ async def dashboard_stats(db: AsyncSession, customer_id: int, exchange_account_i
                 Position.customer_id == customer_id,
                 Position.status == "open",
                         Position.parent_id.is_not(None),
-                Position.parent_id.is_not(None),
                 account_filter_pos,
             )
         )
@@ -736,7 +734,6 @@ async def take_daily_risk_snapshot(
         Position.customer_id == customer_id,
         Position.status == "open",
                         Position.parent_id.is_not(None),
-        Position.parent_id.is_(None),
     )
     if exchange != "all":
         open_stmt = open_stmt.where(Position.exchange == exchange)

@@ -2628,13 +2628,13 @@ async def reset_test_data(
     if cid is None:
         # ===== 全部清除模式 =====
         clear_tables = [
-            ("alert_logs", "TRUNCATE TABLE alert_logs CASCADE"),
-            ("equity_snapshots", "TRUNCATE TABLE equity_snapshots CASCADE"),
-            ("trades", "TRUNCATE TABLE trades CASCADE"),
-            ("pending_orders", "TRUNCATE TABLE pending_orders CASCADE"),
-            ("orders", "TRUNCATE TABLE orders CASCADE"),
-            ("positions", "TRUNCATE TABLE positions CASCADE"),
-            ("signals", "TRUNCATE TABLE signals CASCADE"),
+            ("alert_logs", "DELETE FROM alert_logs"),
+            ("equity_snapshots", "DELETE FROM equity_snapshots"),
+            ("trades", "DELETE FROM trades"),
+            ("pending_orders", "DELETE FROM pending_orders"),
+            ("orders", "DELETE FROM orders"),
+            ("positions", "DELETE FROM positions"),
+            ("signals", "DELETE FROM signals"),
             # audit_logs 不可清除,保留完整审计轨迹
         ]
         for name, sql in clear_tables:

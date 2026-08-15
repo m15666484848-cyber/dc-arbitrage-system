@@ -101,14 +101,15 @@ export default function StrategiesPage() {
   };
 
   const remove = async (id: number) => {
-    try {
-      await API.deleteStrategy(id);
-      push("success", "策略已删除");
-      reload();
-    } catch (e: any) {
-      push("error", "删除失败");
-    }
-  };
+  if (!window.confirm("确定要删除这个策略吗？删除后不可恢复。")) return;
+  try {
+    await API.deleteStrategy(id);
+    push("success", "策略已删除");
+    reload();
+  } catch (e: any) {
+    push("error", e?.response?.data?.detail || "删除失败");
+  }
+};
 
   const createDefault = async () => {
     const params: Record<string, any> = {
