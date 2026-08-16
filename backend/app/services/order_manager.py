@@ -492,9 +492,39 @@ async def _process_exit_signal(
             parsed.symbol = inferred_symbol
             logger.info(f"平仓信号自动推断 symbol={inferred_symbol}(该 KOL 唯一持仓)")
         elif len(symbols) > 1:
-            reason = f"平仓信号未指定品种,且该 KOL 有 {len(symbols)} 个品种持仓,无法自动推断: {symbols}"
-            await _log_signal_status(db, signal, "rejected", reason, customer_id)
-            return {"ok": False, "reason": "未指定品种且存在多个持仓品种(歧义)"}
+            # 峰哥式出场话术 "现价1882出局!": 用消息现价与各持仓品种实时价匹配,
+            # 相对偏差最小且<=2%的品种即为出场对象,消除多品种歧义。
+            inferred_sym = None
+            import re as _re
+            _m = _re.search(r"现价\s*(\d+(?:\.\d+)?)", signal.raw_text or "")
+            if _m:
+                _exit_px = float(_m.group(1))
+                try:
+                    from app.services.exchange_adapter import fetch_tickers_batch
+                    _tickers = await fetch_tickers_batch(exchange, sorted(symbols))
+                    _best_dev = None
+                    for _sym in sorted(symbols):
+                        _px = _tickers.get(_sym)
+                        if not _px:
+                            continue
+                        _dev = abs(_px - _exit_px) / _exit_px
+                        if _best_dev is None or _dev < _best_dev:
+                            inferred_sym, _best_dev = _sym, _dev
+                    if inferred_sym and _best_dev is not None and _best_dev <= 0.02:
+                        logger.info(
+                            f"平仓信号按现价匹配品种: price={_exit_px} -> {inferred_sym} "
+                            f"(偏差{_best_dev:.2%})"
+                        )
+                    else:
+                        inferred_sym = None
+                except Exception as _e:
+                    logger.warning(f"平仓信号按现价匹配品种失败: {_e}")
+            if inferred_sym:
+                parsed.symbol = inferred_sym
+            else:
+                reason = f"平仓信号未指定品种,且该 KOL 有 {len(symbols)} 个品种持仓,无法自动推断: {symbols}"
+                await _log_signal_status(db, signal, "rejected", reason, customer_id)
+                return {"ok": False, "reason": "未指定品种且存在多个持仓品种(歧义)"}
 
     # 容错:如果指定了 side 但找不到持仓,尝试不限方向查找该品种的所有持仓
 
