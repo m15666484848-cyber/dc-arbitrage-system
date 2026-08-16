@@ -780,8 +780,14 @@ def _has_trade_param_block(text: str) -> bool:
     """是否包含交易参数块:方向 + 建仓/入场 + 风控字段或明确价格。"""
     if not text:
         return False
-    has_side = bool(re.search(r"方向\s*[:：]\s*(?:多|空)|做多|做空|开多|开空|多单|空单|long|short", text, re.IGNORECASE))
-    has_entry = bool(re.search(r"建仓|入场|进场|挂单|entry|buy\s*zone|sell\s*zone", text, re.IGNORECASE))
+    has_side = bool(re.search(
+        r"方向\s*[:：]\s*(?:多|空)|做多|做空|开多|开空|多单|空单|long|short"
+        r"|做反弹|博反弹|抢反弹|接反弹|做反抽|博反抽|抢反抽",
+        text, re.IGNORECASE))
+    has_entry = bool(re.search(
+        r"建仓|入场|进场|挂单|entry|buy\s*zone|sell\s*zone"
+        r"|\d+(?:[.,]\d+)?\s*(?:附近|一线|区域|上方|下方)\s*(?:做|接|抢|博|挂|买|sell|buy)",
+        text, re.IGNORECASE))
     has_risk = bool(re.search(r"止损|止盈|\bSL\b|\bTP\b", text, re.IGNORECASE))
     has_price = bool(re.search(r"\d+(?:[.,]\d+)?(?:\s*[-~—至到]\s*\d+(?:[.,]\d+)?)?", text))
     return has_side and has_entry and (has_risk or has_price)
