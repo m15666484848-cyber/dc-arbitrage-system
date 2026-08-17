@@ -120,6 +120,15 @@ async def take_equity_snapshot(
         finally:
             await exchange_adapter.close_exchange(ex)
 
+        # fetch_balance 失败时会静默返回全0字典;此时跳过本次快照,
+        # 避免写入0/负值坏数据导致最大回撤虚高至100%
+        if float(bal.get("balance", 0) or 0) <= 0:
+            logger.warning(
+                f"净值快照跳过:余额查询返回0 customer={customer_id} "
+                f"exchange={exchange} account={exchange_account_id}"
+            )
+            return
+
         # SU-S2 修复: 查询所有未平仓持仓的未实现盈亏并累加
         total_unrealized = 0.0
         try:
@@ -370,6 +379,9 @@ async def calculate_advanced_metrics(
     peak = 0.0
     for snap in snapshots:
         bal = float(snap.get("equity") or 0)
+        if bal <= 0:
+            # 跳过坏快照(API失败时写入的0/负值),避免最大回撤被拉到100%
+            continue
         if bal > peak:
             peak = bal
         if peak > 0:
