@@ -99,10 +99,10 @@ function formatTpLevels(tpLevels?: any[] | null) {
 }
 
 function getProtectionLabel(position: any) {
-  if (position?.breakeven_moved) return "成本保护已触发";
-  if (position?.cost_protection) return "成本保护开启";
-  if (position?.trailing_stop) return "追踪止损开启";
-  return "成本保护待触发";
+  if (position?.breakeven_moved) return "保本已触发";
+  if (position?.cost_protection) return "保本开启";
+  if (position?.trailing_stop) return "移动止损";
+  return "保本待触发";
 }
 
 function getPositionRoi(position: any, totalPnl: number, notional: number) {
@@ -444,7 +444,7 @@ export default function DashboardPage() {
                       <span className="position-row-detail">
                         <span className="detail-label">批次</span>
                         <span className="detail-value-text">
-                          {p.is_batch ? `分批 · 第${p.batch_no || 1}/${p.batch_count || 1}批` : "单笔"}
+                          {p.is_batch ? `${p.batch_no || 1}/${p.batch_count || 1}批` : "单笔"}
                         </span>
                       </span>
                       <span className="position-row-detail">
