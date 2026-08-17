@@ -511,7 +511,7 @@ export default function DashboardPage() {
                         <div className="text-text-tertiary">数量</div>
                         <div className="font-mono text-text-secondary">{fmtMoney(p.total_qty, 4)}</div>
                       </div>
-                      <div>
+                      <div className="col-span-2">
                         <div className="text-text-tertiary">止盈</div>
                         <div className="font-mono text-text-secondary truncate" title={formatTpLevels(p.tp_levels)}>
                           {formatTpLevels(p.tp_levels)}

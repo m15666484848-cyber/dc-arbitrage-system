@@ -921,7 +921,7 @@ body::after {
 
   .position-row-details {
     display: grid;
-    grid-template-columns: minmax(40px, 0.55fr) minmax(70px, 0.86fr) minmax(70px, 0.86fr) minmax(54px, 0.65fr) minmax(58px, 0.66fr) minmax(104px, 1.05fr) minmax(70px, 0.78fr) minmax(76px, 0.92fr) minmax(92px, 1.08fr);
+    grid-template-columns: minmax(40px, 0.55fr) minmax(70px, 0.86fr) minmax(70px, 0.86fr) minmax(54px, 0.65fr) minmax(58px, 0.66fr) minmax(122px, 1.12fr) minmax(70px, 0.78fr) minmax(76px, 0.92fr) minmax(92px, 1.08fr);
     align-items: center;
     gap: 3px;
     min-width: 0;
@@ -991,6 +991,20 @@ body::after {
     }
 
     .position-row-detail:nth-child(4) {
+      border-left: none;
+    }
+
+    .position-row-detail:nth-child(5) {
+      order: 9;
+      grid-column: span 2;
+      min-width: 0;
+    }
+
+    .position-row-detail:nth-child(5) .detail-value-text {
+      max-width: 100%;
+    }
+
+    .position-row-detail:nth-child(8) {
       border-left: none;
     }
   }
