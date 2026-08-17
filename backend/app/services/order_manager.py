@@ -1452,7 +1452,7 @@ async def _process_cancel_order_signal(
             if entry_price is None:
                 return False
             entry = float(entry_price)
-            return any(abs(entry - target) / max(target, 1.0) <= 0.00001 for target in target_prices)
+            return any(abs(entry - target) / max(target, 1.0) <= 0.005 for target in target_prices)
 
         pending_orders = [p for p in pending_orders if _price_match(p.entry_price)]
 
