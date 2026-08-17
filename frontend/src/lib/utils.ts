@@ -14,7 +14,7 @@ export function fmtMoney(value: number | string | undefined, digits = 2): string
 export function fmtPct(value: number | string | undefined): string {
   const n = typeof value === "string" ? parseFloat(value) : typeof value === "number" ? value : 0;
   if (!isFinite(n)) return "—";
-  return `${(n * 100).toFixed(2)}%`;
+  return `${n.toFixed(2)}%`;
 }
 
 export function fmtTime(value: string | number | undefined): string {

@@ -109,9 +109,8 @@ function getPositionRoi(position: any, totalPnl: number, notional: number) {
   const backendRoi = position?.net_pnl_pct ?? position?.pnl_pct ?? position?.roi_pct;
   const parsed = Number(backendRoi);
   if (Number.isFinite(parsed)) {
-    return parsed < 1 ? parsed * 100 : parsed;
+    return parsed;
   }
-  return notional > 0 ? (totalPnl / notional) * 100 : null;
   return notional > 0 ? (totalPnl / notional) * 100 : null;
 }
 
