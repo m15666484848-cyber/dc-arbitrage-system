@@ -4317,6 +4317,10 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
     """
 
+    # OM-BUG4: 函数级初始化,分批部分平仓(qty>0)不走完全平仓分支,
+    # 否则commit后清理段引用未赋值变量导致 UnboundLocalError 平仓失败
+    _dedup_keys_to_clear: list[str] = []
+
     # 行级锁:防止并发平仓(手动+止盈止损同时触发)导致超卖/重复结算
 
     position = (await db.execute(
@@ -4523,7 +4527,6 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             position.closed_at = _utcnow()
 
-            _dedup_keys_to_clear: list[str] = []  # OM-BUG4: 延迟到commit后清理
             # S41: clear dedup keys on close, allow re-entry with same strategy
             try:
                 from app.core.redis import get_redis as _get_redis
