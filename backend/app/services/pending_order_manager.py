@@ -413,7 +413,7 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
             "min notional", "min_notional",
             "order value too small", "below minimum",
             "小单被拒",
-            "invalid symbol", "无效交易对", "bad symbol",
+            "invalid symbol", "无效交易对", "bad symbol", "does not have market symbol", "badsymbol",
             "precision over limit", "lot size",
             "market is closed", "交易暂停", "market not found",
             "no enough balance", "margin insufficient",

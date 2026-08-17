@@ -1109,7 +1109,7 @@ def _normalize_symbol_for_exchange(ex, symbol: str) -> str:
 
     ex_name = getattr(ex, "id", "") or ""
 
-    if ex_name.lower() == "okx" and "/USDT" in symbol:
+    if ex_name.lower() in ("okx", "binance", "bybit") and "/USDT" in symbol:
 
         return f"{symbol}:USDT"
 
