@@ -780,7 +780,23 @@ async def place_order(
 
     if hasattr(ex, "amount_to_precision"):
         try:
-            amount = float(ex.amount_to_precision(symbol, amount))
+            if reduce_only:
+                # 平仓单数量做ROUND修正: 多次部分平仓后 qty 带浮点尾差(如 0.0539999...),
+                # TRUNCATE 会截成 0.053 留下灰尘仓位; 容差 0.1% 内向上修正到整数精度
+                from decimal import Decimal, ROUND_HALF_UP
+                _mkt = ex.market(symbol)
+                _prec = (_mkt.get("precision") or {}).get("amount")
+                _step = Decimal(str(_prec)) if not isinstance(_prec, int) else Decimal(1).scaleb(-_prec)
+                if _step > 0:
+                    _rounded = float((Decimal(str(amount)) / _step).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * _step)
+                    if _rounded > amount and (_rounded - amount) / max(amount, 1e-12) <= 0.001:
+                        amount = _rounded
+                    else:
+                        amount = float(ex.amount_to_precision(symbol, amount))
+                else:
+                    amount = float(ex.amount_to_precision(symbol, amount))
+            else:
+                amount = float(ex.amount_to_precision(symbol, amount))
         except Exception as e:
             logger.warning(f"数量精度调整失败: {e}")
 
