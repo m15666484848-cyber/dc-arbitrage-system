@@ -432,7 +432,12 @@ async def _handle_message(
             )
             hist_signals = (await db.execute(hist_stmt)).scalars().all()
             if hist_signals:
-                _recent_texts = [h.raw_text for h in reversed(hist_signals) if h.raw_text]
+                _ctx_cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+                _recent_texts = [
+                    h.raw_text
+                    for h in reversed(hist_signals)
+                    if h.raw_text and h.received_at and h.received_at >= _ctx_cutoff
+                ]
                 nums = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
                 lines = []
                 for i, h in enumerate(reversed(hist_signals)):

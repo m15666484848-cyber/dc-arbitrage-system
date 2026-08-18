@@ -1421,6 +1421,23 @@ async def _process_cancel_order_signal(
     """
     from app.models.pending_order import PendingOrder
 
+    target_prices_early = [float(p) for p in (parsed.entry_prices or []) if p]
+    if not target_prices_early and parsed.entry_price:
+        target_prices_early = [float(parsed.entry_price)]
+
+    if not parsed.symbol and not target_prices_early:
+        reason = "撤挂单缺少品种和价位,为避免误伤未执行"
+        logger.warning(f"撤挂单被拒: customer={customer_id} signal={signal.id} reason={reason}")
+        await _log_signal_status(db, signal, "rejected", reason, customer_id)
+        await notify(
+            "error",
+            "撤挂单已拒绝",
+            f"KOL {kol_name}\n原因: {reason}",
+            customer_id,
+            source_text=signal.raw_text,
+        )
+        return {"ok": False, "reason": reason}
+
     if not parsed.symbol and parsed.side not in ("long", "short"):
         reason = "撤挂单缺少品种或方向,为避免误伤未执行"
         logger.warning(f"撤挂单被拒: customer={customer_id} signal={signal.id} reason={reason}")
@@ -1437,6 +1454,7 @@ async def _process_cancel_order_signal(
     stmt = select(PendingOrder).where(
         PendingOrder.customer_id == customer_id,
         PendingOrder.status == "pending",
+        PendingOrder.kol_id == signal.kol_id,
     )
     if parsed.symbol:
         stmt = stmt.where(PendingOrder.symbol == parsed.symbol)
