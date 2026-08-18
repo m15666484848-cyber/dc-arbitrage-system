@@ -619,10 +619,13 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
                 else:
                     logger.warning(f"超时平仓未成功 pos={pos.id}: {result.get('reason')}")
             except Exception as e:
+                # rollback 会使 ORM 对象过期,先快照属性避免后续访问触发 greenlet 异常
+                _snap_id, _snap_symbol, _snap_side = pos.id, pos.symbol, pos.side
+                _snap_customer = pos.customer_id
                 # P1-13: 超时强制平仓失败时,记录详细错误原因
                 logger.exception(
-                    f"超时平仓失败 pos={pos.id} symbol={pos.symbol} side={pos.side} "
-                    f"opened={pos.opened_at} timeout={timeout_hours}h customer={pos.customer_id}: {e}"
+                    f"超时平仓失败 pos={_snap_id} symbol={_snap_symbol} side={_snap_side} "
+                    f"timeout={timeout_hours}h customer={_snap_customer}: {e}"
                 )
                 # 回滚会话,避免单笔失败污染后续平仓
                 await db.rollback()
@@ -631,9 +634,9 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
                     from app.services.notification import notify
                     await notify(
                         "error", "超时平仓失败",
-                        f"品种: {pos.symbol}\n方向: {pos.side}\n仓位ID: {pos.id}\n"
+                        f"品种: {_snap_symbol}\n方向: {_snap_side}\n仓位ID: {_snap_id}\n"
                         f"超时时间: {timeout_hours}小时\n失败原因: {e}",
-                        pos.customer_id,
+                        _snap_customer,
                     )
                 except Exception as e:
                     logger.warning(f"Unexpected error: {e}", exc_info=True)

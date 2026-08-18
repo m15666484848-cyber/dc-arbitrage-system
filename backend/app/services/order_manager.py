@@ -4407,33 +4407,63 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
     _exchange_order_id = None
     _db_committed = False  # OM-S2修复: 标记DB是否已成功提交,防止commit后异常误标close_failed
 
+    # OM-DUST: 全平时剩余量低于交易所最小下单量 → 直接核销,不再调用交易所。
+    # 场景: 分批止盈遗留灰尘(如0.001 ETH < OKX最小0.01),交易所每次拒单,
+    # 超时平仓任务每小时重试报错;灰尘名义价值极小,按最新价核销闭环。
+    # 核销分支复用正常平仓的全部记账(Order/Trade/主子仓同步/策略结果)。
+    _dust_writeoff = False
+    if close_qty >= position.qty - 1e-12:
+        try:
+            await ex.load_markets()
+            _mkt = ex.market(exchange_position.symbol) or {}
+            _limits = _mkt.get("limits", {}) or {}
+            _amt_min = float(((_limits.get("amount") or {}).get("min")) or 0)
+            _cost_min = float(((_limits.get("cost") or {}).get("min")) or 0)
+            _last_price = 0.0
+            if _amt_min > 0 and close_qty < _amt_min:
+                _dust_writeoff = True
+                _dust_reason = f"数量{close_qty} < 最小下单量{_amt_min}"
+            elif _cost_min > 0:
+                _tk = await ex.fetch_ticker(exchange_position.symbol)
+                _last_price = float(_tk.get("last") or _tk.get("close") or 0)
+                if _last_price > 0 and close_qty * _last_price < _cost_min:
+                    _dust_writeoff = True
+                    _dust_reason = (
+                        f"名义价值{close_qty * _last_price:.2f}USDT < 最小下单额{_cost_min}USDT"
+                    )
+        except Exception as _dust_e:
+            logger.debug(f"灰尘仓位检查失败,按正常平仓处理 pos={position_id}: {_dust_e}")
+
     try:
 
-        ex_order = await exchange_adapter.close_position_market(
+        if _dust_writeoff:
+            # 灰尘核销: 不下交易所单,按最新价虚拟成交,手续费为0
+            ex_order = {"id": f"dust_writeoff:{position_id}"}
+            filled, fill_price = close_qty, _last_price
+            _exchange_order_id = str(ex_order.get("id", ""))
+            _exchange_close_succeeded = True
+            logger.warning(
+                f"灰尘仓位直接核销 pos={position_id} symbol={position.symbol} "
+                f"qty={close_qty} price={fill_price} 原因: {_dust_reason}",
+            )
+        else:
+            ex_order = await exchange_adapter.close_position_market(
+                ex, exchange_position.symbol, exchange_position.side, close_qty
+            )
+            # 校验实际成交:复用 _verify_order_filled 处理 OKX 异步成交和假 ordId 问题
+            # 防止"幽灵平仓"(系统记录已平仓但交易所实际未成交)
+            filled, fill_price = await _verify_order_filled(ex, ex_order, exchange_position.symbol)
+            _exchange_order_id = str(ex_order.get("id", ""))
+            _exchange_close_succeeded = True
+            logger.info(f"交易所平仓成功 pos={position_id} exchange_order_id={_exchange_order_id} symbol={position.symbol} side={position.side}")
 
-            ex, exchange_position.symbol, exchange_position.side, close_qty
-
-        )
-
-        # 校验实际成交:复用 _verify_order_filled 处理 OKX 异步成交和假 ordId 问题
-
-        # 防止"幽灵平仓"(系统记录已平仓但交易所实际未成交)
-
-        filled, fill_price = await _verify_order_filled(ex, ex_order, exchange_position.symbol)
-
-        _exchange_order_id = str(ex_order.get("id", ""))
-
-        _exchange_close_succeeded = True
-
-        logger.info(f"交易所平仓成功 pos={position_id} exchange_order_id={_exchange_order_id} symbol={position.symbol} side={position.side}")
-
-        # 提取平仓手续费(TAKER 费率)
-
-        close_fee = exchange_adapter.extract_fee_from_order(
-
-            ex, ex_order, position.symbol, filled, fill_price, "market",
-
-        )
+        # 提取平仓手续费(TAKER 费率); 灰尘核销无交易所单,手续费记0
+        if _dust_writeoff:
+            close_fee = 0.0
+        else:
+            close_fee = exchange_adapter.extract_fee_from_order(
+                ex, ex_order, position.symbol, filled, fill_price, "market",
+            )
 
         # 计算开仓手续费分摊(按平仓数量占初始数量比例)
 
