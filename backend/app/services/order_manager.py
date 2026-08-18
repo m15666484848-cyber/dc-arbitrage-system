@@ -1919,7 +1919,21 @@ async def process_signal(
         )
 
     # S24: 同币种同方向近价去重 — 已有open持仓且入场价偏差<1%时拒绝新信号
-    if same_side_customer_positions and parsed.entry_price:
+    # 例外: KOL 明确喊进场("直接进场/跟上节奏/没进场的直接进")时放行,
+    # 该语义下加仓/新开是 KOL 本意,拦截会漏单(欧阳#1743/#1749案例)
+    _explicit_entry = False
+    if signal.raw_text:
+        import re as _re
+        _explicit_entry = bool(
+            _re.search(
+                r"(直接|立即|马上|现在就|跟上节奏|跟上|果断).{0,8}(进场|进单|进多|进空|入场|上车|做多|做空)"
+                r"|(?:没|未|还没有|还没|没有)进场的?.{0,16}(?:直接|就|可以|现在|果断)?.{0,4}(?:进|跟|上|补)"
+                r"|(?:1000u|千倍|翻仓)",
+                signal.raw_text,
+                _re.IGNORECASE,
+            )
+        )
+    if not _explicit_entry and same_side_customer_positions and parsed.entry_price:
         for _pos in same_side_customer_positions:
             _pos_entry = float(_pos.entry_price) if _pos.entry_price else 0
             if _pos_entry > 0:
