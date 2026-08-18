@@ -75,3 +75,6 @@ backend/init_admin.py
 *.p0bak
 *.p0bak.*
 dcquant_backups/
+
+# 审计报告产物
+backend/reports/

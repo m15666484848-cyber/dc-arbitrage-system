@@ -138,7 +138,7 @@ export default function DashboardPage() {
     });
     const t = setInterval(() => {
       reloadLiveData();
-    }, 15000);
+    }, 30000);
     return () => {
       off();
       clearInterval(t);

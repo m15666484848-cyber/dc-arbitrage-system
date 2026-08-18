@@ -309,18 +309,20 @@ async def list_positions(
     exchange_account_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    cid = _resolve_customer(current, customer_id)
+    cid = current.id if current.role == "customer" else customer_id
     # 持仓管理只展示未结束的子仓位；已平仓仓位应进入历史记录。
     # master 仓位仅作为内部聚合记录，不直接返回给前端。
+    # 管理员未指定 customer_id 时返回所有客户的持仓。
     stmt = (
         select(Position)
         .where(
-            Position.customer_id == cid,
             Position.status == "open",
             Position.parent_id.is_not(None),
         )
         .order_by(Position.opened_at.desc())
     )
+    if cid is not None:
+        stmt = stmt.where(Position.customer_id == cid)
     # M1修复: 条件追加筛选,避免表达式优先级BUG(None时 == True 变为 == 1)
     if exchange_account_id:
         stmt = stmt.where(Position.exchange_account_id == exchange_account_id)
@@ -399,8 +401,10 @@ async def list_orders(
     exchange_account_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    cid = _resolve_customer(current, customer_id)
-    stmt = select(Order).where(Order.customer_id == cid, Order.status != "deleted")
+    cid = current.id if current.role == "customer" else customer_id
+    stmt = select(Order).where(Order.status != "deleted")
+    if cid is not None:
+        stmt = stmt.where(Order.customer_id == cid)
     if status:
         stmt = stmt.where(Order.status == status)
     if exchange_account_id:
@@ -690,10 +694,12 @@ async def list_trades(
     page_size: int = Query(50, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
 ):
-    cid = _resolve_customer(current, customer_id)
+    cid = current.id if current.role == "customer" else customer_id
     # ★ P3 修复: 添加分页参数,避免一次性返回过多数据
     offset = (page - 1) * page_size
-    stmt = select(Trade).where(Trade.customer_id == cid)
+    stmt = select(Trade)
+    if cid is not None:
+        stmt = stmt.where(Trade.customer_id == cid)
     if exchange_account_id:
         stmt = stmt.where(Trade.exchange_account_id == exchange_account_id)
     trades = (
@@ -731,7 +737,7 @@ async def list_pending_orders_api(
     """查询待触发单列表。"""
     from app.services import pending_order_manager
 
-    cid = _resolve_customer(current, customer_id)
+    cid = current.id if current.role == "customer" else customer_id
     data = await pending_order_manager.list_pending_orders(db, cid, status)
     if exchange_account_id:
         data = [p for p in data if p.get("exchange_account_id") == exchange_account_id]

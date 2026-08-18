@@ -178,7 +178,7 @@ export default function PositionsPage() {
     // 轮询作为 WebSocket 的备份,统一走去抖刷新,避免和 WS 事件竞态。
     const t = setInterval(() => {
       reloadLiveData();
-    }, 15000);
+    }, 30000);
     return () => {
       off();
       clearInterval(t);

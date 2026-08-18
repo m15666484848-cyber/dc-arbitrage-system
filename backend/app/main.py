@@ -417,7 +417,7 @@ app = FastAPI(
 
 # === API 限流中间件 ===
 RATE_LIMIT_WINDOW = 60  # 60秒窗口
-RATE_LIMIT_MAX = 120    # 每窗口最大请求数
+RATE_LIMIT_MAX = 300    # 每窗口最大请求数(看板多端点轮询需余量)
 RATE_LIMIT_CLEANUP_THRESHOLD = 300  # 清理超过5分钟的条目(秒)
 _rate_limit_store: dict[str, deque] = defaultdict(deque)
 _last_cleanup = _time.monotonic()

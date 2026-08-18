@@ -6,8 +6,15 @@ from app.models.trading import Position
 
 
 class FakeDb:
+    def __init__(self, locked_pos=None):
+        self._locked_pos = locked_pos
+
     async def execute(self, *args, **kwargs):
-        return None
+        locked = self._locked_pos
+        class Result:
+            def scalar_one_or_none(self):
+                return locked
+        return Result()
 
     async def flush(self):
         self.flushed = True
@@ -31,7 +38,6 @@ def test_margin_precheck_uses_leverage_not_notional():
 
 @pytest.mark.asyncio
 async def test_update_trailing_stop_commits(monkeypatch):
-    db = FakeDb()
     pos = Position(
         id=1,
         status="open",
@@ -42,6 +48,7 @@ async def test_update_trailing_stop_commits(monkeypatch):
         trailing_stop=True,
         trailing_callback=0.1,
     )
+    db = FakeDb(locked_pos=pos)
 
     await position_manager._update_trailing_stop(db, pos, 120)
 
@@ -204,11 +211,11 @@ def test_native_stop_loss_params_binance():
 @pytest.mark.asyncio
 async def test_native_stop_loss_rejects_non_okx_for_live_submit():
     class FakeEx:
-        id = "binance"
+        id = "kraken"
 
     with pytest.raises(ValueError):
         await exchange_adapter.place_native_stop_loss_order(
-            FakeEx(), "binance", "BTC/USDT", "long", 0.01, 95.0
+            FakeEx(), "kraken", "BTC/USDT", "long", 0.01, 95.0
         )
 
 

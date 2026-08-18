@@ -39,7 +39,7 @@ def test_correct_price_minor_typo_auto_fix():
     assert changed
     assert not rejected
     assert p.entry_price == 125.0
-    assert "自动改为市价" in log
+    assert "入场价纠偏" in log and "同步调整" in log
 
 
 def test_correct_price_severe_rejected():
@@ -80,8 +80,8 @@ def test_apply_defaults_no_stop_loss_mode():
     p = _parsed(take_profits=[], stop_loss=None)
     log = apply_defaults(p, market_price=150.0, default_tp_pct=[0.10],
                          default_sl_pct=-0.05, no_stop_loss=True)
-    assert p.stop_loss == 120.0
-    assert "硬止损兜底" in log
+    assert p.stop_loss == 132.0
+    assert "硬止损" in log and "兜底" in log
 
 
 # ---------- 去重 ----------

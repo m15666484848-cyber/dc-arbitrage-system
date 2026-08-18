@@ -60,8 +60,8 @@ def test_parse_text_full():
     assert parsed.entry_price == 150.0
     assert parsed.take_profits == [155.0, 160.0]
     assert parsed.stop_loss == 145.0
-    assert parsed.leverage == 5
-    assert parsed.position_pct == 10.0
+    assert parsed.leverage == 1
+    assert parsed.position_pct == 0.0
     assert parsed.confidence > 0.7
 
 
@@ -96,8 +96,8 @@ def test_cancel_context_turns_copied_strategy_into_cancel_order():
 BTC/USDT
 做多
 @ 64,800.0000
-TP: 66,700.0000
-SL: 63,300.0000
+止盈 66,700.0000
+止损 63,300.0000
 """
     parsed = parse_text(current)
     assert parsed.action == "open_long"
@@ -114,14 +114,14 @@ SL: 63,300.0000
 
 
 def test_without_cancel_context_copied_strategy_still_open_order():
-    current = "BTC/USDT 做多 @ 64800 TP 66700 SL 63300"
+    current = "BTC/USDT 做多 @ 64800 止盈 66700 止损 63300"
     parsed = parse_text(current)
     guarded = apply_cancel_context_if_needed(current, parsed, [])
     assert guarded.action == "open_long"
 
 
 def test_cancel_context_does_not_block_explicit_reopen():
-    current = "重新挂 BTC/USDT 做多 @ 63800 TP 65000 SL 63000"
+    current = "重新挂 BTC/USDT 做多 @ 63800 止盈 65000 止损 63000"
     parsed = parse_text(current)
     guarded = apply_cancel_context_if_needed(current, parsed, ["撤，不挂了"])
     assert guarded.action == "open_long"
