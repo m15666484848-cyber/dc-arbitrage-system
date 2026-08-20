@@ -3,6 +3,7 @@ import hashlib
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -362,7 +363,7 @@ async def delete_exchange_account(aid: int, current=Depends(get_current_user), d
         raise HTTPException(404, "账号不存在")
     # 检查是否有未平仓持仓
     from sqlalchemy import func as _func
-    from app.models.position import Position as _Position
+    from app.models.trading import Position as _Position
     _open_count = await db.scalar(
         select(_func.count(_Position.id)).where(
             _Position.exchange_account_id == aid,

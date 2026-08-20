@@ -237,7 +237,7 @@ async def get_atr_for_symbol(
                 if val > 0:
                     return val
     except Exception as e:
-        logger.warning(f"Unexpected error: {e}", exc_info=True)
+        logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
     # 获取 K 线数据
     try:
@@ -256,7 +256,7 @@ async def get_atr_for_symbol(
                 cache_key = f"dcq:atr:{exchange}:{symbol}:{period}"
                 await redis.setex(cache_key, 300, str(atr))
         except Exception as e:
-            logger.warning(f"Unexpected error: {e}", exc_info=True)
+            logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
     return atr
 
@@ -305,9 +305,12 @@ def compute_dedup_hash(symbol: str, side: str, entry_price: float | None, kol_id
     if entry_price and entry_price > 0:
         # log_{1.005}(price):价格每增长0.5%,桶号+1
         bucket = str(int(round(math.log(entry_price) / math.log(1.005))))
+        raw = f"{kol_id or 0}|{symbol}|{side}|{bucket}"
     else:
-        return ""  # 市价单不参与价格分桶去重
-    raw = f"{kol_id or 0}|{symbol}|{side}|{bucket}"
+        # 市价单无入场价: 改用 KOL+品种+方向 指纹参与短期去重(60秒窗口),
+        # 防止KOL口语补充消息("做个短空")被解析为独立市价信号后重复开仓;
+        # 更长周期的重复由 order_manager 的"同KOL同品种同方向已有持仓"检查拦截
+        raw = f"{kol_id or 0}|{symbol}|{side}|mkt"
     return hashlib.md5(raw.encode()).hexdigest()
 
 
@@ -403,54 +406,68 @@ def correct_price(parsed: ParsedSignal, market_price: float | None) -> tuple[boo
 
 
 def correct_direction(parsed: ParsedSignal) -> tuple[bool, str]:
-    """方向纠错:long 但 TP<入场 或 SL>入场 → 翻转方向。"""
+    """方向纠错:SL/TP 与声明方向矛盾时,以多数证据(方向词+另一参数)为准;
+    仅当 SL 和 TP 全部与方向矛盾(疑似方向词被解析错)才翻转方向。
+
+    2026-08-20 修复: 原逻辑"short 止损<入场 → 翻转为 long"会在 KOL 止损笔误时
+    (如陈哥 BTC 空 69900/止损误写 61600/止盈 67900 正确) 把整个策略错误翻转成
+    多单并镜像止盈。新逻辑: 止盈支持声明方向时止损视为笔误,丢弃止损保留方向。
+    """
     if not parsed.side:
         return False, ""
     entry = parsed.entry_price
     if not entry:
         return False, ""
-    if parsed.side == "long":
-        if parsed.stop_loss and parsed.stop_loss > entry:
-            new_side = "short"
-            parsed.side = new_side
-            # long→short: SL > entry 对于 short 是正确方向(止损在上方),无需翻转
-            # 翻转方向时同步翻转止盈价(镜像到入场价另一侧),过滤无效价格
-            if parsed.take_profits and parsed.entry_price:
-                ep = parsed.entry_price
-                mirrored_tps = [ep * 2 - tp for tp in parsed.take_profits]
-                parsed.take_profits = [tp for tp in mirrored_tps if tp > 0]
-            return True, f"long 止损 {parsed.stop_loss} > 入场 {entry},方向自动翻转为 short"
-        wrong_tp = [tp for tp in parsed.take_profits if tp < entry]
-        if wrong_tp and not any(tp > entry for tp in parsed.take_profits):
-            new_side = "short"
-            parsed.side = new_side
-            # 翻转方向时同步翻转止盈价(镜像到入场价另一侧),过滤无效价格
-            if parsed.take_profits and parsed.entry_price:
-                ep = parsed.entry_price
-                mirrored_tps = [ep * 2 - tp for tp in parsed.take_profits]
-                parsed.take_profits = [tp for tp in mirrored_tps if tp > 0]
-            return True, f"long 止盈全部低于入场 {entry},方向自动翻转为 short"
+    tps = [tp for tp in (parsed.take_profits or []) if tp and tp > 0]
+
+    def _mirror_tps():
+        ep = parsed.entry_price
+        mirrored = [ep * 2 - tp for tp in parsed.take_profits]
+        parsed.take_profits = [tp for tp in mirrored if tp > 0]
+
     if parsed.side == "short":
-        if parsed.stop_loss and parsed.stop_loss < entry:
-            new_side = "long"
-            parsed.side = new_side
-            # short→long: SL < entry 对于 long 是正确方向(止损在下方),无需翻转
-            # 翻转方向时同步翻转止盈价(镜像到入场价另一侧),过滤无效价格
-            if parsed.take_profits and parsed.entry_price:
-                ep = parsed.entry_price
-                mirrored_tps = [ep * 2 - tp for tp in parsed.take_profits]
-                parsed.take_profits = [tp for tp in mirrored_tps if tp > 0]
-            return True, f"short 止损 {parsed.stop_loss} < 入场 {entry},方向自动翻转为 long"
-        wrong_tp = [tp for tp in parsed.take_profits if tp > entry]
-        if wrong_tp and not any(tp < entry for tp in parsed.take_profits):
-            new_side = "long"
-            parsed.side = new_side
-            # 翻转方向时同步翻转止盈价(镜像到入场价另一侧),过滤无效价格
-            if parsed.take_profits and parsed.entry_price:
-                ep = parsed.entry_price
-                mirrored_tps = [ep * 2 - tp for tp in parsed.take_profits]
-                parsed.take_profits = [tp for tp in mirrored_tps if tp > 0]
-            return True, f"short 止盈全部高于入场 {entry},方向自动翻转为 long"
+        # SL 在入场下方 / TP 全在入场上方 → 与做空矛盾
+        sl_bad = bool(parsed.stop_loss) and parsed.stop_loss < entry
+        tp_bad = bool(tps) and all(tp > entry for tp in tps)
+        if sl_bad and tp_bad:
+            parsed.side = "long"
+            _mirror_tps()
+            return True, f"short 止损与止盈均与入场 {entry} 矛盾,方向自动翻转为 long"
+        if sl_bad:
+            old_sl = parsed.stop_loss
+            parsed.stop_loss = None
+            return True, (
+                f"short 止损 {old_sl} < 入场 {entry} 与方向矛盾(止盈支持做空),"
+                f"判定止损笔误:保留做空方向,丢弃该止损(按默认止损兜底)"
+            )
+        if tp_bad:
+            old_tps = list(parsed.take_profits or [])
+            parsed.take_profits = []
+            return True, (
+                f"short 止盈 {old_tps} 全部 > 入场 {entry} 与方向矛盾(止损支持做空),"
+                f"判定止盈笔误:保留做空方向,丢弃止盈(按默认止盈兜底)"
+            )
+    if parsed.side == "long":
+        sl_bad = bool(parsed.stop_loss) and parsed.stop_loss > entry
+        tp_bad = bool(tps) and all(tp < entry for tp in tps)
+        if sl_bad and tp_bad:
+            parsed.side = "short"
+            _mirror_tps()
+            return True, f"long 止损与止盈均与入场 {entry} 矛盾,方向自动翻转为 short"
+        if sl_bad:
+            old_sl = parsed.stop_loss
+            parsed.stop_loss = None
+            return True, (
+                f"long 止损 {old_sl} > 入场 {entry} 与方向矛盾(止盈支持做多),"
+                f"判定止损笔误:保留做多方向,丢弃该止损(按默认止损兜底)"
+            )
+        if tp_bad:
+            old_tps = list(parsed.take_profits or [])
+            parsed.take_profits = []
+            return True, (
+                f"long 止盈 {old_tps} 全部 < 入场 {entry} 与方向矛盾(止损支持做多),"
+                f"判定止盈笔误:保留做多方向,丢弃止盈(按默认止盈兜底)"
+            )
     return False, ""
 
 

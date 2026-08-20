@@ -411,6 +411,73 @@ def _split_open_signal_positions(
             opposite_side.append(pos)
     return same_side, opposite_side
 
+async def _cancel_pending_orders_on_kol_exit(
+    db: AsyncSession,
+    signal: Signal,
+    parsed: ParsedSignal,
+    customer_id: int,
+) -> list:
+    """KOL 宣布止盈到达/离场但客户无持仓时,联动取消同策略待触发单。
+
+    匹配条件(全部满足):
+    1. 同客户/同KOL/pending 状态的待触发单
+    2. 同品种(若有)/同方向(若有)
+    3. 消息原文中的价格与待触发单任一止盈位偏差 <= 0.5%
+    """
+    import re as _re
+    from app.models.pending_order import PendingOrder
+
+    candidates = []
+    for m in _re.findall(r"(\d{3,6}(?:\.\d+)?)", signal.raw_text or ""):
+        try:
+            v = float(m)
+        except ValueError:
+            continue
+        if 100 <= v <= 500000:
+            candidates.append(v)
+    if not candidates:
+        return []
+
+    stmt = select(PendingOrder).where(
+        PendingOrder.customer_id == customer_id,
+        PendingOrder.kol_id == signal.kol_id,
+        PendingOrder.status == "pending",
+    )
+    if parsed.symbol:
+        stmt = stmt.where(PendingOrder.symbol == parsed.symbol)
+    if parsed.side:
+        stmt = stmt.where(PendingOrder.side == parsed.side)
+    pendings = (await db.execute(stmt)).scalars().all()
+
+    cancelled_ids = []
+    for p in pendings:
+        tp_prices = []
+        for lv in (p.tp_levels or []):
+            if isinstance(lv, dict) and lv.get("price"):
+                tp_prices.append(float(lv["price"]))
+        matched_tp = None
+        for tp in tp_prices:
+            for c in candidates:
+                if abs(tp - c) / tp <= 0.005:
+                    matched_tp = tp
+                    break
+            if matched_tp:
+                break
+        if matched_tp is None:
+            continue
+        p.status = "cancelled"
+        p.cancel_reason = f"KOL宣布止盈到达(参考价{matched_tp:g}),策略已结束,入场待触发单自动取消"
+        cancelled_ids.append(p.id)
+
+    if cancelled_ids:
+        await db.commit()
+        logger.info(
+            f"KOL止盈消息联动取消待触发单: signal={signal.id} kol={signal.kol_id} "
+            f"cancelled={cancelled_ids} msg_prices={candidates}"
+        )
+    return cancelled_ids
+
+
 async def _process_exit_signal(
 
     db: AsyncSession,
@@ -644,6 +711,16 @@ async def _process_exit_signal(
             failed_results.append({"position_id": pos_id, "reason": str(e), "hint": _failure_hint(e)})
 
             await db.rollback()
+
+            # rollback 使 ORM 对象过期,后续 signal.note/pos.id/ex_acc 等访问会触发
+            # 同步刷新导致 greenlet 崩溃(整条平仓信号处理中断);刷新恢复
+            for _stale in (signal, ex_acc, *positions):
+                if _stale is None:
+                    continue
+                try:
+                    await db.refresh(_stale)
+                except Exception:
+                    pass
 
     if not closed_positions:
 
@@ -1211,7 +1288,7 @@ def _contracts_to_coin(ex, symbol: str, contracts: float) -> float:
 
     except Exception as e:
 
-        logger.warning(f"Unexpected error: {e}", exc_info=True)
+        logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
     return contracts
 
@@ -1247,7 +1324,7 @@ async def _get_symbol_multiplier(db: AsyncSession, customer_id: int, symbol: str
 
     except Exception as e:
 
-        logger.warning(f"Unexpected error: {e}", exc_info=True)
+        logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
     # 1. 客户自定义币种覆盖 (custom_symbol 不为空)
 
@@ -1780,6 +1857,14 @@ async def process_signal(
         exchange_account_id=snapshot_account_id,
     ):
         reason = f"平仓信号无客户实际持仓,已跳过: {parsed.symbol or '全部'} {parsed.side or '全部方向'}"
+        # KOL宣布止盈/离场但客户无持仓: 联动取消同策略待触发单(策略生命周期已结束)
+        try:
+            _cancelled_ids = await _cancel_pending_orders_on_kol_exit(db, signal, parsed, customer_id)
+        except Exception as _e:
+            logger.warning(f"止盈联动取消待触发单异常: {_e}")
+            _cancelled_ids = []
+        if _cancelled_ids:
+            reason += f"; KOL止盈消息匹配止盈位,已联动取消待触发单: {','.join(f'#{_i}' for _i in _cancelled_ids)}"
         logger.info(f"{reason} customer={customer_id} signal={signal.id}")
         await _log_signal_status(db, signal, "ignored", reason, customer_id)
         return {"ok": True, "reason": reason}
@@ -2268,16 +2353,16 @@ async def process_signal(
         available_balance = bal_result.get("available_balance", 0) or bal_result.get("balance", 0)
 
         if available_balance > 0:
-            if decision.notional_usdt > available_balance * 0.95:
-                reason = f"余额不足: 下单{decision.notional_usdt} USDT > 可用余额{available_balance:.2f} USDT的95%"
+            if decision.notional_usdt > available_balance * 5.0:
+                reason = f"余额不足: 下单{decision.notional_usdt} USDT > 可用余额{available_balance:.2f} USDT的500%"
                 logger.warning(f"信号被拒(余额不足): customer={customer_id} signal={signal.id} {reason}")
                 await _log_signal_status(db, signal, "rejected", reason, customer_id)
                 await notify("error", "信号已拒绝", f"KOL {kol_name}\n品种: {parsed.symbol}\n原因: {reason}", customer_id, source_text=signal.raw_text)
                 return {"ok": False, "reason": reason}
-            elif decision.notional_usdt > available_balance * 0.80:
-                logger.warning(f"余额警告: customer={customer_id} signal={signal.id} 下单{decision.notional_usdt} > 余额{available_balance:.2f}的80%")
+            elif decision.notional_usdt > available_balance * 4.0:
+                logger.warning(f"余额警告: customer={customer_id} signal={signal.id} 下单{decision.notional_usdt} > 余额{available_balance:.2f}的400%")
                 await notify("warning", "余额偏低警告",
-                    f"KOL {kol_name}\n品种: {parsed.symbol}\n下单: {decision.notional_usdt} USDT\n可用余额: {available_balance:.2f} USDT\n已超过余额80%, 建议调低策略base_qty",
+                    f"KOL {kol_name}\n品种: {parsed.symbol}\n下单: {decision.notional_usdt} USDT\n可用余额: {available_balance:.2f} USDT\n已超过余额400%, 建议调低策略base_qty",
                     customer_id, source_text=signal.raw_text)
 
     except Exception as e:
@@ -2392,6 +2477,68 @@ async def process_signal(
     if not market_price or market_price <= 0:
 
         market_price = await exchange_adapter.fetch_market_price(exchange, parsed.symbol)
+
+    # 7.5 策略生命周期保护: 第一止盈位已被现价穿越的策略拒绝开仓
+    # 场景: KOL复盘"止盈已到"后重发旧策略(现价已越过止盈位),此时挂入场单已无意义
+    # 做多: 现价 >= 第一止盈*0.998; 做空: 现价 <= 第一止盈*1.002 (含0.2%容差)
+    try:
+        _first_tp = None
+        _tps = list(getattr(parsed, "take_profits", None) or [])
+        if _tps:
+            _t0 = _tps[0]
+            if isinstance(_t0, (int, float)):
+                _first_tp = float(_t0)
+            elif isinstance(_t0, dict) and _t0.get("price"):
+                _first_tp = float(_t0["price"])
+        if _first_tp and market_price and market_price > 0 and parsed.side in ("long", "short"):
+            # 仅做多方向用价格几何判定(止盈位被现价甩在下方=价格已涨过目标);
+            # 做空止盈位常在现价上方(挂高做空、止盈在入场下方,属正常形态),
+            # 纯现价比较会误拦有效策略,做空场景由"止盈消息联动取消"覆盖
+            _expired = parsed.side == "long" and market_price >= _first_tp * 0.998
+            if _expired:
+                reason = (
+                    f"止盈位已到达: {'做多' if parsed.side == 'long' else '做空'}第一止盈 "
+                    f"{_first_tp:g} 已被现价 {market_price:.2f} 穿越,策略空间已走完,拒绝开仓"
+                )
+                logger.warning(f"信号被拒(策略过期): customer={customer_id} signal={signal.id} {reason}")
+                await _log_signal_status(db, signal, "rejected", reason, customer_id)
+                await notify(
+                    "error", "信号已拒绝(策略过期)",
+                    f"KOL {kol_name}\n品种: {parsed.symbol}\n方向: {'做多' if parsed.side == 'long' else '做空'}\n原因: {reason}",
+                    customer_id, source_text=signal.raw_text,
+                )
+                return {"ok": False, "reason": reason}
+    except Exception as _tp_e:
+        logger.debug(f"止盈到达校验跳过(非致命): {_tp_e}")
+
+    # 7.6 市价单防重复开仓: 同KOL同品种同方向已有open持仓时,跳过该市价信号
+    # 场景: KOL先发完整策略(市价开仓),随后发"做个短空"等口语补充消息,
+    #       被LLM解析为独立市价信号,导致同一策略在数十秒内重复开仓多笔
+    if not (parsed.entry_price and parsed.entry_price > 0):
+        _mkt_dup_pos_id = (await db.execute(
+            select(Position.id).where(
+                Position.customer_id == customer_id,
+                Position.kol_id == signal.kol_id,
+                Position.symbol == parsed.symbol,
+                Position.side == parsed.side,
+                Position.status == "open",
+                Position.parent_id.is_not(None),
+            ).limit(1)
+        )).scalar_one_or_none()
+        if _mkt_dup_pos_id:
+            reason = (
+                f"重复市价信号已跳过: 该KOL已有同品种同方向持仓(#{_mkt_dup_pos_id}),"
+                f"不再重复开仓 {'做多' if parsed.side == 'long' else '做空'} {parsed.symbol}"
+            )
+            logger.info(f"信号跳过(防重复开仓): customer={customer_id} signal={signal.id} {reason}")
+            await _log_signal_status(db, signal, "ignored", reason, customer_id)
+            await notify(
+                "warning", "市价信号跳过(防重复开仓)",
+                f"KOL {kol_name}\n品种: {parsed.symbol}\n方向: {'做多' if parsed.side == 'long' else '做空'}\n"
+                f"原因: 该KOL已有同品种同方向持仓,补充市价信号不再重复开仓",
+                customer_id, source_text=signal.raw_text,
+            )
+            return {"ok": False, "reason": reason}
 
     redis = await get_redis()
 
@@ -3757,6 +3904,14 @@ async def _place_entry(
 
                 raise
 
+            # 交易所侧止损即时挂单(市价开仓路径,不等15秒同步循环)
+            if sub_position.sl and sub_position.sl > 0:
+                try:
+                    from app.services import exchange_stop_manager as _exstop_mod
+                    await _exstop_mod.sync_exchange_stop_for_position(db, sub_position)
+                except Exception as _exstop_e:
+                    logger.warning(f"交易所侧止损即时挂单失败 pos={sub_position.id}: {_exstop_e}")
+
             return {
 
                 "order_id": order.id,
@@ -4063,6 +4218,14 @@ async def _place_entry(
                     await db.rollback()
 
                 raise
+
+            # 交易所侧止损即时挂单(待触发开仓路径,不等15秒同步循环)
+            if sub_position.sl and sub_position.sl > 0:
+                try:
+                    from app.services import exchange_stop_manager as _exstop_mod
+                    await _exstop_mod.sync_exchange_stop_for_position(db, sub_position)
+                except Exception as _exstop_e:
+                    logger.warning(f"交易所侧止损即时挂单失败 pos={sub_position.id}: {_exstop_e}")
 
             return {
 
@@ -4420,9 +4583,14 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
             _amt_min = float(((_limits.get("amount") or {}).get("min")) or 0)
             _cost_min = float(((_limits.get("cost") or {}).get("min")) or 0)
             _last_price = 0.0
-            if _amt_min > 0 and close_qty < _amt_min:
+            # 单位修复(2026-08-20): amount.min 是合约数(张),close_qty 是币数;
+            # OKX BTC ctVal=0.01 → 真实最小 0.01张=0.0001BTC,原直接比较会把
+            # 0.0001~0.01BTC(约7~720U)的持仓误判为灰尘核销而不实际平仓,留下敞口
+            _ct_size = float(_mkt.get("contractSize") or 1.0)
+            _qty_contracts = close_qty / _ct_size if _ct_size > 0 else close_qty
+            if _amt_min > 0 and _qty_contracts < _amt_min:
                 _dust_writeoff = True
-                _dust_reason = f"数量{close_qty} < 最小下单量{_amt_min}"
+                _dust_reason = f"数量{close_qty}({_qty_contracts:.6g}张) < 最小下单量{_amt_min}张"
             elif _cost_min > 0:
                 _tk = await ex.fetch_ticker(exchange_position.symbol)
                 _last_price = float(_tk.get("last") or _tk.get("close") or 0)
@@ -4878,6 +5046,21 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             raise
 
+        # 交易所侧止损单善后: 全平->撤销; 部分平仓->同步数量
+        try:
+            if (
+                position.parent_id is not None
+                and (position.exchange or "").lower() in ("okx", "bybit")
+            ):
+                from app.services import exchange_stop_manager as _exstop_mod
+                if position.status == "closed":
+                    if position.exchange_stop_order_id:
+                        await _exstop_mod.cancel_for_closed_position(db, position)
+                else:
+                    await _exstop_mod.sync_exchange_stop_for_position(db, position)
+        except Exception as _exstop_e:
+            logger.warning(f"平仓后交易所侧止损处理失败 pos={position.id}: {_exstop_e}")
+
         # OM-BUG4修复: commit成功后清理Redis去重key,防止回滚后重复入场
         if _dedup_keys_to_clear:
             try:
@@ -4939,13 +5122,12 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
             # 交易所平仓已成功但DB操作失败 → 幽灵持仓风险
 
-            logger.error(
+            logger.opt(exception=True).error(
 
                 f"严重告警: 交易所平仓成功但DB记录失败 pos={position_id} symbol={position.symbol} "
 
                 f"side={position.side} exchange_order_id={_exchange_order_id}: {e}",
 
-                exc_info=True,
 
             )
 
@@ -4994,7 +5176,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
         # P1-13: 强制平仓(超时平仓)失败时,确保详细错误原因被记录
 
-        logger.error(f"平仓失败 pos={position_id} qty={close_qty} symbol={position.symbol} side={position.side} customer={position.customer_id}: {e}", exc_info=True)
+        logger.opt(exception=True).error(f"平仓失败 pos={position_id} qty={close_qty} symbol={position.symbol} side={position.side} customer={position.customer_id}: {e}")
 
         try:
 
@@ -5018,7 +5200,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
         except Exception as e:
 
-            logger.warning(f"Unexpected error: {e}", exc_info=True)
+            logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
         await db.rollback()
 

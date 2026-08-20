@@ -7,8 +7,8 @@ from app.services.signal_filter import correct_direction, correct_price, apply_d
 class TestCorrectDirection:
     """方向纠错测试。"""
 
-    def test_long_sl_above_entry_flips_to_short(self):
-        """long 止损高于入场 → 翻转为 short。"""
+    def test_long_sl_above_entry_discards_sl_keeps_long(self):
+        """long 止损高于入场但止盈支持做多 → 止损视为笔误丢弃,保留 long。"""
         parsed = ParsedSignal(
             raw_text="做多 BTC 止损 45000",
             symbol="BTC/USDT",
@@ -19,11 +19,12 @@ class TestCorrectDirection:
         )
         corrected, log = correct_direction(parsed)
         assert corrected is True
-        assert parsed.side == "short"
-        assert "翻转为 short" in log
+        assert parsed.side == "long"
+        assert parsed.stop_loss is None
+        assert "止损笔误" in log
 
-    def test_short_sl_below_entry_flips_to_long(self):
-        """short 止损低于入场 → 翻转为 long。"""
+    def test_short_sl_below_entry_discards_sl_keeps_short(self):
+        """short 止损低于入场但止盈支持做空 → 止损视为笔误丢弃,保留 short。"""
         parsed = ParsedSignal(
             raw_text="做空 BTC 止损 35000",
             symbol="BTC/USDT",
@@ -34,7 +35,42 @@ class TestCorrectDirection:
         )
         corrected, log = correct_direction(parsed)
         assert corrected is True
+        assert parsed.side == "short"
+        assert parsed.stop_loss is None
+        assert "止损笔误" in log
+
+    def test_long_sl_and_tp_both_contradict_flips_to_short(self):
+        """long 止损与止盈均与入场矛盾 → 翻转为 short 并镜像止盈。"""
+        parsed = ParsedSignal(
+            raw_text="做多 BTC 止损 45000",
+            symbol="BTC/USDT",
+            side="long",
+            entry_price=40000,
+            stop_loss=45000,
+            take_profits=[38000, 36000],
+        )
+        corrected, log = correct_direction(parsed)
+        assert corrected is True
+        assert parsed.side == "short"
+        assert parsed.stop_loss == 45000
+        assert parsed.take_profits == [42000, 44000]
+        assert "翻转为 short" in log
+
+    def test_short_sl_and_tp_both_contradict_flips_to_long(self):
+        """short 止损与止盈均与入场矛盾 → 翻转为 long 并镜像止盈。"""
+        parsed = ParsedSignal(
+            raw_text="做空 BTC 止损 35000",
+            symbol="BTC/USDT",
+            side="short",
+            entry_price=40000,
+            stop_loss=35000,
+            take_profits=[42000, 44000],
+        )
+        corrected, log = correct_direction(parsed)
+        assert corrected is True
         assert parsed.side == "long"
+        assert parsed.stop_loss == 35000
+        assert parsed.take_profits == [38000, 36000]
         assert "翻转为 long" in log
 
     def test_correct_direction_no_change_when_valid(self):

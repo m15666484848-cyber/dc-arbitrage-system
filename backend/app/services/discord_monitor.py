@@ -275,6 +275,21 @@ async def _handle_message(
 
 
     content = data.get("content", "") or ""
+    # KOL BOT sends messages as embeds, extract description when content is empty
+    if not content:
+        _embeds = data.get("embeds", [])
+        for _emb in _embeds:
+            _desc = _emb.get("description", "")
+            if _desc:
+                content = _desc
+                break
+
+    # Filter out reply messages to prevent false signal parsing
+    if content and content.startswith("**\u56de\u590d\u6d88\u606f\uff1a**"):
+        logger.info(f"[SKIP] reply message skipped: ch={channel_id}")
+        return
+
+    logger.info(f"[DEBUG-MSG] ch={channel_id} author={author_id} content_len={len(content)} content_preview={content[:80]}")
     _set_source_status(last_message_at=_iso_now(), last_channel_id=channel_id)
 
 
@@ -865,7 +880,7 @@ async def _heartbeat_with_ack(ws, interval: int, seq: list[int], last_ack: list[
                 except Exception as e:
 
 
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
 
                 return
@@ -890,7 +905,7 @@ async def _heartbeat_with_ack(ws, interval: int, seq: list[int], last_ack: list[
             except Exception as e:
 
 
-                logger.warning(f"Unexpected error: {e}", exc_info=True)
+                logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
 
             return  # 退出心跳循环,触发外层重连
@@ -1080,7 +1095,7 @@ async def _run_single_discord_account(account) -> None:
                             "token": token,
 
 
-                            "intents": 512 | 32768,  # GUILD_MESSAGES | MESSAGE_CONTENT
+                            "intents": 33280,  # GUILD_MESSAGES(512) + MESSAGE_CONTENT(32768)
 
 
                             "properties": {"os": "linux", "browser": "dcquant", "device": "dcquant"},
@@ -1173,6 +1188,10 @@ async def _run_single_discord_account(account) -> None:
 
 
                         payload = json.loads(raw)
+                        _dbg_t = payload.get("t")
+                        _dbg_op = payload.get("op")
+                        if _dbg_t not in ("READY", "RESUMED", None):
+                            logger.info(f"[DEBUG-WS] received event: op={_dbg_op} t={_dbg_t} s={payload.get('s')}")
 
 
                         op = payload.get("op")
@@ -1214,6 +1233,11 @@ async def _run_single_discord_account(account) -> None:
 
 
                                 logger.info("Discord RESUME 成功,已补齐遗漏消息")
+
+
+                                # SC-S2 修复: RESUME 成功后恢复 connected 状态(此前仅 READY 恢复,断线走 RESUME 路径时红灯常亮)
+                                await _mark_discord_account_connected(account_id)
+                                _set_source_status(connected=True, state="resumed", session_id=session_id or "", last_connected_at=_iso_now())
 
 
                                 # SC-S1 修复: RESUME 成功也重置失败计数
@@ -1293,7 +1317,7 @@ async def _run_single_discord_account(account) -> None:
                     except asyncio.CancelledError:
                         pass
                     except Exception as e:
-                        logger.warning(f"Unexpected error: {e}", exc_info=True)
+                        logger.opt(exception=True).warning(f"Unexpected error: {e}")
                     if heartbeat_task and not heartbeat_task.done():
                         heartbeat_task.cancel()
                         try:
@@ -1316,7 +1340,7 @@ async def _run_single_discord_account(account) -> None:
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
             if watcher and not watcher.done():
                 watcher.cancel()
                 try:
@@ -1324,7 +1348,7 @@ async def _run_single_discord_account(account) -> None:
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
 
             reconnect_count += 1
@@ -1389,7 +1413,7 @@ async def _run_single_discord_account(account) -> None:
         except Exception as e:
 
 
-            logger.warning(f"Unexpected error: {e}", exc_info=True)
+            logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
 
 def _discord_account_task_key(account) -> str:

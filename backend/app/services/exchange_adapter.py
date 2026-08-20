@@ -71,7 +71,7 @@ async def _cleanup_exchange_pool():
             await ex.close()
             logger.debug(f"交易所连接池清理过期连接: {k}")
         except Exception as e:
-            logger.warning(f"Unexpected error: {e}", exc_info=True)
+            logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
 
 def _get_pooled_exchange(key: str) -> Any | None:
@@ -96,7 +96,7 @@ async def _safe_close_exchange(ex) -> None:
     try:
         await ex.close()
     except Exception as e:
-        logger.warning(f"Unexpected error: {e}", exc_info=True)
+        logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
 
 def _pool_exchange(key: str, ex) -> None:
@@ -230,7 +230,7 @@ async def get_min_order_notional(ex, symbol: str) -> tuple[float, str]:
             if price > 0:
                 min_notional = min_qty * price
         except Exception as e:
-            logger.warning(f"Unexpected error: {e}", exc_info=True)
+            logger.opt(exception=True).warning(f"Unexpected error: {e}")
 
     if reason == "" and min_notional > 0:
         reason = f"{ex_name.upper()}最小下单额{min_notional:.2f}USDT"
@@ -702,6 +702,15 @@ def build_native_stop_loss_params(exchange: str, position_side: str, stop_price:
     raise ValueError(f"{exchange} 不支持原生止损")
 
 
+def _ccxt_symbol_to_exchange_inst_id(ex, symbol: str) -> str:
+    """ccxt统一symbol -> 交易所原生instId(如 ETH/USDT:USDT -> ETH-USDT-SWAP)。"""
+    try:
+        mkt = ex.market(symbol)
+        return mkt.get("id") or symbol
+    except Exception:
+        return symbol
+
+
 async def place_native_stop_loss_order(
     ex,
     exchange: str,
@@ -710,30 +719,137 @@ async def place_native_stop_loss_order(
     amount: float,
     stop_price: float,
 ) -> dict:
-    """提交原生止损单；OKX/Binance/Bybit 走实盘提交，其他交易所显式拒绝避免误下单。"""
+    """提交交易所原生条件止损单(reduceOnly,触发后市价平仓)。
+
+    OKX 实测参数(ccxt 4.5.x, long_short_mode):
+      create_order(symbol, "market", close_side, amount, None,
+                   params={"triggerPrice": px, "reduceOnly": True, "posSide": side})
+    Bybit: triggerPrice + reduceOnly + positionIdx(双向模式)/无(单向模式)。
+    """
     ex_name = (exchange or getattr(ex, "id", "") or "").lower()
+    symbol = _normalize_symbol(ex_name, symbol)
     close_side = "sell" if position_side == "long" else "buy"
 
+    # 币数→合约数转换(2026-08-20 关键修复): 调用方传入的 amount 是持仓币数(position.qty),
+    # 而 OKX SWAP 的下单 amount 单位是"张"(contracts), contractSize=0.01 即 1 张=0.01 BTC。
+    # 未转换直接下单会导致止损单数量缩小 contractSize 倍(实测: 0.0139 BTC → OKX sz=0.01 张
+    # =0.0001 BTC, 仅覆盖仓位 1/139)。Bybit 线性 USDT 合约 contractSize=1(数量即币数)不受影响。
+    try:
+        _market = ex.market(symbol)
+        _cs = float(_market.get("contractSize") or 1.0)
+        if _cs > 0 and _cs != 1.0:
+            amount = amount / _cs
+    except Exception as e:
+        logger.warning(f"止损单合约数转换失败(按 cs=1.0 处理): {e}")
+
+    if hasattr(ex, "amount_to_precision"):
+        try:
+            amount = float(ex.amount_to_precision(symbol, amount))
+        except Exception as e:
+            logger.warning(f"止损单数量精度调整失败: {e}")
+    if not amount or amount <= 0:
+        raise ValueError(f"止损单数量无效: {amount}")
+    if hasattr(ex, "price_to_precision"):
+        try:
+            stop_price = float(ex.price_to_precision(symbol, stop_price))
+        except Exception:
+            pass
+
     if ex_name == "okx":
-        params = build_native_stop_loss_params("okx", position_side, stop_price)
-        return await ex.create_order(
-            symbol, "stop", close_side, amount, None,
-            params={**params, "stopLossPrice": stop_price, "triggerPrice": stop_price}
-        )
-    elif ex_name == "binance":
-        params = build_native_stop_loss_params("binance", position_side, stop_price)
-        return await ex.create_order(
-            symbol, "STOP_MARKET", close_side, amount, None,
-            params=params
-        )
+        params: dict[str, Any] = {
+            "triggerPrice": stop_price,
+            "reduceOnly": True,
+            "posSide": position_side,
+        }
+        try:
+            return await ex.create_order(symbol, "market", close_side, amount, None, params=params)
+        except Exception as e:
+            if "posSide" in str(e) and "51000" in str(e):
+                # 净持仓模式账户: 去掉posSide重试
+                p2 = dict(params)
+                p2.pop("posSide", None)
+                return await ex.create_order(symbol, "market", close_side, amount, None, params=p2)
+            raise
     elif ex_name == "bybit":
-        params = build_native_stop_loss_params("bybit", position_side, stop_price)
-        return await ex.create_order(
-            symbol, "market", close_side, amount, None,
-            params={**params, "triggerPrice": stop_price}
-        )
+        # ccxt要求触发单显式指定方向: 多头止损=卖出(价格跌破触发价)=descending,
+        # 空头止损=买入(价格涨破触发价)=ascending; 缺失会抛 InvalidOrder
+        params = {
+            "triggerPrice": stop_price,
+            "reduceOnly": True,
+            "triggerDirection": "descending" if close_side == "sell" else "ascending",
+        }
+        # 持仓模式缓存: 已确认单向模式的账户不再传 positionIdx,避免每次 10001 重试
+        if getattr(ex, "_dcq_bybit_hedge", None) is not False:
+            if position_side == "long":
+                params["positionIdx"] = 1
+            elif position_side == "short":
+                params["positionIdx"] = 2
+        try:
+            order = await ex.create_order(symbol, "market", close_side, amount, None, params=params)
+            if params.get("positionIdx") in (1, 2):
+                ex._dcq_bybit_hedge = True
+            return order
+        except Exception as e:
+            msg = str(e)
+            if "10001" in msg or "position idx not match" in msg.lower():
+                # 单向持仓模式: 去掉positionIdx重试并缓存,后续止损单免重试
+                p2 = dict(params)
+                p2.pop("positionIdx", None)
+                ex._dcq_bybit_hedge = False
+                return await ex.create_order(symbol, "market", close_side, amount, None, params=p2)
+            raise
     else:
         raise ValueError(f"{exchange} 暂不支持原生止损实盘提交")
+
+
+async def cancel_native_stop_loss_order(
+    ex,
+    exchange: str,
+    symbol: str,
+    order_id: str,
+) -> bool:
+    """撤销交易所原生止损单。
+
+    返回 True  = 已撤销,或订单已不在交易所(已触发/已撤),均视为"不再活跃"
+    返回 False = 撤销结果不确定(网络错误等),调用方应保留记录稍后重试
+    """
+    ex_name = (exchange or getattr(ex, "id", "") or "").lower()
+    symbol = _normalize_symbol(ex_name, symbol)
+    if not order_id:
+        return True
+    gone_keywords = ("not exist", "does not exist", "doesn't exist", "not exists")
+    if ex_name == "okx":
+        try:
+            inst_id = _ccxt_symbol_to_exchange_inst_id(ex, symbol)
+            r = await ex.private_post_trade_cancel_algos(
+                [{"algoId": str(order_id), "instId": inst_id}]
+            )
+            data = r.get("data") or [{}]
+            s_code = str(data[0].get("sCode", ""))
+            s_msg = str(data[0].get("sMsg", ""))
+            if s_code == "0":
+                return True
+            if any(k in s_msg.lower() for k in gone_keywords):
+                return True  # 已触发/已撤销,视为不再活跃
+            logger.warning(
+                f"OKX止损单撤销返回异常 sCode={s_code} sMsg={s_msg} algoId={order_id}"
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"OKX止损单撤销失败 algoId={order_id}: {str(e)[:200]}")
+            return False
+    elif ex_name == "bybit":
+        try:
+            await ex.cancel_order(str(order_id), symbol)
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            if any(k in msg for k in gone_keywords):
+                return True
+            logger.warning(f"Bybit止损单撤销失败 orderId={order_id}: {str(e)[:200]}")
+            return False
+    else:
+        return False
 
 
 
@@ -770,7 +886,13 @@ async def place_order(
     if not amount or amount <= 0:
         raise ValueError(f"下单数量必须大于 0,当前 amount={amount} symbol={symbol} side={side}")
 
-    await set_leverage(ex, symbol, leverage)
+    # 平仓单(reduceOnly)无需调整杠杆;且 OKX 59669: 全仓下存在触发单(交易所止损)时禁止调杠杆,
+    # 若在平仓前调杠杆会直接导致平仓失败(持仓留场+止损单残留)
+    # 杠杆未显式指定时(leverage<=1,extract_leverage 无杠杆词时默认1)必须跳过:
+    # 否则会把用户在交易所设好的杠杆(如 Bybit BTC 10x)强制降为 1x,
+    # 导致开仓所需保证金=名义金额(2000u) > 可用余额(~945u) → InsufficientFunds
+    if not reduce_only and leverage and leverage > 1:
+        await set_leverage(ex, symbol, leverage)
 
     if price and order_type == "limit" and hasattr(ex, "price_to_precision"):
         try:
@@ -816,12 +938,14 @@ async def place_order(
         if ex_name.lower() == "bybit":
             # Bybit 使用 positionIdx 区分持仓模式: 0=单向持仓,1=双向多,2=双向空。
             # 先按双向模式提交；若账户实际为单向模式，会在下方捕获 10001 后去掉该参数重试。
-            if position_side == "long":
-                params["positionIdx"] = 1
-            elif position_side == "short":
-                params["positionIdx"] = 2
-            else:
-                params["positionIdx"] = 0
+            # 已确认单向模式的账户(缓存于交易所对象)不再传 positionIdx,避免每次 10001 重试。
+            if getattr(ex, "_dcq_bybit_hedge", None) is not False:
+                if position_side == "long":
+                    params["positionIdx"] = 1
+                elif position_side == "short":
+                    params["positionIdx"] = 2
+                else:
+                    params["positionIdx"] = 0
         else:
             params["posSide"] = position_side
 
@@ -877,8 +1001,9 @@ async def place_order(
         elif ex_name.lower() == "bybit" and ("position idx not match position mode" in msg or "10001" in msg) and "positionIdx" in params:
             fallback_params = dict(params)
             fallback_params.pop("positionIdx", None)
+            ex._dcq_bybit_hedge = False
             logger.warning(
-                f"Bybit 当前账户可能为单向持仓模式,positionIdx 被拒绝,去掉 positionIdx 重试: "
+                f"Bybit 当前账户为单向持仓模式,positionIdx 被拒绝,去掉 positionIdx 重试(已缓存模式): "
                 f"{symbol} {side} {order_type}"
             )
             order = await _retry_with_backoff(lambda: _create_order(fallback_params), retries=1)
@@ -897,6 +1022,10 @@ async def place_order(
             order = await _retry_with_backoff(lambda: _create_order(fallback_params), retries=1)
         else:
             raise
+
+    # Bybit 持仓模式学习: 带 positionIdx=1/2 下单成功 → 缓存为双向模式,后续订单免探测
+    if ex_name.lower() == "bybit" and params.get("positionIdx") in (1, 2):
+        ex._dcq_bybit_hedge = True
 
     status = order.get("status")
     filled = float(order.get("filled", 0) or 0)
@@ -1149,7 +1278,7 @@ async def close_all_public_exchanges() -> None:
             await ex.close()
             count += 1
         except Exception as e:
-            logger.warning(f"Unexpected error: {e}", exc_info=True)
+            logger.opt(exception=True).warning(f"Unexpected error: {e}")
     _public_exchanges.clear()
     if count > 0:
         logger.info(f"已关闭 {count} 个公开行情交易所实例")

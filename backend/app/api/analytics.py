@@ -280,6 +280,16 @@ async def dashboard(
         enriched["exchange_account_mode"] = getattr(acc, "account_mode", "") if acc else ""
         open_positions_list.append(enriched)
 
+    # 口径统一(2026-08-20): 仪表盘未实现盈亏改为实时净盈亏,与持仓页完全一致
+    # (原始盈亏 - 分摊开仓手续费 - 预估平仓手续费),不再读5分钟前的净值快照缓存;
+    # 快照数据本身保留不动(仍服务净值曲线/收益率)。现价全部获取失败时保留快照值兜底。
+    if not open_positions_list:
+        stats["unrealized_pnl"] = 0.0
+    elif all(float(p.get("current_price") or 0) > 0 for p in open_positions_list):
+        stats["unrealized_pnl"] = round(
+            sum(float(p.get("net_unrealized_pnl") or 0) for p in open_positions_list), 2
+        )
+
     return ok({**stats, "equity_curve": curve, "followed_kols": followed_kols,
                "open_positions_list": open_positions_list})
 

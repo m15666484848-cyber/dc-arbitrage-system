@@ -7,7 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from loguru import logger
 
 from app.core.database import AsyncSessionLocal
-from app.services import analytics, discord_monitor, pending_order_manager, position_manager
+from app.services import analytics, discord_monitor, exchange_stop_manager, pending_order_manager, position_manager
 
 from app.services.authz import list_expiring_soon
 
@@ -34,6 +34,7 @@ _LOOP_FACTORIES: dict[str, callable] = {
     "pending_monitor": pending_order_manager.monitor_loop,
 
     "stop_loss_monitor": position_manager.stop_loss_monitor_loop,
+    "exchange_stop_sync": exchange_stop_manager.exchange_stop_sync_loop,
 }
 
 WATCHDOG_INTERVAL = 60  # 看门狗检查间隔(秒)

@@ -191,6 +191,30 @@ export default function KolsPage() {
     }
   };
 
+  const unfollowDetail = async () => {
+    if (!detailKol) return;
+    const nextSelected = new Set(selected);
+    nextSelected.delete(detailKol.id);
+    const nextSettings = new Map(settings);
+    nextSettings.delete(detailKol.id);
+    const kolSettings = Array.from(nextSelected).map((id) =>
+      nextSettings.get(id) || { kol_id: id, strategy_id: null, notional_usdt: null }
+    );
+    try {
+      setSavingDetail(true);
+      await API.setFollows(kolSettings as any);
+      setSelected(nextSelected);
+      setSettings(nextSettings);
+      push("success", `已取消订阅 ${detailKol.kol_name || detailKol.name}`);
+      setDetailKol(null);
+      reload();
+    } catch (e: any) {
+      push("error", e?.response?.data?.message || "取消订阅失败");
+    } finally {
+      setSavingDetail(false);
+    }
+  };
+
   const save = async () => {
     try {
       const kolSettings: { kol_id: number; strategy_id: number | null; notional_usdt: number | null }[] = [];
@@ -544,6 +568,20 @@ export default function KolsPage() {
             <Button className="w-full" onClick={saveDetail} disabled={savingDetail}>
               {savingDetail ? "保存中..." : "保存此 KOL 设置"}
             </Button>
+            {(() => {
+              const isFollowed = kols.find((k: any) => k.id === detailKol.id)?.followed;
+              if (!isFollowed) return null;
+              return (
+                <>
+                  <Button variant="danger" className="w-full" onClick={unfollowDetail} disabled={savingDetail}>
+                    取消订阅此 KOL
+                  </Button>
+                  <p className="text-xs text-amber-500/90 text-center">
+                    取消后不再接收该 KOL 的新信号；已有持仓保留并由交易所止损单保护，请自行决定何时平仓。
+                  </p>
+                </>
+              );
+            })()}
             <p className="text-xs text-slate-500 text-center">保存后会立即生效，无需再点击列表右上角保存。</p>
           </div>
         )}

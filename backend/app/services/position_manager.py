@@ -132,7 +132,7 @@ async def _get_timeout_phase(position, redis_conn=None) -> int:
             if cached:
                 return int(cached)
     except Exception as e:
-        logger.warning(f"Unexpected error: {e}", exc_info=True)
+        logger.opt(exception=True).warning(f"Unexpected error: {e}")
     return 0
 
 
@@ -452,7 +452,7 @@ async def check_orphaned_master_positions(db: AsyncSession) -> int:
                                 kol_name=_kol,
                             )
                         except Exception as e:
-                            logger.warning(f"Unexpected error: {e}", exc_info=True)
+                            logger.opt(exception=True).warning(f"Unexpected error: {e}")
                     else:
                         reason = str(result.get("reason", ""))
                         logger.warning(f"孤立主仓位平仓未成功 pos={pos_id}: {reason}")
@@ -639,7 +639,7 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
                         _snap_customer,
                     )
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
             finally:
                 await _remove_closing_position(pos.id)
 
@@ -719,7 +719,7 @@ async def _get_strategy_timeout_config(db, pos) -> dict:
                 if "timeout_trailing_p2" in p:
                     cfg["trailing_p2"] = p["timeout_trailing_p2"]
     except Exception as e:
-        logger.warning(f"Unexpected error: {e}", exc_info=True)
+        logger.opt(exception=True).warning(f"Unexpected error: {e}")
     return cfg
 
 
@@ -828,7 +828,7 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                                 kol_name=_kol,
                             )
                         except Exception as e:
-                            logger.warning(f"Unexpected error: {e}", exc_info=True)
+                            logger.opt(exception=True).warning(f"Unexpected error: {e}")
                     else:
                         logger.warning(
                             f"Phase4 自动平仓失败 pos={pos.id}: {result.get('reason')}"
@@ -843,7 +843,7 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                     if redis:
                         await redis.setex(phase_key, 7 * 86400, "4")
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
             processed += 1
             continue
 
@@ -880,7 +880,7 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                     if redis:
                         await redis.setex(phase_key, 7 * 86400, "3")
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
             processed += 1
             continue
 
@@ -927,7 +927,7 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                     if redis:
                         await redis.setex(phase_key, 7 * 86400, "2")
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
             processed += 1
             continue
 
@@ -969,7 +969,7 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                             kol_name=_kol,
                         )
                     except Exception as e:
-                        logger.warning(f"Unexpected error: {e}", exc_info=True)
+                        logger.opt(exception=True).warning(f"Unexpected error: {e}")
                 else:
                     # 已有追踪止损, 无需覆盖
                     phase1_ok = True
@@ -982,7 +982,7 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                     if redis:
                         await redis.setex(phase_key, 7 * 86400, "1")
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
             processed += 1
 
     if processed > 0:
@@ -1063,7 +1063,7 @@ async def monitor_loop() -> None:
                     try:
                         await bus.publish_customer(_cid, "position", {"action": "refresh"})
                     except Exception as e:
-                        logger.warning(f"Unexpected error: {e}", exc_info=True)
+                        logger.opt(exception=True).warning(f"Unexpected error: {e}")
         except Exception as e:
             logger.exception(f"持仓监控循环异常: {e}")
         await asyncio.sleep(5)

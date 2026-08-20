@@ -401,7 +401,7 @@ async def _migrate_schema(conn) -> None:
                         "UPDATE exchange_accounts SET api_key_hash = :h WHERE id = :id"
                     ), {"h": h, "id": row[0]})
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
         except Exception as e:
             logger.debug("api_key_hash 回填跳过")
     except Exception as e:

@@ -76,6 +76,12 @@ NOISE_KEYWORDS = [
     r"公告", r"通知", r"维护", r"升级", r"空投", r"质押", r"合作", r"上币",
 ]
 
+# 结构化策略标签 ("标签：值" 形式) — 策略结构完整时不被评论性文字否决
+STRUCTURED_LABEL_KEYWORDS = [
+    r"方向\s*[：:]", r"建仓\s*[：:]", r"止损\s*[：:]", r"止盈\s*[：:]",
+    r"进场\s*[：:]", r"入场\s*[：:]", r"开仓\s*[：:]", r"仓位\s*[：:]",
+]
+
 
 def classify_signal_intent(text: str) -> tuple[str, str]:
     """
@@ -111,7 +117,13 @@ def classify_signal_intent(text: str) -> tuple[str, str]:
 
     # 判断逻辑:
     if blocked_found and action_found:
-        # 既有复盘词又有交易词 → 模糊,优先判定为分析,但标注出来
+        # 既有复盘词又有交易词 → 检查是否为结构化策略
+        # KOL 常见消息 = 完整策略(方向/建仓/止损/止盈) + 尾部评论("昨天赚了450点""没技术面")
+        # 标签式策略要素 >=3 个时,视为明确交易指令,评论词不否决策略本体
+        labels_found = [kw for kw in STRUCTURED_LABEL_KEYWORDS if re.search(kw, text)]
+        if len(labels_found) >= 3:
+            return "trade", f"structured strategy labels={labels_found}, tail comments ignored"
+        # 否则模糊,优先判定为分析,但标注出来
         return "analysis", f"conflicting signals: blocked={blocked_found}, action={action_found}"
 
     if blocked_found and not action_found:

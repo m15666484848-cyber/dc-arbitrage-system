@@ -66,6 +66,10 @@ class Position(Base, TimestampMixin):
     tp_levels: Mapped[list] = mapped_column(JSONB, default=list)
     sl: Mapped[float | None] = mapped_column(nullable=True)  # 当前止损价
     initial_sl: Mapped[float | None] = mapped_column(nullable=True)
+    # 交易所侧止损单(reduceOnly条件单),由 exchange_stop_manager 维护
+    exchange_stop_order_id: Mapped[str] = mapped_column(String(128), default="")
+    exchange_stop_qty: Mapped[float] = mapped_column(default=0.0)  # 挂单时持仓数量
+    exchange_stop_price: Mapped[float] = mapped_column(default=0.0)  # 挂单触发价
     leverage: Mapped[int] = mapped_column(Integer, default=1)
     # 成本保护:达到 TP1 或 +2% 后止损上移至入场价+缓冲
     cost_protection: Mapped[bool] = mapped_column(Boolean, default=False)

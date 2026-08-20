@@ -396,6 +396,12 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
         )
     except Exception as e:
         await db.rollback()
+        # rollback 会使 ORM 对象过期,后续访问 pending.* 触发同步刷新导致 greenlet 崩溃
+        # (崩溃会跳过下面的不可恢复错误自动取消逻辑,导致监控循环无限重试);先刷新恢复
+        try:
+            await db.refresh(pending)
+        except Exception:
+            pass
         logger.exception(f"触发待触发单 {pending.id} 下单失败: {e}")
         err_msg = str(e)
         err_low = err_msg.lower()

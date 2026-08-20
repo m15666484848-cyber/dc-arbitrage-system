@@ -1181,10 +1181,11 @@ export default function AdminCustomers() {
               ) : (
                 <>
                   将清除以下所有数据：<br />
-                  <span className="text-loss">信号、订单、持仓、交易记录、挂单、告警日志、权益快照、审计日志</span><br />
+                  <span className="text-loss">信号、订单、持仓、交易记录、挂单、告警日志、权益快照</span><br />
+                  <span className="text-loss">KOL 统计一并清零（胜率、历史交易笔数、信号数、累计盈亏、LLM 调用统计）</span><br />
                   <br />
                   保留的配置数据：<br />
-                  <span className="text-profit">客户账号、授权、KOL、交易所配置、风控配置、告警配置、策略配置</span>
+                  <span className="text-profit">客户账号、授权、KOL、交易所配置、风控配置、告警配置、策略配置、审计日志</span>
                 </>
               )}
             </div>

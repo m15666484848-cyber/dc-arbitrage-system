@@ -683,7 +683,7 @@ async def _recover_close_failed_positions() -> int:
                                 pos_customer_id,
                             )
                         except Exception as e:
-                            logger.warning(f"Unexpected error: {e}", exc_info=True)
+                            logger.opt(exception=True).warning(f"Unexpected error: {e}")
                 finally:
                     await exchange_adapter.close_exchange(ex)
             except Exception as e:

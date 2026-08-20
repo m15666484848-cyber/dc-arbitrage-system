@@ -239,7 +239,7 @@ async def notify(
                     await redis.delete(dedup_key)
                     logger.info(f"告警发送失败,已清除去重标记允许重试: cfg={cfg.id} event={event}")
                 except Exception as e:
-                    logger.warning(f"Unexpected error: {e}", exc_info=True)
+                    logger.opt(exception=True).warning(f"Unexpected error: {e}")
             log = AlertLog(
                 alert_config_id=cfg.id,
                 event=event,

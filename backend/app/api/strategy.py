@@ -89,6 +89,6 @@ async def delete_strategy(sid: int, current=Depends(require_customer), db: Async
         from app.services.order_manager import _invalidate_strategy_cache
         _invalidate_strategy_cache(s.customer_id, None)
     except Exception:
-        logger.debug("ignored exception", exc_info=True)
+        logger.opt(exception=True).debug("ignored exception")
 
     return ok({"id": sid, "deleted": True, "unlinked_follows": follow_count})

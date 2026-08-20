@@ -1038,9 +1038,13 @@ async def delete_discord_account(
     acc = (await db.execute(select(DiscordAccount).where(DiscordAccount.id == account_id))).scalar_one_or_none()
     if not acc:
         raise HTTPException(404, "Discord 账号不存在")
-    acc.enabled = False
-    acc.is_default = False
     try:
+        # 清理 KOL 对该账号的引用(回落到默认账号),然后真正删除
+        await db.execute(
+            text("UPDATE kols SET discord_account_id = NULL WHERE discord_account_id = :aid"),
+            {"aid": account_id},
+        )
+        await db.delete(acc)
         await _audit(db, admin.id, "delete_discord_account", str(account_id))
         try:
             await db.commit()
@@ -1048,6 +1052,8 @@ async def delete_discord_account(
             await db.rollback()
             logger.exception("db commit failed")
             raise HTTPException(500, "操作失败,请稍后重试")
+    except HTTPException:
+        raise
     except Exception:
         await db.rollback()
         logger.exception("删除Discord账号失败")
@@ -1056,7 +1062,7 @@ async def delete_discord_account(
     from app.core.runtime_config import invalidate_cache
 
     invalidate_cache()
-    return ok({"id": account_id, "enabled": False})
+    return ok({"id": account_id, "deleted": True})
 
 
 @router.get("/system-config")
@@ -2588,6 +2594,8 @@ async def reset_test_data(
     清除的表(全部模式):
       - signals / orders / positions / trades / pending_orders
       - alert_logs / equity_snapshots
+      - kols 统计缓存一并归零: cached_win_rate / cached_pnl / cached_signal_count
+        及 llm_calls_total / llm_calls_success / llm_tokens_used
       (audit_logs 不可清除,保留完整审计轨迹)
 
     清除的表(按客户模式):
@@ -2640,6 +2648,14 @@ async def reset_test_data(
         for name, sql in clear_tables:
             result = await db.execute(text(sql))
             stats[name] = result.rowcount
+
+        # KOL 统计缓存一并清零(胜率/累计盈亏/信号数 + LLM 调用统计),
+        # 排行榜实时数据已随 trades/positions/signals 清空,缓存字段同步归零避免页面残留旧值
+        result = await db.execute(text(
+            "UPDATE kols SET cached_win_rate = 0.0, cached_pnl = 0.0, cached_signal_count = 0, "
+            "llm_calls_total = 0, llm_calls_success = 0, llm_tokens_used = 0"
+        ))
+        stats["kol_stats_reset"] = result.rowcount
 
         if body.reset_strategy_state:
             result = await db.execute(text(

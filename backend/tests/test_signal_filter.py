@@ -53,10 +53,12 @@ def test_correct_price_severe_rejected():
 
 # ---------- 方向纠错 ----------
 def test_correct_direction_long_sl_above_entry():
-    p = _parsed(side="long", entry_price=150.0, stop_loss=155.0)  # long 但止损>入场 → 翻转
+    p = _parsed(side="long", entry_price=150.0, stop_loss=155.0)  # 止损笔误:止盈支持做多
     changed, log = correct_direction(p)
     assert changed
-    assert p.side == "short"
+    assert p.side == "long"  # 保留方向
+    assert p.stop_loss is None  # 丢弃矛盾止损
+    assert "止损笔误" in log
 
 
 def test_correct_direction_short_tp_below_entry():
