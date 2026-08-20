@@ -4496,6 +4496,88 @@ def _order_dict(order: Order, kol_id: int | None) -> dict:
 
     }
 
+_GONE_ERROR_PATTERNS = (
+    "position is zero",         # bybit 110017: current position is zero
+    "position does not exist",  # okx 51023 / 通用
+    "position not exist",
+    "no open position",         # 通用兜底
+)
+
+
+def _is_position_gone_error(e: BaseException) -> bool:
+    """判断平仓异常是否为"交易所侧仓位已不存在"类错误。"""
+    msg = str(e).lower()
+    return any(p in msg for p in _GONE_ERROR_PATTERNS)
+
+
+async def _auto_close_ghost_position(
+    db: AsyncSession,
+    position: Position,
+    ex,
+    err_text: str,
+) -> dict | None:
+    """平仓遇"仓位不存在"错误时,实时核实交易所侧无持仓后核销本地幽灵仓位。
+
+    核销范围: master 及其全部 open 子仓位,并撤销遗留的交易所侧止损单。
+    返回核销结果 dict;查询失败或交易所仍有该持仓时返回 None(走原失败路径)。
+    """
+    base = position.symbol.split("/")[0]
+    side = (position.side or "").lower()
+    try:
+        ex_positions = await exchange_adapter.fetch_positions(ex)
+    except Exception as e:
+        logger.warning(f"[幽灵核销] 查询交易所持仓失败 pos={position.id}: {e}")
+        return None
+    for p in ex_positions:
+        psym = p.get("symbol") or ""
+        pside = (p.get("side") or "").lower()
+        if (psym.startswith(base + "/") or psym.startswith(base + ":")) and pside == side:
+            logger.info(f"[幽灵核销] 交易所仍有 {psym} {pside} 持仓,不核销 pos={position.id}")
+            return None
+
+    master_id = position.parent_id or position.id
+    targets = (
+        await db.execute(
+            select(Position).where(
+                ((Position.id == master_id) | (Position.parent_id == master_id)),
+                Position.status == "open",
+            )
+        )
+    ).scalars().all()
+    now = datetime.now(timezone.utc)
+    for pos in targets:
+        if pos.exchange_stop_order_id:
+            try:
+                await exchange_adapter.cancel_native_stop_loss_order(
+                    ex, pos.exchange, pos.symbol, pos.exchange_stop_order_id
+                )
+            except Exception as cancel_e:
+                logger.warning(f"[幽灵核销] 撤遗留止损单失败 pos={pos.id}: {cancel_e}")
+        pos.status = "closed"
+        pos.qty = 0
+        pos.closed_at = now
+    await db.commit()
+    ids = [p.id for p in targets]
+    logger.warning(
+        f"[幽灵核销] pos={position.id} {position.symbol} {position.side} 平仓报'仓位不存在',"
+        f"实时核实交易所侧无持仓,已自动核销 {ids}(可能已被交易所侧止损单平掉或手动平仓)"
+    )
+    try:
+        await notify(
+            "error", "幽灵仓位已自动核销",
+            f"品种: {position.symbol}\n方向: {position.side}\n"
+            f"API账户: #{position.exchange_account_id or '未知'}\n"
+            f"仓位ID: {', '.join(str(i) for i in ids)}\n"
+            f"触发原因: 平仓时交易所返回'仓位不存在',实时核实交易所侧已无该持仓,\n"
+            f"系统已自动核销并停止重试平仓\n"
+            f"原始错误: {err_text[:200]}",
+            position.customer_id,
+        )
+    except Exception as e:
+        logger.opt(exception=True).warning(f"Unexpected error: {e}")
+    return {"ok": True, "ghost_closed": True, "position_id": position.id, "closed_ids": ids}
+
+
 async def close_position(db: AsyncSession, position_id: int, qty: float | None = None) -> dict:
 
     """手动(或止盈止损触发)平仓,支持子仓位同步主仓位。
@@ -5171,6 +5253,17 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                 "position_id": position_id,
 
             }
+
+        # OM-GHOST: 交易所明确报"仓位不存在"时,实时核实后自动核销幽灵仓位,终止重试告警风暴
+        if _is_position_gone_error(e):
+            await db.rollback()
+            try:
+                ghost_result = await _auto_close_ghost_position(db, position, ex, str(e))
+                if ghost_result is not None:
+                    return ghost_result
+            except Exception as ghost_e:
+                logger.opt(exception=True).warning(f"幽灵仓位核销失败 pos={position_id}: {ghost_e}")
+                await db.rollback()
 
         # P1-3: 平仓失败时记录详细原因,便于排查"幽灵平仓"和数据丢失
 

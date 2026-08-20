@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import hmac
 import time
 from datetime import datetime, timezone, timedelta
@@ -24,6 +25,9 @@ from app.services.llm_client import get_httpx_client
 
 # 同一告警配置的去重窗口(秒):窗口内相同内容的告警只发送+记录一次
 ALERT_DEDUP_SECONDS = 60
+# 交易所错误消息中的毫秒/微秒时间戳(inTime/outTime/time)每次请求都不同,
+# 若参与哈希会让去重永不命中,统一替换为占位符再计算指纹
+_TS_RE = re.compile(r"\b1[6-9]\d{11,14}\b")
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
 
@@ -189,6 +193,7 @@ async def notify(
     stable_content_for_hash = content
     if source_text:
         stable_content_for_hash += f"\n原始消息: {source_text.strip()[:200]}"
+    stable_content_for_hash = _TS_RE.sub("<TS>", stable_content_for_hash)
     content_hash = hashlib.sha256(f"{title}|{stable_content_for_hash}".encode("utf-8")).hexdigest()[:16]
 
     # 自动追加告警时间和原始消息(方便后期检查)
