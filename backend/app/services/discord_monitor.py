@@ -286,7 +286,7 @@ async def _handle_message(
 
     # Filter out reply messages to prevent false signal parsing
     if content and content.startswith("**\u56de\u590d\u6d88\u606f\uff1a**"):
-        logger.debug(f"[SKIP] reply message skipped: ch={channel_id}")
+        logger.info(f"[SKIP] reply message skipped: ch={channel_id}")
         return
 
     logger.debug(f"[DEBUG-MSG] ch={channel_id} author={author_id} content_len={len(content)} content_preview={content[:80]}")
@@ -396,7 +396,7 @@ async def _handle_message(
 
         now = datetime.now(timezone.utc)
         if _is_duplicate_raw_text(kol.id, content, now):
-            logger.debug(f"5分钟内重复 KOL 消息已跳过: kol={kol.name} message_id={message_id} text={content[:120]}")
+            logger.info(f"5分钟内重复 KOL 消息已跳过: kol={kol.name} message_id={message_id} text={content[:120]}")
             return
 
         # message_id 去重:Discord RESUME/重连后会重放事件,同一 message_id 不能重复入库
@@ -1074,7 +1074,7 @@ async def _run_single_discord_account(account) -> None:
                     }))
 
 
-                    logger.debug(f"Discord 尝试 RESUME: session_id={session_id} seq={resume_seq}")
+                    logger.info(f"Discord 尝试 RESUME: session_id={session_id} seq={resume_seq}")
 
 
                 else:
@@ -1161,7 +1161,7 @@ async def _run_single_discord_account(account) -> None:
                                 None,
                             )
                             if current is None or current.token_hash != token_hash or current.is_default != is_default_account:
-                                logger.debug(f"检测到 Discord 账号变化,触发重连: id={account_id} label={account_label}")
+                                logger.info(f"检测到 Discord 账号变化,触发重连: id={account_id} label={account_label}")
                                 await ws.close()
 
 
@@ -1223,7 +1223,7 @@ async def _run_single_discord_account(account) -> None:
 
                                 await _mark_discord_account_connected(account_id)
                                 _set_source_status(connected=True, state="ready", session_id=session_id or "", last_connected_at=_iso_now())
-                                logger.debug(f"Discord READY: account={account_label}({account_id}) session_id={session_id}")
+                                logger.info(f"Discord READY: account={account_label}({account_id}) session_id={session_id}")
                                 # SC-S1 修复: 收到 READY 确认连接成功后才重置失败计数
                                 consecutive_failures = 0
                             # RESUMED 事件表示恢复成功,无需重新 IDENTIFY
@@ -1232,7 +1232,7 @@ async def _run_single_discord_account(account) -> None:
                             elif t == "RESUMED":
 
 
-                                logger.debug("Discord RESUME 成功,已补齐遗漏消息")
+                                logger.info("Discord RESUME 成功,已补齐遗漏消息")
 
 
                                 # SC-S2 修复: RESUME 成功后恢复 connected 状态(此前仅 READY 恢复,断线走 RESUME 路径时红灯常亮)
@@ -1259,7 +1259,7 @@ async def _run_single_discord_account(account) -> None:
                         elif op == 7:  # Reconnect
 
 
-                            logger.debug("Discord 要求重连")
+                            logger.info("Discord 要求重连")
 
 
                             # SC-S2 修复: 递增失败计数并添加指数退避延迟
@@ -1402,14 +1402,14 @@ async def _run_single_discord_account(account) -> None:
                 None,
             )
             if current is None:
-                logger.debug(f"Discord 账号已禁用或删除,停止监听: id={account_id} label={account_label}")
+                logger.info(f"Discord 账号已禁用或删除,停止监听: id={account_id} label={account_label}")
                 return
             if current.token_hash != token_hash:
                 token = current.token
                 token_hash = current.token_hash
                 is_default_account = current.is_default
                 account_label = current.label
-                logger.debug(f"Discord Token 已更新,使用新 Token 重连: id={account_id} label={account_label}")
+                logger.info(f"Discord Token 已更新,使用新 Token 重连: id={account_id} label={account_label}")
         except Exception as e:
 
 
@@ -1465,7 +1465,7 @@ async def run_discord_monitor() -> None:
                 if key not in active_keys:
                     task = tasks.pop(key)
                     task.cancel()
-                    logger.debug(f"已停止 Discord 账号监听: key={key}")
+                    logger.info(f"已停止 Discord 账号监听: key={key}")
                 elif tasks[key].done():
                     _log_task_done(tasks[key], f"discord_account_{key}")
                     tasks.pop(key, None)
