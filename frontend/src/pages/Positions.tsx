@@ -192,7 +192,7 @@ export default function PositionsPage() {
   const masterIds = new Set(positions.filter((p: any) => p.parent_id === null).map((p: any) => p.id));
   return positions
     .filter((p: any) => p.parent_id === null || !masterIds.has(p.parent_id))
-    .reduce((sum: number, p: any) => sum + (p.unrealized_pnl || 0), 0);
+    .reduce((sum: number, p: any) => sum + (p.net_unrealized_pnl ?? p.unrealized_pnl ?? 0), 0);
 }, [positions]);
 
   const { groups, independent } = useMemo(() => {
@@ -532,10 +532,10 @@ export default function PositionsPage() {
                   </div>
                 </div>
                 <div className="text-right shrink-0">
-                  <div className={`text-lg font-bold font-mono ${pnlColor(master.unrealized_pnl)}`}>
-                    {fmtMoney(master.unrealized_pnl)}
+                  <div className={`text-lg font-bold font-mono ${pnlColor(master.net_unrealized_pnl ?? master.unrealized_pnl)}`}>
+                    {fmtMoney(master.net_unrealized_pnl ?? master.unrealized_pnl)}
                   </div>
-                  <div className={`text-sm font-mono ${pnlColor(master.pnl_pct)}`}>{fmtPct(master.pnl_pct)}</div>
+                  <div className={`text-sm font-mono ${pnlColor(master.net_pnl_pct ?? master.pnl_pct)}`}>{fmtPct(master.net_pnl_pct ?? master.pnl_pct)}</div>
                 </div>
               </div>
 
@@ -582,10 +582,10 @@ export default function PositionsPage() {
                               <td className="px-2 text-slate-300">{sub.kol_name || "未知"}</td>
                               <td className="px-2 text-right font-mono text-slate-300">{fmtMoney(sub.entry_price, 4)}</td>
                               <td className="px-2 text-right font-mono text-slate-300">{fmtMoney(sub.qty, 4)}</td>
-                              <td className={`px-2 text-right font-mono font-semibold ${pnlColor(sub.unrealized_pnl)}`}>
-                                {fmtMoney(sub.unrealized_pnl)}
+                              <td className={`px-2 text-right font-mono font-semibold ${pnlColor(sub.net_unrealized_pnl ?? sub.unrealized_pnl)}`}>
+                                {fmtMoney(sub.net_unrealized_pnl ?? sub.unrealized_pnl)}
                               </td>
-                              <td className={`px-2 text-right font-mono ${pnlColor(sub.pnl_pct)}`}>{fmtPct(sub.pnl_pct)}</td>
+                              <td className={`px-2 text-right font-mono ${pnlColor(sub.net_pnl_pct ?? sub.pnl_pct)}`}>{fmtPct(sub.net_pnl_pct ?? sub.pnl_pct)}</td>
                               <td className="px-2 text-center">
                                 {sub.sl && <span className="text-xs font-mono text-loss">{fmtMoney(sub.sl, 4)}</span>}
                                 {sub.trailing_stop && (
@@ -624,8 +624,8 @@ export default function PositionsPage() {
                               {sub.kol_name || "未知"}
                               <span className="text-[10px] text-slate-500">#{sub.id}</span>
                             </span>
-                            <div className={`text-sm font-bold font-mono ${pnlColor(sub.unrealized_pnl)}`}>
-                              {fmtMoney(sub.unrealized_pnl)}
+                            <div className={`text-sm font-bold font-mono ${pnlColor(sub.net_unrealized_pnl ?? sub.unrealized_pnl)}`}>
+                              {fmtMoney(sub.net_unrealized_pnl ?? sub.unrealized_pnl)}
                             </div>
                           </div>
                           <div className="grid grid-cols-4 gap-2 text-[11px]">
@@ -735,10 +735,10 @@ export default function PositionsPage() {
                       <td className="px-2 text-right font-mono text-slate-300">{fmtMoney(p.entry_price, 4)}</td>
                       <td className="px-2 text-right font-mono text-slate-100">{fmtMoney(p.current_price, 4)}</td>
                       <td className="px-2 text-right font-mono text-slate-300">{fmtMoney(p.qty, 4)}</td>
-                      <td className={`px-2 text-right font-mono font-semibold ${pnlColor(p.unrealized_pnl)}`}>
-                        {fmtMoney(p.unrealized_pnl)}
+                      <td className={`px-2 text-right font-mono font-semibold ${pnlColor(p.net_unrealized_pnl ?? p.unrealized_pnl)}`}>
+                        {fmtMoney(p.net_unrealized_pnl ?? p.unrealized_pnl)}
                       </td>
-                      <td className={`px-2 text-right font-mono ${pnlColor(p.pnl_pct)}`}>{fmtPct(p.pnl_pct)}</td>
+                      <td className={`px-2 text-right font-mono ${pnlColor(p.net_pnl_pct ?? p.pnl_pct)}`}>{fmtPct(p.net_pnl_pct ?? p.pnl_pct)}</td>
                       <td className="px-2 text-center text-xs text-slate-400 font-mono">{fmtDuration(p.opened_at)}</td>
                       <td className="px-2 text-center">
                         <StopBadges p={p} />

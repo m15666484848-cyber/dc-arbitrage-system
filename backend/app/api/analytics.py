@@ -285,7 +285,10 @@ async def dashboard(
     # 快照数据本身保留不动(仍服务净值曲线/收益率)。现价全部获取失败时保留快照值兜底。
     if not open_positions_list:
         stats["unrealized_pnl"] = 0.0
-    elif all(float(p.get("current_price") or 0) > 0 for p in open_positions_list):
+    elif any(float(p.get("current_price") or 0) > 0 for p in open_positions_list):
+        # 任一仓位拿到现价即按净口径求和,与持仓页完全一致;
+        # 现价缺失的仓位贡献0(compute_pnl 对0价返回0),两页行为一致。
+        # 仅全部现价获取失败时保留快照值兜底。
         stats["unrealized_pnl"] = round(
             sum(float(p.get("net_unrealized_pnl") or 0) for p in open_positions_list), 2
         )
