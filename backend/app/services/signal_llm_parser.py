@@ -197,8 +197,7 @@ async def _get_glm_fallback_client() -> LLMClient | None:
 # ---------------------------------------------------------------------------
 _LLM_PAYMENT_ALERT_COOLDOWN = 1800  # 冷却30分钟, 欠费期间避免每条信号都刷告警
 _LLM_PAYMENT_ERROR_PATTERNS = (
-    "402",                     # HTTP 402 Payment Required
-    "payment required",
+    "payment required",        # httpx HTTPStatusError 标准格式必含
     "insufficient balance",    # DeepSeek 官方返回体
     "balance is not enough",
     "arrearage",               # 部分供应商用词
@@ -207,7 +206,14 @@ _llm_payment_last_alert_ts: float = 0.0  # 内存兜底冷却(Redis 不可用时
 
 
 def _is_llm_payment_error(e: BaseException) -> bool:
-    """判断 LLM 调用异常是否为账户欠费(402/余额不足)类错误。"""
+    """判断 LLM 调用异常是否为账户欠费(402/余额不足)类错误。
+
+    注意: 不做裸 "402" 子串匹配,否则 14025/4021 等数字会误报;
+    HTTP 状态码通过 httpx 异常的 response.status_code 精确判断。
+    """
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 402:
+        return True
     msg = str(e).lower()
     return any(p in msg for p in _LLM_PAYMENT_ERROR_PATTERNS)
 

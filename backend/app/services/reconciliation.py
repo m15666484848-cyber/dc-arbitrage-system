@@ -497,8 +497,23 @@ async def reconcile_orders(
 
     # 4. 检测孤儿挂单:交易所有但本地无
     local_order_ids: set[str] = {o.exchange_order_id for o in local_orders if o.exchange_order_id}
+    # 交易所侧止损单挂在 positions.exchange_stop_order_id(不在 orders 表),
+    # open 仓位的止损单属正常存在,需排除,否则每轮对账都误报孤儿挂单
+    stop_order_ids: set[str] = {
+        sid
+        for sid in (await db.execute(
+            select(Position.exchange_stop_order_id).where(
+                Position.customer_id == customer_id,
+                Position.exchange == exchange,
+                Position.status == "open",
+                Position.exchange_stop_order_id != "",
+            )
+        )).scalars().all()
+        if sid
+    }
+    known_ids = local_order_ids | stop_order_ids
     for oid, ex_order in ex_order_map.items():
-        if oid not in local_order_ids:
+        if oid not in known_ids:
             sym = _normalize_symbol_for_match(ex_order.get("symbol", ""))
             disc = OrderDiscrepancy(
                 type="orphan_order",
