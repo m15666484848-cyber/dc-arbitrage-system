@@ -23,8 +23,7 @@ from app.models.config import EquitySnapshot
 
 CID = 20
 USERNAME = "dclh001"
-# 校准值: 目标当前余额 10000U - 历史累计已平盈亏 1521.1U(2026-08-21 校准)
-BASE = 8478.9
+BASE = 30000.0
 EXCHANGE = "bybit"
 BJ = timezone(timedelta(hours=8))
 UTC = timezone.utc
