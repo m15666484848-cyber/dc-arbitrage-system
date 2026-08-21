@@ -295,6 +295,17 @@ async def dashboard(
             sum(float(p.get("net_unrealized_pnl") or 0) for p in open_positions_list), 2
         )
 
+    # 实时余额: 覆盖 5 分钟净值快照值。走 Redis 缓存+单飞(见 exchange_adapter.
+    # fetch_balance_realtime),多用户轮询共享缓存,不放大交易所 API 调用。
+    try:
+        rt_balance = await exchange_adapter.fetch_balance_realtime(db, cid, exchange_account_id)
+    except Exception as e:
+        logger.warning(f"实时余额获取失败 customer={cid}: {e}")
+        rt_balance = None
+    if rt_balance is not None:
+        stats["balance"] = rt_balance
+        stats["equity"] = round(rt_balance + float(stats.get("unrealized_pnl") or 0.0), 2)
+
     return ok({**stats, "equity_curve": curve, "followed_kols": followed_kols,
                "open_positions_list": open_positions_list})
 

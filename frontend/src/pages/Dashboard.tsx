@@ -117,7 +117,7 @@ function getPositionRoi(position: any, totalPnl: number, notional: number) {
 export default function DashboardPage() {
   const { accountId } = useAccountFilterStore();
   const { data: positionsData, reload: reloadPositions } = useFetch(() => API.listPositions(accountId), [accountId]);
-  const { data: tradesData } = useFetch(() => API.listTrades(accountId), [accountId]);
+  const { data: tradesData, reload: reloadTrades } = useFetch(() => API.listTrades(accountId), [accountId]);
   const { data: dashStats, reload: reloadDash } = useFetch(() => API.dashboard(accountId), [accountId]);
   const { data: kolsData, reload: reloadKols } = useFetch(() => API.listKols(), []);
   const { data: strategiesData } = useFetch(() => API.listStrategies(), []);
@@ -125,8 +125,9 @@ export default function DashboardPage() {
   const reloadAllDashboardData = useCallback(() => {
     reloadPositions();
     reloadDash();
+    reloadTrades();
     reloadKols();
-  }, [reloadPositions, reloadDash, reloadKols]);
+  }, [reloadPositions, reloadDash, reloadTrades, reloadKols]);
   const reloadLiveData = useDebouncedReload(reloadAllDashboardData, 700);
 
   // 实时刷新: WebSocket 事件和轮询统一去抖,避免竞态重复请求。
@@ -136,12 +137,25 @@ export default function DashboardPage() {
         reloadLiveData();
       }
     });
+    // 实时轮询: 10s 一轮(余额/盈亏/持仓现价);标签页隐藏时暂停轮询省资源,
+    // 回到前台立即刷新一次。后端有 Redis 缓存+单飞,多用户轮询不放大交易所调用量。
+    let tick = 0;
     const t = setInterval(() => {
-      reloadLiveData();
-    }, 30000);
+      if (document.visibilityState !== "visible") return;
+      tick += 1;
+      reloadPositions();
+      reloadDash();
+      reloadTrades();
+      if (tick % 3 === 1) reloadKols(); // KOL 列表 30s 一档
+    }, 10000);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") reloadLiveData();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       off();
       clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [reloadLiveData]);
 

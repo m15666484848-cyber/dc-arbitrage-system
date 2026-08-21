@@ -1164,6 +1164,140 @@ async def fetch_balance(ex) -> dict:
         return {"equity": 0.0, "balance": 0.0, "available_balance": 0.0, "unrealized_pnl": 0.0}
 
 
+# ---------- 实时余额缓存层(仪表盘用) ----------
+# 所有用户共享同一份 Redis 缓存: N 个用户高频轮询仪表盘,每个账户每 TTL 最多
+# 产生 1 次交易所 API 调用,调用量不随用户数放大,不会触发交易所限流/封IP。
+BALANCE_RT_TTL = 6        # 缓存新鲜期(秒)
+BALANCE_RT_STALE_TTL = 300  # 旧值最长可兜底时间(秒),与快照节奏对齐
+BALANCE_RT_FETCH_TIMEOUT = 4  # 请求方等待刷新结果的上限(秒),超时先回旧值不阻塞响应
+_balance_rt_inflight: dict[int, asyncio.Task] = {}
+
+
+def _balance_rt_key(account_id: int) -> str:
+    return f"dcq:balrt:{account_id}"
+
+
+async def _balance_rt_do_fetch(customer_id: int, account_id: int, exchange: str, testnet: bool) -> float | None:
+    """独立 session 拉取单账户余额并写缓存(由单飞任务调用)。"""
+    from app.core.database import AsyncSessionLocal
+    from app.core.redis import get_redis
+
+    try:
+        async with AsyncSessionLocal() as db:
+            ex, _ = await load_exchange(db, customer_id, exchange, testnet, exchange_account_id=account_id)
+            try:
+                bal = await fetch_balance(ex)
+            finally:
+                await close_exchange(ex)
+        val = float(bal.get("balance", 0) or 0)
+        # fetch_balance 失败时静默返回全0: <=0 视为失败,不覆盖缓存里的正值,
+        # 避免瞬时故障导致仪表盘余额闪跳为0
+        if val <= 0:
+            return None
+        redis = await get_redis()
+        if redis is not None:
+            payload = json.dumps({"v": val, "ts": time.time()})
+            await redis.setex(_balance_rt_key(account_id), BALANCE_RT_STALE_TTL, payload)
+        return val
+    except Exception as e:
+        logger.debug(f"实时余额刷新失败 account={account_id}: {e}")
+        return None
+    finally:
+        _balance_rt_inflight.pop(account_id, None)
+
+
+async def _balance_rt_refresh(customer_id: int, account_id: int, exchange: str, testnet: bool) -> float | None:
+    """单飞刷新: 同一账户同时最多一个在途请求,并发请求共享同一结果。"""
+    task = _balance_rt_inflight.get(account_id)
+    if task is not None and not task.done():
+        return await asyncio.shield(task)
+    task = asyncio.create_task(_balance_rt_do_fetch(customer_id, account_id, exchange, testnet))
+    _balance_rt_inflight[account_id] = task
+    return await asyncio.shield(task)
+
+
+async def _balance_rt_read(account: ExchangeAccount, customer_id: int) -> float | None:
+    """读取单账户实时余额: 新鲜缓存直取,否则触发单飞刷新(限时等待,超时回旧值)。"""
+    from app.core.redis import get_redis
+
+    redis = await get_redis()
+    cached_raw = None
+    if redis is not None:
+        try:
+            cached_raw = await redis.get(_balance_rt_key(account.id))
+        except Exception as e:
+            logger.debug(f"读取实时余额缓存失败 account={account.id}: {e}")
+    if cached_raw:
+        try:
+            data = json.loads(cached_raw)
+            if time.time() - float(data.get("ts", 0)) <= BALANCE_RT_TTL:
+                return float(data["v"])
+        except Exception:
+            pass
+
+    # 缓存过期/缺失 → 刷新(限时等待;交易所慢时不拖慢仪表盘响应)
+    try:
+        val = await asyncio.wait_for(
+            _balance_rt_refresh(customer_id, account.id, account.exchange, bool(account.testnet)),
+            timeout=BALANCE_RT_FETCH_TIMEOUT,
+        )
+        if val is not None:
+            return val
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+    except Exception as e:
+        logger.debug(f"实时余额刷新等待异常 account={account.id}: {e}")
+
+    # 刷新失败/超时 → 旧值兜底(最长 BALANCE_RT_STALE_TTL)
+    if cached_raw:
+        try:
+            data = json.loads(cached_raw)
+            return float(data["v"])
+        except Exception:
+            pass
+    return None
+
+
+async def fetch_balance_realtime(
+    db: AsyncSession,
+    customer_id: int,
+    exchange_account_id: int | None = None,
+) -> float | None:
+    """实时账户余额(Redis 缓存 + 单飞去重)。
+
+    仪表盘每次轮询调用;多用户共享缓存,交易所调用量恒定。
+    exchange_account_id=None 时汇总该客户全部活跃账户。
+    全部失败返回 None(调用方保留原快照值)。
+    """
+    if exchange_account_id is not None:
+        acc = (await db.execute(
+            select(ExchangeAccount).where(
+                ExchangeAccount.id == exchange_account_id,
+                ExchangeAccount.customer_id == customer_id,
+                ExchangeAccount.is_active.is_(True),
+            )
+        )).scalar_one_or_none()
+        accounts = [acc] if acc else []
+    else:
+        accounts = (await db.execute(
+            select(ExchangeAccount).where(
+                ExchangeAccount.customer_id == customer_id,
+                ExchangeAccount.is_active.is_(True),
+            )
+        )).scalars().all()
+    if not accounts:
+        return None
+
+    total = 0.0
+    any_ok = False
+    for acc in accounts:
+        val = await _balance_rt_read(acc, customer_id)
+        if val is not None:
+            total += val
+            any_ok = True
+    return round(total, 2) if any_ok else None
+
+
 async def close_position_market(ex, symbol: str, side: str, amount: float) -> dict:
     """市价平仓。
 
