@@ -192,6 +192,95 @@ async def _get_glm_fallback_client() -> LLMClient | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# LLM 欠费(402)检测与充值提醒告警
+# ---------------------------------------------------------------------------
+_LLM_PAYMENT_ALERT_COOLDOWN = 1800  # 冷却30分钟, 欠费期间避免每条信号都刷告警
+_LLM_PAYMENT_ERROR_PATTERNS = (
+    "402",                     # HTTP 402 Payment Required
+    "payment required",
+    "insufficient balance",    # DeepSeek 官方返回体
+    "balance is not enough",
+    "arrearage",               # 部分供应商用词
+)
+_llm_payment_last_alert_ts: float = 0.0  # 内存兜底冷却(Redis 不可用时)
+
+
+def _is_llm_payment_error(e: BaseException) -> bool:
+    """判断 LLM 调用异常是否为账户欠费(402/余额不足)类错误。"""
+    msg = str(e).lower()
+    return any(p in msg for p in _LLM_PAYMENT_ERROR_PATTERNS)
+
+
+async def _alert_llm_payment_error(e: BaseException) -> None:
+    """LLM 账户欠费时发送充值提醒告警(30分钟冷却,Redis 跨进程+内存兜底)。"""
+    global _llm_payment_last_alert_ts
+    now = time.time()
+    redis = None
+    try:
+        redis = await _get_redis()
+    except Exception:
+        redis = None
+    if redis is not None:
+        try:
+            # SET NX: 冷却期内已告警过则返回 None,不再发送
+            sent = await redis.set(
+                "llm:payment_alert_cooldown",
+                "1",
+                ex=_LLM_PAYMENT_ALERT_COOLDOWN,
+                nx=True,
+            )
+            if not sent:
+                return
+        except Exception as cd_e:
+            logger.debug(f"[LLM欠费] Redis 冷却检查失败,降级内存冷却: {cd_e}")
+            redis = None
+    if redis is None and now - _llm_payment_last_alert_ts < _LLM_PAYMENT_ALERT_COOLDOWN:
+        return
+    _llm_payment_last_alert_ts = now
+    try:
+        from sqlalchemy import select as _sa_select
+
+        from app.core.database import AsyncSessionLocal as _SessionLocal
+        from app.models.config import AlertConfig as _AlertConfig
+        from app.services.notification import notify
+
+        # notify(None) 仅路由全局配置,若全局配置被禁用会静默丢失;
+        # 系统级故障应发给所有启用了 on_error 告警的订阅者(含全局)
+        target_customers: list[int | None] = [None]
+        try:
+            async with _SessionLocal() as db:
+                cfgs = (
+                    await db.execute(
+                        _sa_select(_AlertConfig.customer_id).where(
+                            _AlertConfig.enabled.is_(True),
+                            _AlertConfig.on_error.is_(True),
+                        )
+                    )
+                ).scalars().all()
+                seen: set[int | None] = {None}
+                for cid in cfgs:
+                    if cid is not None and cid not in seen:
+                        seen.add(cid)
+                        target_customers.append(cid)
+        except Exception as q_e:
+            logger.debug(f"[LLM欠费] 告警目标查询失败,按全局发送: {q_e}")
+
+        for _cid in target_customers:
+            await notify(
+                "error",
+                "LLM API 账户欠费,请充值",
+                f"错误信息: {str(e)[:300]}\n"
+                f"影响: 新信号将降级为 OCR/规则模式解析,解析质量下降\n"
+                f"建议: 请尽快登录 LLM 服务商(DeepSeek)控制台充值\n"
+                f"说明: 欠费期间每 30 分钟提醒一次,充值后自动恢复",
+                _cid,
+            )
+        logger.warning(f"[LLM欠费] 已发送充值提醒告警: {str(e)[:200]}")
+    except Exception as notify_e:
+        logger.warning(f"[LLM欠费] 告警发送失败: {notify_e}")
+
+
 async def _call_llm_with_retry(
     client: LLMClient,
     text: str,
@@ -261,6 +350,10 @@ async def _call_llm_with_retry(
                 logger.error(f"LLM 调用在 {total_attempts} 次尝试后仍超时")
         except Exception as e:
             last_exception = e
+            if _is_llm_payment_error(e):
+                # 欠费属账户问题,重试无意义: 告警后立即抛出
+                await _alert_llm_payment_error(e)
+                raise
             if attempt < total_attempts - 1:
                 delay = retry_delays[attempt] if attempt < len(retry_delays) else retry_delays[-1] * 2
                 logger.warning(
