@@ -1050,7 +1050,11 @@ async def monitor_loop() -> None:
                             continue
                         await _check_one_position_with_price(db, pos, current_price)
                     except Exception as e:
-                        logger.exception(f"检查持仓 {pos_id or '?'} 失败: {e}")
+                        if pos_id is None:
+                            # 仅属性捕获失败(前序commit/rollback使对象过期),下轮重查即可
+                            logger.debug(f"持仓对象已过期,本轮跳过: {e}")
+                        else:
+                            logger.exception(f"检查持仓 {pos_id} 失败: {e}")
                         # 回滚会话,防止单笔异常(close_position 中途失败)污染后续持仓检查
                         await db.rollback()
                 # 推送持仓更新事件,触发前端实时刷新(价格/盈亏/止损/成本保护/追踪止损)
@@ -1249,7 +1253,11 @@ async def stop_loss_monitor_loop() -> None:
                             finally:
                                 await _remove_closing_position(pos_id)
                     except Exception as e:
-                        logger.exception(f"[1s止损] 平仓失败 pos={pos_id or '?'}: {e}")
+                        if pos_id is None:
+                            # 仅属性捕获失败(前序commit/rollback使对象过期),下轮重查即可
+                            logger.debug(f"[1s止损] 持仓对象已过期,本轮跳过: {e}")
+                        else:
+                            logger.exception(f"[1s止损] 平仓失败 pos={pos_id}: {e}")
                         await db.rollback()
 
         except Exception as e:
