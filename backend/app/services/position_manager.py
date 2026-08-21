@@ -1037,17 +1037,20 @@ async def monitor_loop() -> None:
                             _task.add_done_callback(_pending_tasks.discard)
 
                 for pos in positions:
-                    pos_id = pos.id
-                    pos_exchange = pos.exchange
-                    pos_symbol = pos.symbol
-                    pos_customer_id = pos.customer_id
+                    pos_id = None
                     try:
+                        # PM-EXPIRE-FIX: 前一轮 rollback 会使 ORM 对象过期,
+                        # 属性捕获必须在 try 内,否则 MissingGreenlet 会击穿循环
+                        pos_id = pos.id
+                        pos_exchange = pos.exchange
+                        pos_symbol = pos.symbol
+                        pos_customer_id = pos.customer_id
                         current_price = price_cache.get((pos_exchange, pos_symbol))
                         if not current_price or current_price <= 0:
                             continue
                         await _check_one_position_with_price(db, pos, current_price)
                     except Exception as e:
-                        logger.exception(f"检查持仓 {pos_id} 失败: {e}")
+                        logger.exception(f"检查持仓 {pos_id or '?'} 失败: {e}")
                         # 回滚会话,防止单笔异常(close_position 中途失败)污染后续持仓检查
                         await db.rollback()
                 # 推送持仓更新事件,触发前端实时刷新(价格/盈亏/止损/成本保护/追踪止损)
@@ -1142,17 +1145,20 @@ async def stop_loss_monitor_loop() -> None:
 
                 # 检查每个持仓的止损
                 for pos in positions:
-                    pos_id = pos.id
-                    pos_exchange = pos.exchange
-                    pos_symbol = pos.symbol
-                    pos_side = pos.side
-                    pos_qty = pos.qty
-                    pos_sl = pos.sl
-                    pos_customer_id = pos.customer_id
-                    pos_entry_price = pos.entry_price
-                    pos_realized_pnl = pos.realized_pnl
-                    pos_exchange_account_id = pos.exchange_account_id
+                    pos_id = None
                     try:
+                        # PM-EXPIRE-FIX: 前一轮 rollback 会使 ORM 对象过期,
+                        # 属性捕获必须在 try 内,否则 MissingGreenlet 会击穿循环
+                        pos_id = pos.id
+                        pos_exchange = pos.exchange
+                        pos_symbol = pos.symbol
+                        pos_side = pos.side
+                        pos_qty = pos.qty
+                        pos_sl = pos.sl
+                        pos_customer_id = pos.customer_id
+                        pos_entry_price = pos.entry_price
+                        pos_realized_pnl = pos.realized_pnl
+                        pos_exchange_account_id = pos.exchange_account_id
                         key = (pos_exchange, pos_symbol)
                         current_price = price_cache.get(key, 0)
                         if not current_price or current_price <= 0:
@@ -1243,7 +1249,7 @@ async def stop_loss_monitor_loop() -> None:
                             finally:
                                 await _remove_closing_position(pos_id)
                     except Exception as e:
-                        logger.exception(f"[1s止损] 平仓失败 pos={pos_id}: {e}")
+                        logger.exception(f"[1s止损] 平仓失败 pos={pos_id or '?'}: {e}")
                         await db.rollback()
 
         except Exception as e:

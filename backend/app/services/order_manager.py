@@ -4512,7 +4512,7 @@ def _is_position_gone_error(e: BaseException) -> bool:
 
 async def _auto_close_ghost_position(
     db: AsyncSession,
-    position: Position,
+    position_id: int,
     ex,
     err_text: str,
 ) -> dict | None:
@@ -4521,6 +4521,13 @@ async def _auto_close_ghost_position(
     核销范围: master 及其全部 open 子仓位,并撤销遗留的交易所侧止损单。
     返回核销结果 dict;查询失败或交易所仍有该持仓时返回 None(走原失败路径)。
     """
+    # 调用方 rollback 后传入的 ORM 对象已过期(expire),同步访问会触发
+    # MissingGreenlet;按 ID 重查获取干净对象
+    position = (await db.execute(
+        select(Position).where(Position.id == position_id)
+    )).scalar_one_or_none()
+    if not position or position.status != "open":
+        return None
     base = position.symbol.split("/")[0]
     side = (position.side or "").lower()
     try:
@@ -5200,15 +5207,43 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
     except Exception as e:
 
+        # OM-EXPIRE-FIX: 流程中可能已有 commit/rollback 使 ORM 对象过期,异步上下文
+        # 同步访问过期属性会触发 MissingGreenlet;先做属性快照,失败则回滚后重查
+        try:
+            _pos_symbol = position.symbol
+            _pos_side = position.side
+            _pos_customer_id = position.customer_id
+            _pos_account_id = position.exchange_account_id
+            _pos_entry_price = position.entry_price
+            _pos_qty_left = position.qty
+        except Exception:
+            _pos_symbol = _pos_side = "?"
+            _pos_customer_id = _pos_account_id = None
+            _pos_entry_price = _pos_qty_left = None
+            try:
+                await db.rollback()
+                _pos_fresh = (await db.execute(
+                    select(Position).where(Position.id == position_id)
+                )).scalar_one_or_none()
+                if _pos_fresh is not None:
+                    _pos_symbol = _pos_fresh.symbol
+                    _pos_side = _pos_fresh.side
+                    _pos_customer_id = _pos_fresh.customer_id
+                    _pos_account_id = _pos_fresh.exchange_account_id
+                    _pos_entry_price = _pos_fresh.entry_price
+                    _pos_qty_left = _pos_fresh.qty
+            except Exception:
+                pass
+
         if _exchange_close_succeeded and not _db_committed:
 
             # 交易所平仓已成功但DB操作失败 → 幽灵持仓风险
 
             logger.opt(exception=True).error(
 
-                f"严重告警: 交易所平仓成功但DB记录失败 pos={position_id} symbol={position.symbol} "
+                f"严重告警: 交易所平仓成功但DB记录失败 pos={position_id} symbol={_pos_symbol} "
 
-                f"side={position.side} exchange_order_id={_exchange_order_id}: {e}",
+                f"side={_pos_side} exchange_order_id={_exchange_order_id}: {e}",
 
 
             )
@@ -5258,7 +5293,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
         if _is_position_gone_error(e):
             await db.rollback()
             try:
-                ghost_result = await _auto_close_ghost_position(db, position, ex, str(e))
+                ghost_result = await _auto_close_ghost_position(db, position_id, ex, str(e))
                 if ghost_result is not None:
                     return ghost_result
             except Exception as ghost_e:
@@ -5269,7 +5304,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
         # P1-13: 强制平仓(超时平仓)失败时,确保详细错误原因被记录
 
-        logger.opt(exception=True).error(f"平仓失败 pos={position_id} qty={close_qty} symbol={position.symbol} side={position.side} customer={position.customer_id}: {e}")
+        logger.opt(exception=True).error(f"平仓失败 pos={position_id} qty={close_qty} symbol={_pos_symbol} side={_pos_side} customer={_pos_customer_id}: {e}")
 
         try:
 
@@ -5277,17 +5312,17 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
                 "error", "平仓失败",
 
-                f"品种: {position.symbol}\n方向: {position.side}\n"
-                f"API账户: #{position.exchange_account_id or '未知'}\n"
-                f"仓位ID: {position.id}\n"
-                f"入场价: {_fmt_value(position.entry_price)}\n"
-                f"系统剩余数量: {_fmt_value(position.qty)}\n"
+                f"品种: {_pos_symbol}\n方向: {_pos_side}\n"
+                f"API账户: #{_pos_account_id or '未知'}\n"
+                f"仓位ID: {position_id}\n"
+                f"入场价: {_fmt_value(_pos_entry_price)}\n"
+                f"系统剩余数量: {_fmt_value(_pos_qty_left)}\n"
                 f"本次请求平仓数量: {_fmt_value(close_qty)}\n"
                 f"执行结果: 未确认平仓成功,系统不会改成已平仓\n"
                 f"失败原因: {e}\n"
                 f"判断依据: {_failure_hint(e)}",
 
-                position.customer_id,
+                _pos_customer_id,
 
             )
 

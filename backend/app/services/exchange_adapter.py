@@ -836,6 +836,10 @@ async def cancel_native_stop_loss_order(
             )
             return False
         except Exception as e:
+            # OKX 51400(已成交/已撤销/不存在)会以异常抛出,同样视为不再活跃,
+            # 避免调用方(exchange_stop_sync_loop)无限重试
+            if any(k in str(e).lower() for k in gone_keywords):
+                return True
             logger.warning(f"OKX止损单撤销失败 algoId={order_id}: {str(e)[:200]}")
             return False
     elif ex_name == "bybit":
