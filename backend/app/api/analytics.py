@@ -219,8 +219,10 @@ async def dashboard(
     follow_status_map = await _build_follow_statuses(db, cid, [f for f, _ in followed])
     for f, k in followed:
         follow_status = follow_status_map.get(f.kol_id) or await _build_follow_status(db, cid, f)
-        if not f.enabled and follow_status["status"] != "paused":
-            continue
+        # 已停用(enabled=False)的 KOL 不再隐藏: 用户手动关闭或风控暂停过期后,
+        # 仍需在面板展示"已停用"状态并提供一键启用入口, 否则无法恢复跟单。
+        if not f.enabled:
+            follow_status = {**follow_status, "status": "disabled", "label": "已停用", "can_resume": True}
         # 解析跟单金额: 自定义 > 策略 base_qty > 系统默认 100
         resolved_notional = f.followed_notional_usdt
         if not resolved_notional:

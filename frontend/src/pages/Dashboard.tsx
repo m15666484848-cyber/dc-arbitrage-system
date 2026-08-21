@@ -172,8 +172,10 @@ export default function DashboardPage() {
   // 订阅的 KOL
   const followedKols = useMemo(() => {
     const fromKols = allKols.filter((k) => k.followed);
-    if (fromKols.length > 0) return fromKols;
-    return s.followed_kols || [];
+    const stOf = (k: any) => k.follow_status?.status || k.follow_settings?.follow_status?.status || "active";
+    const list = fromKols.length > 0 ? [...fromKols] : [...(s.followed_kols || [])];
+    // 已停用的 KOL 排到末尾, 正常跟单的优先展示
+    return list.sort((a, b) => (stOf(a) === "disabled" ? 1 : 0) - (stOf(b) === "disabled" ? 1 : 0));
   }, [s.followed_kols, allKols]);
 
   const resumeKol = async (kolId: number) => {
@@ -190,7 +192,7 @@ export default function DashboardPage() {
   const getKolStatus = (k: any) =>
     k.follow_status || k.follow_settings?.follow_status || { status: "active", label: "正常", can_resume: false };
   const statusTone = (status: string) =>
-    status === "paused" ? "loss" : status === "cooldown" ? "warn" : "profit";
+    status === "paused" || status === "disabled" ? "loss" : status === "cooldown" ? "warn" : "profit";
   const strategyNameById = useMemo(() => {
     const map = new Map<number, string>();
     for (const strategy of strategies) {
@@ -605,10 +607,12 @@ export default function DashboardPage() {
                           className="px-2 py-1 text-xs gap-1 shrink-0"
                           onClick={() => resumeKol(kolId)}
                           disabled={resumingKolId === kolId}
-                          title="恢复跟随并重置冷却"
+                          title={status.status === "disabled" ? "重新启用跟单" : "恢复跟随并重置冷却"}
                         >
                           <RotateCcw size={13} />
-                          {resumingKolId === kolId ? "恢复中" : "恢复"}
+                          {resumingKolId === kolId
+                            ? status.status === "disabled" ? "启用中" : "恢复中"
+                            : status.status === "disabled" ? "启用" : "恢复"}
                         </Button>
                       ) : (
                         <div className="hidden sm:flex items-center gap-1 text-[10px] text-gold/80 shrink-0">

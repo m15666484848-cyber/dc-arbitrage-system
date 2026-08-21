@@ -158,8 +158,10 @@ async def list_kols_for_customer(
                 strategy_map[s.id] = (s.params or {}).get("base_qty", 100.0)
         for f in rows:
             follow_status = await _build_follow_status(db, cid, f)
-            if not f.enabled and follow_status["status"] != "paused":
-                continue
+            # 已停用(手动关闭/风控过期)的 KOL 保留在订阅列表, 标记 disabled 状态,
+            # 供前端展示"已停用"并提供一键启用入口, 避免用户关闭后找不到恢复入口。
+            if not f.enabled:
+                follow_status = {**follow_status, "status": "disabled", "label": "已停用", "can_resume": True}
             followed_ids.add(f.kol_id)
             # 解析跟单金额: 自定义 > 策略 base_qty > 系统默认 100
             resolved_notional = f.followed_notional_usdt

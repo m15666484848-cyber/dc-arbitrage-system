@@ -26,7 +26,9 @@ export default function AdminKols() {
   const [modal, setModal] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
   const [f, setF] = useState<any>({ ...EMPTY });
-  const list: any[] = (data || []).filter((k: any) => k.enabled);
+  // 修复: 不再过滤 enabled=false 的 KOL。停用后仍需展示在列表中(带"停用"徽章),
+  // 否则用户点开关停用后 KOL 直接消失, 无法再次启用。
+  const list: any[] = [...(data || [])].sort((a: any, b: any) => (a.enabled === b.enabled ? 0 : a.enabled ? -1 : 1));
   const totalSignals = list.reduce((sum: number, k: any) => sum + (k.cached_signal_count || 0), 0);
   const avgWinRate = list.length ? (list.reduce((sum: number, k: any) => sum + (k.cached_win_rate || 0), 0) / list.length).toFixed(1) : "0.0";
   const totalPnl = list.reduce((sum: number, k: any) => sum + (k.cached_pnl || 0), 0);

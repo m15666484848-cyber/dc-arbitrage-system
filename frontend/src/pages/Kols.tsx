@@ -6,6 +6,7 @@ import {
   Check,
   Crown,
   Radio,
+  RotateCcw,
   Settings2,
   ShieldCheck,
   SlidersHorizontal,
@@ -215,6 +216,16 @@ export default function KolsPage() {
     }
   };
 
+  const enableKol = async (kolId: number, name?: string) => {
+    try {
+      await API.resumeKolFollow(kolId);
+      push("success", `已启用 ${name || "KOL"} 跟单`);
+      reload();
+    } catch (e: any) {
+      push("error", e?.response?.data?.message || "启用失败");
+    }
+  };
+
   const save = async () => {
     try {
       const kolSettings: { kol_id: number; strategy_id: number | null; notional_usdt: number | null }[] = [];
@@ -416,6 +427,7 @@ export default function KolsPage() {
                 {rankedList.map((kol: any, idx: number) => {
                   const r = kol._rank || {};
                   const active = selected.has(kol.id) || kol.followed;
+                  const isDisabled = kol.follow_settings?.follow_status?.status === "disabled";
                   const st = settings.get(kol.id);
                   const strat = st?.strategy_id ? strategies.find((s: any) => s.id === st.strategy_id) : null;
                   const effectiveNotional = getEffectiveNotional(st);
@@ -445,12 +457,15 @@ export default function KolsPage() {
                           <div className="min-w-0 flex-1">
                             <div className="kol-rank-name-line">
                               <span className="font-medium text-text truncate">{kol.kol_name || kol.name}</span>
-                              {active && (
+                              {active && !isDisabled && (
                                 <span className="kol-rank-chip is-followed"><Check size={11} /> 已订阅</span>
+                              )}
+                              {isDisabled && (
+                                <span className="kol-rank-chip" style={{ background: "rgba(239,68,68,.12)", borderColor: "rgba(239,68,68,.25)", color: "#f87171" }}>已停用</span>
                               )}
                             </div>
                             <div className="kol-rank-subline">
-                              {active ? "正在跟单" : "未订阅 · 点击行加入跟单"}
+                              {isDisabled ? "已停用 · 点右侧「启用」恢复跟单" : active ? "正在跟单" : "未订阅 · 点击行加入跟单"}
                               <span className="mx-1 text-text-tertiary/50">·</span>
                               近30天排行
                             </div>
@@ -514,13 +529,22 @@ export default function KolsPage() {
                           >
                             详情
                           </Link>
-                        {active && (
+                        {active && !isDisabled && (
                           <button
                             onClick={(e) => { e.stopPropagation(); openDetail(kol); }}
                             className="w-7 h-7 rounded-lg bg-gold/15 hover:bg-gold/25 border border-gold/15 flex items-center justify-center mx-auto transition-colors"
                             title="设置策略和金额"
                           >
                             <Settings2 size={13} className="text-gold" />
+                          </button>
+                        )}
+                        {isDisabled && (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); enableKol(kol.id, kol.kol_name || kol.name); }}
+                            className="px-2 h-7 rounded-lg bg-profit/15 hover:bg-profit/25 border border-profit/20 text-[11px] text-profit inline-flex items-center gap-1 justify-center transition-colors"
+                            title="一键恢复跟单"
+                          >
+                            <RotateCcw size={12} /> 启用
                           </button>
                         )}
                         </div>
