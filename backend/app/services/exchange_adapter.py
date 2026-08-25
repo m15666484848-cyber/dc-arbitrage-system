@@ -58,15 +58,34 @@ _EXCHANGE_POOL_TTL = 300  # 5 分钟
 _EXCHANGE_POOL_MAX = 20  # 最大缓存数量
 
 
+# 延迟关闭队列: id(ex) -> (ex, 关闭时刻)。被淘汰但可能仍被使用的实例,
+# 60秒后才真正关闭,避免并发协程 "instance was closed by the user"
+_retiring: dict[int, tuple[Any, float]] = {}
+_RETIRE_GRACE = 60.0
+
+
+def _retire_exchange(ex) -> None:
+    """淘汰实例: 不立即关闭,延迟60秒(给正在使用的协程留出完成时间)。"""
+    _retiring[id(ex)] = (ex, time.time() + _RETIRE_GRACE)
+
+
 async def _cleanup_exchange_pool():
     """清理过期的交易所连接。"""
     now = time.time()
+    # 关闭宽限期已过的淘汰实例
+    for i in [i for i, (_, t) in _retiring.items() if now >= t]:
+        ex, _ = _retiring.pop(i)
+        task = asyncio.ensure_future(_safe_close_exchange(ex))
+        _pending_closes.add(task)
+        task.add_done_callback(_pending_closes.discard)
+        logger.debug(f"交易所连接池关闭已淘汰实例: {type(ex).__name__}")
     expired_keys = [k for k, (_, t) in _exchange_pool.items() if now - t > _EXCHANGE_POOL_TTL]
     for k in expired_keys:
         entry = _exchange_pool.pop(k, None)
         if entry is None:
             continue
         ex, _ = entry
+        _retiring.pop(id(ex), None)
         try:
             await ex.close()
             logger.debug(f"交易所连接池清理过期连接: {k}")
@@ -75,17 +94,17 @@ async def _cleanup_exchange_pool():
 
 
 def _get_pooled_exchange(key: str) -> Any | None:
-    """从连接池获取交易所对象。"""
+    """从连接池获取交易所对象。
+
+    2026-08-24 修复: 取出即续租(刷新时间戳)。原实现 TTL 过期即 pop+立即
+    异步关闭,但实例可能刚被其他协程取出正在使用 → "closed by the user"。
+    续租后 TTL 语义为"最后使用后5分钟空闲回收",使用中的实例不会过期。
+    """
     entry = _exchange_pool.get(key)
     if entry is None:
         return None
-    ex, created = entry
-    if time.time() - created > _EXCHANGE_POOL_TTL:
-        _exchange_pool.pop(key, None)
-        task = asyncio.ensure_future(_safe_close_exchange(ex))
-        _pending_closes.add(task)
-        task.add_done_callback(_pending_closes.discard)
-        return None
+    ex, _ = entry
+    _exchange_pool[key] = (ex, time.time())
     return ex
 
 
@@ -101,22 +120,19 @@ async def _safe_close_exchange(ex) -> None:
 
 def _pool_exchange(key: str, ex) -> None:
     """将交易所对象放入连接池。"""
-    # 如果同 key 已有旧实例(API Key 变更场景), 先关闭旧实例
+    # 如果同 key 已有旧实例(API Key 变更场景), 延迟关闭旧实例
+    # (旧实例可能正被其他协程使用,立即关闭会引发竞态)
     old_entry = _exchange_pool.pop(key, None)
     if old_entry is not None:
         old_ex, _ = old_entry
-        task = asyncio.ensure_future(_safe_close_exchange(old_ex))
-        _pending_closes.add(task)
-        task.add_done_callback(_pending_closes.discard)
-    # 如果池已满, 移除最旧的
+        _retire_exchange(old_ex)
+    # 如果池已满, 移除最旧的(同样延迟关闭)
     if len(_exchange_pool) >= _EXCHANGE_POOL_MAX:
         oldest_key = min(_exchange_pool, key=lambda k: _exchange_pool[k][1])
         old_entry = _exchange_pool.pop(oldest_key, None)
         if old_entry is not None:
             old_ex, _ = old_entry
-            task = asyncio.ensure_future(_safe_close_exchange(old_ex))
-            _pending_closes.add(task)
-            task.add_done_callback(_pending_closes.discard)
+            _retire_exchange(old_ex)
     ex._dcq_pooled = True
     _exchange_pool[key] = (ex, time.time())
     logger.debug(f"交易所连接池新增: {key} (池大小={len(_exchange_pool)})")
@@ -337,6 +353,10 @@ import time as _time_module
 # S14修复: 模块级缓存，避免重复 API 调用
 _okx_mode_cache: dict[str, float] = {}
 _OKX_MODE_CACHE_TTL = 3600  # 1小时缓存
+
+# ★ Fix(2026-08-25): 交易对存在性校验结果缓存 {key: (valid, timestamp)}
+_SYMBOL_VALIDATION_CACHE: dict[str, tuple[bool, float]] = {}
+_SYMBOL_VALIDATION_CACHE_TTL = 3600  # 1小时
 
 
 async def _ensure_okx_long_short_mode(ex) -> None:
@@ -639,10 +659,23 @@ async def fetch_ohlcv(
 
 
 async def validate_symbol(exchange: str, symbol: str) -> bool:
-    """校验品种在交易所是否存在。"""
+    """校验品种在交易所是否存在(U 本位永续合约市场,精确校验)。
+
+    ★ Fix(2026-08-25): 旧实现 `norm in ex.symbols` 会误判 — ex.symbols 包含
+    现货等所有市场类型, SNDK/USDT 这类"仅现货存在"的币被误判为有效,
+    直到下单才报 BadSymbol(8-24 三单失败)。现改为按 markets 字典精确
+    校验: 必须存在且 type=swap + linear(U 本位永续)。
+    结果缓存 1 小时(markets 列表变化极低频),避免每次信号都全量 load_markets。
+    """
     ex_cls = {"okx": ccxt.okx, "binance": ccxt.binance, "bybit": ccxt.bybit}.get(exchange)
     if not ex_cls:
         return False
+    norm = _normalize_symbol(exchange, symbol)
+    cache_key = f"{exchange}:{norm}"
+    now = _time_module.time()
+    cached = _SYMBOL_VALIDATION_CACHE.get(cache_key)
+    if cached is not None and now - cached[1] < _SYMBOL_VALIDATION_CACHE_TTL:
+        return cached[0]
     kwargs: dict[str, Any] = {"enableRateLimit": True}
     if exchange == "okx":
         kwargs["options"] = {"defaultType": "swap"}
@@ -651,14 +684,26 @@ async def validate_symbol(exchange: str, symbol: str) -> bool:
     elif exchange == "bybit":
         kwargs["options"] = {"defaultType": "swap"}
     ex = ex_cls(kwargs)
+    valid = False
+    load_ok = False
     try:
         await ex.load_markets()
-        norm = _normalize_symbol(exchange, symbol)
-        return norm in ex.symbols
+        load_ok = True
+        market = ex.markets.get(norm)
+        if market is not None:
+            valid = (
+                market.get("swap") is True
+                and market.get("linear") is True
+                and market.get("active", True) is not False
+            )
     except Exception:
-        return False
+        valid = False
     finally:
         await ex.close()
+    # 仅 markets 成功加载才缓存结果;API 瞬时故障的 False 不缓存,下次重新校验
+    if load_ok:
+        _SYMBOL_VALIDATION_CACHE[cache_key] = (valid, now)
+    return valid
 
 
 async def set_leverage(ex, symbol: str, leverage: int) -> None:
@@ -856,6 +901,150 @@ async def cancel_native_stop_loss_order(
         return False
 
 
+
+
+
+
+async def fetch_native_stop_order_status(
+    ex,
+    exchange: str,
+    symbol: str,
+    order_id: str,
+) -> dict:
+    """查询交易所原生止损单当前状态(供同步循环感知成交/失效)。
+
+    返回归一化结果:
+      {"state": "live"}                          未触发,仍挂在交易所
+      {"state": "filled", "avg_price": ..,       已触发成交(交易所侧已平仓)
+       "filled_qty": .., "fee": ..}              avg_price/fee 取不到时为 None
+      {"state": "gone"}                          已撤销/失效,不再活跃
+      {"state": "unknown"}                       查询失败,调用方保持现状
+    """
+    ex_name = (exchange or getattr(ex, "id", "") or "").lower()
+    if not order_id:
+        return {"state": "gone"}
+    if ex_name == "okx":
+        # 实测: OKX SWAP reduceOnly 触发止损单注册为 ordType=trigger
+        # (部分账户为 conditional),两种类型依次探测。
+        # algoId 不存在时 OKX 返回 51603 异常,视为"该类型下无此单"继续探测。
+        def _is_not_exist(e: BaseException) -> bool:
+            return "51603" in str(e)
+
+        for _ot in ("trigger", "conditional"):
+            try:
+                r = await ex.private_get_trade_orders_algo_pending(
+                    {"ordType": _ot, "algoId": str(order_id)}
+                )
+                if (r.get("data") or []):
+                    return {"state": "live"}
+            except Exception as e:
+                if not _is_not_exist(e):
+                    logger.debug(f"OKX止损单pending查询失败 algoId={order_id}: {str(e)[:150]}")
+                    return {"state": "unknown"}
+        for _ot in ("trigger", "conditional"):
+            try:
+                r = await ex.private_get_trade_orders_algo_history(
+                    {"ordType": _ot, "algoId": str(order_id)}
+                )
+                data = (r.get("data") or [])
+                if not data:
+                    continue
+                d = data[0]
+                state = str(d.get("state") or "")
+                # ★ Fix(2026-08-25): OKX条件单history的state是字符串口径:
+                # live=挂单中 / effective=已触发 / canceled=已撤销 /
+                # order_failed=触发后下单失败。旧代码按数字"3"/"2"判断,
+                # 导致已触发止损单永远被判live,只能靠幽灵仓位兜底路径
+                # 平仓(手续费记0、成交价用止损触发价估算)。
+                if state in ("effective", "3"):
+                    # 已触发: spawned市价单几乎立即成交。优先用ordId拉
+                    # fills-history取精确均价/数量/手续费(OKX返回fee为负,
+                    # 取绝对值),拉不到退回actualPx再由调用方退回触发价估算。
+                    avg = d.get("actualPx") or None
+                    filled_qty = None
+                    fee = None
+                    _spawned = str(d.get("ordId") or "")
+                    if _spawned:
+                        try:
+                            fr = await ex.private_get_trade_fills_history(
+                                {"instType": "SWAP", "ordId": _spawned, "limit": 50}
+                            )
+                            _tp = _ts = _tf = 0.0
+                            for _f in (fr.get("data") or []):
+                                _px = float(_f.get("fillPx") or 0)
+                                _sz = float(_f.get("fillSz") or 0)
+                                if _px <= 0 or _sz <= 0:
+                                    continue
+                                _tp += _px * _sz
+                                _ts += _sz
+                                _tf += abs(float(_f.get("fee") or 0))
+                            if _ts > 0:
+                                avg = _tp / _ts
+                                filled_qty = _ts
+                                fee = _tf
+                        except Exception as _fe:
+                            logger.debug(
+                                f"OKX止损spawned单fills查询失败 algoId={order_id} "
+                                f"ordId={_spawned}: {str(_fe)[:150]}"
+                            )
+                    return {"state": "filled", "avg_price": avg,
+                            "filled_qty": filled_qty, "fee": fee}
+                if state in ("canceled", "order_failed", "2"):
+                    return {"state": "gone"}
+                return {"state": "live"}
+            except Exception as e:
+                if not _is_not_exist(e):
+                    logger.debug(f"OKX止损单history查询失败 algoId={order_id}: {str(e)[:150]}")
+                    return {"state": "unknown"}
+        return {"state": "unknown"}
+    elif ex_name == "bybit":
+        try:
+            r = await ex.private_get_v5_order_realtime(
+                {"category": "linear", "orderId": str(order_id)}
+            )
+            lst = ((r.get("result") or {}).get("list")) or []
+            if lst:
+                o = lst[0]
+                st = str(o.get("orderStatus") or "")
+                if st in ("Cancelled", "Deactivated", "Rejected"):
+                    return {"state": "gone"}
+                if st == "Filled":
+                    return {
+                        "state": "filled",
+                        "avg_price": float(o.get("avgPrice") or 0) or None,
+                        "filled_qty": float(o.get("cumExecQty") or 0) or None,
+                        "fee": float(o.get("cumExecFee") or 0) or None,
+                    }
+                return {"state": "live"}
+        except Exception as e:
+            logger.debug(f"Bybit止损单realtime查询失败 orderId={order_id}: {str(e)[:150]}")
+            return {"state": "unknown"}
+        try:
+            r = await ex.private_get_v5_order_history(
+                {"category": "linear", "orderId": str(order_id)}
+            )
+            lst = ((r.get("result") or {}).get("list")) or []
+            if not lst:
+                return {"state": "unknown"}
+            o = lst[0]
+            st = str(o.get("orderStatus") or "")
+            if st == "Filled":
+                return {
+                    "state": "filled",
+                    "avg_price": float(o.get("avgPrice") or 0) or None,
+                    "filled_qty": float(o.get("cumExecQty") or 0) or None,
+                    "fee": float(o.get("cumExecFee") or 0) or None,
+                }
+            if st == "Triggered":
+                return {"state": "filled", "avg_price": None,
+                        "filled_qty": None, "fee": None}
+            if st in ("Cancelled", "Deactivated", "Rejected", "PartiallyFilledCanceled"):
+                return {"state": "gone"}
+            return {"state": "live"}
+        except Exception as e:
+            logger.debug(f"Bybit止损单history查询失败 orderId={order_id}: {str(e)[:150]}")
+            return {"state": "unknown"}
+    return {"state": "unknown"}
 
 
 async def place_order(
@@ -1335,9 +1524,12 @@ async def close_position_market(ex, symbol: str, side: str, amount: float) -> di
         # amount/cs 转换不会执行(异常已跳过),amount 保持原值即按 cs=1.0 处理。
         logger.warning(f"获取market信息失败,跳过合约数转换(按 cs=1.0 处理): {e}")
     # OKX 双向持仓模式平仓必须传 posSide=持仓方向；净持仓模式使用 posSide=net。
+    # ★ Fix(2026-08-24): 平仓是最不能失败的操作,重试从默认3次提高到5次
+    # (退避1/2/4/8s,共约15s窗口),覆盖 OKX 50013 "Systems are busy" 短暂繁忙
     return await place_order(
         ex, symbol, close_side, "market", amount,
         leverage=1, reduce_only=True, position_side=position_side,
+        retries=5,
     )
 
 

@@ -138,6 +138,102 @@ def get_source_status() -> dict:
     return out
 
 
+# ★ Fix(2026-08-25): 消息补偿(断线丢消息防护)
+# 背景: Discord 断线后 RESUME 被拒(resumable=False)时事件无法重放,
+# 重连间隙(约 5 秒)内的 KOL 消息永久丢失。现记录每个频道最后消息游标
+# (内存 + Redis 持久化),全新会话建立后通过 REST API 拉取断线期间消息重放,
+# message_id/raw_text 去重机制保证不重复入库。
+_channel_last_msg_id: dict[str, str] = {}
+
+_CHANNEL_CURSOR_REDIS_KEY = "discord:channel_last_msg_id"
+
+
+async def _record_channel_msg_id(channel_id: str, message_id: str) -> None:
+    """记录频道消息游标(内存 + Redis,重启后供消息补偿恢复断点)。"""
+    if not channel_id or not message_id:
+        return
+    _channel_last_msg_id[channel_id] = str(message_id)
+    try:
+        from app.core.redis import get_redis
+        redis = await get_redis()
+        if redis:
+            await redis.hset(_CHANNEL_CURSOR_REDIS_KEY, channel_id, str(message_id))
+    except Exception:
+        pass
+
+
+async def _load_channel_msg_ids_from_redis() -> None:
+    """启动/重连时从 Redis 恢复频道游标(内存丢失时不丢断点)。"""
+    try:
+        from app.core.redis import get_redis
+        redis = await get_redis()
+        if redis:
+            data = await redis.hgetall(_CHANNEL_CURSOR_REDIS_KEY) or {}
+            for k, v in data.items():
+                _channel_last_msg_id.setdefault(str(k), str(v))
+    except Exception:
+        pass
+
+
+async def _backfill_missed_messages(token: str, discord_account_id: int | None, is_default_account: bool) -> None:
+    """全新会话(非 RESUME)建立后,通过 REST API 补齐断线期间遗漏的 KOL 消息。
+
+    - 只对"有游标"的监听频道拉取 after=last_msg_id 的消息(最多 50 条/频道)
+    - 重放走 _handle_message 完整管线,message_id/raw_text 去重保证幂等
+    - 游标缺失(首次启动/无历史)时跳过,不影响正常流程
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            stmt = select(Kol.discord_channel_id).where(
+                Kol.enabled.is_(True),
+                Kol.discord_channel_id.is_not(None),
+            )
+            if discord_account_id is None:
+                stmt = stmt.where(Kol.discord_account_id.is_(None))
+            elif is_default_account:
+                stmt = stmt.where(or_(
+                    Kol.discord_account_id == discord_account_id,
+                    Kol.discord_account_id.is_(None),
+                ))
+            else:
+                stmt = stmt.where(Kol.discord_account_id == discord_account_id)
+            rows = (await db.execute(stmt.distinct())).scalars().all()
+        channels = [c for c in (rows or []) if c and _channel_last_msg_id.get(str(c))]
+        if not channels:
+            return
+
+        import httpx
+        headers = {"Authorization": token}
+        recovered = 0
+        async with httpx.AsyncClient(timeout=15) as hc:
+            for ch_id in channels:
+                last_id = _channel_last_msg_id[str(ch_id)]
+                try:
+                    resp = await hc.get(
+                        f"https://discord.com/api/v10/channels/{ch_id}/messages",
+                        params={"limit": 50, "after": last_id},
+                        headers=headers,
+                    )
+                    if resp.status_code != 200:
+                        logger.warning(f"[消息补偿] 频道 {ch_id} 拉取失败: HTTP {resp.status_code}")
+                        continue
+                    messages = resp.json() or []
+                    # REST 返回按时间倒序,重放需按时间正序
+                    for m in reversed(messages):
+                        await _handle_message(
+                            {"t": "MESSAGE_CREATE", "d": m},
+                            discord_account_id=discord_account_id,
+                            is_default_account=is_default_account,
+                        )
+                        recovered += 1
+                except Exception as e:
+                    logger.warning(f"[消息补偿] 频道 {ch_id} 处理异常: {e}")
+        if recovered > 0:
+            logger.info(f"[消息补偿] 已通过 REST 补齐断线期间消息 {recovered} 条(去重机制保证不重复入库)")
+    except Exception as e:
+        logger.opt(exception=True).warning(f"[消息补偿] 后台任务异常: {e}")
+
+
 def _is_duplicate_raw_text(kol_id: int, raw_text: str, now: datetime) -> bool:
     """5 分钟内同一 KOL 的相同原文只处理一次,避免重复入库/重复下单。"""
     normalized = (raw_text or "").strip()
@@ -291,6 +387,10 @@ async def _handle_message(
 
     logger.debug(f"[DEBUG-MSG] ch={channel_id} author={author_id} content_len={len(content)} content_preview={content[:80]}")
     _set_source_status(last_message_at=_iso_now(), last_channel_id=channel_id)
+
+    # ★ Fix(2026-08-25): 记录频道消息游标,供断线重连后消息补偿(REST backfill)使用
+    if message_id:
+        await _record_channel_msg_id(channel_id, message_id)
 
 
     # 图片附件
@@ -571,6 +671,73 @@ async def _handle_message(
             except Exception:
                 await db.rollback()
         return
+
+    # ★ 开仓参数继承(2026-08-24): 开仓信号缺SL/TP时,从同KOL同币种同方向
+    # 近24h信号继承真实参数。背景: LLM对不完整信号会编造参数
+    # (8/22 大镖客#2414"稳健的就挂一个2500"被编造SL=2425/TP三层,
+    #  正确应沿用同策略#2412的SL=2455,致#891多亏24 USDT)。
+    try:
+        _is_open_sig = bool(
+            parsed.symbol
+            and parsed.side in ("long", "short")
+            and any(a.startswith("open_") for a in (parsed.actions or []))
+            and not parsed.is_exit_signal
+            and not parsed.is_update_signal
+        )
+        if _is_open_sig and (parsed.stop_loss is None or not parsed.take_profits):
+            async with AsyncSessionLocal() as _inh_db:
+                _cand_rows = (
+                    await _inh_db.execute(
+                        select(Signal)
+                        .where(
+                            Signal.kol_id == _kol_id,
+                            Signal.symbol == parsed.symbol,
+                            Signal.side == parsed.side,
+                            Signal.created_at
+                            >= datetime.now(timezone.utc) - timedelta(hours=24),
+                        )
+                        .order_by(Signal.created_at.desc())
+                        .limit(20)
+                    )
+                ).scalars().all()
+            _src = None
+            for _row in _cand_rows:
+                _rp = _row.parsed or {}
+                _rsl = _rp.get("stop_loss")
+                _rtps = _rp.get("take_profits") or []
+                if _rsl and float(_rsl) > 0 and _rtps:
+                    _src = _row
+                    break
+            if _src is not None:
+                _rp = _src.parsed or {}
+                _inherited = []
+                if parsed.stop_loss is None:
+                    _isl = float(_rp["stop_loss"])
+                    _ep = parsed.entry_price or (
+                        (parsed.entry_prices or [None])[0]
+                        if parsed.entry_prices
+                        else None
+                    )
+                    _valid = True
+                    if _ep:
+                        _valid = (_isl < _ep) if parsed.side == "long" else (_isl > _ep)
+                    if _valid:
+                        parsed.stop_loss = _isl
+                        _inherited.append(f"SL={_isl:g}")
+                if not parsed.take_profits and _rp.get("take_profits"):
+                    try:
+                        parsed.take_profits = [float(x) for x in _rp["take_profits"]]
+                        _inherited.append(f"TP={parsed.take_profits}")
+                    except (TypeError, ValueError):
+                        pass
+                if _inherited:
+                    logger.info(
+                        f"[{_kol_name}] 开仓参数继承: 从信号#{_src.id}继承 "
+                        f"{','.join(_inherited)} "
+                        f"(当前: {parsed.symbol} {parsed.side} entry={parsed.entry_price})"
+                    )
+    except Exception as _inh_e:
+        logger.warning(f"开仓参数继承失败(不影响信号处理): {_inh_e}")
 
     # Phase 3: 创建信号记录并处理(使用新的 DB 会话)
     async with AsyncSessionLocal() as db:
@@ -1217,15 +1384,28 @@ async def _run_single_discord_account(account) -> None:
 
                             if t == "READY":
 
-
                                 session_id = d.get("session_id")
-
 
                                 await _mark_discord_account_connected(account_id)
                                 _set_source_status(connected=True, state="ready", session_id=session_id or "", last_connected_at=_iso_now())
                                 logger.info(f"Discord READY: account={account_label}({account_id}) session_id={session_id}")
                                 # SC-S1 修复: 收到 READY 确认连接成功后才重置失败计数
                                 consecutive_failures = 0
+                                # ★ Fix(2026-08-25): READY 意味着全新会话(RESUME 成功时收到的是
+                                # RESUMED 而非 READY),断线窗口内的消息 Discord 不会重放。
+                                # 恢复游标后启动 REST 消息补偿,补齐断线期间遗漏的 KOL 消息。
+                                try:
+                                    if not _channel_last_msg_id:
+                                        await _load_channel_msg_ids_from_redis()
+                                    bf_task = _aio.create_task(
+                                        _backfill_missed_messages(token, account_id, is_default_account)
+                                    )
+                                    _pending_tasks.add(bf_task)
+                                    bf_task.add_done_callback(
+                                        lambda tk: (_pending_tasks.discard(tk), _log_task_done(tk, "backfill"))
+                                    )
+                                except Exception as _bf_e:
+                                    logger.warning(f"[消息补偿] 调度失败: {_bf_e}")
                             # RESUMED 事件表示恢复成功,无需重新 IDENTIFY
 
 

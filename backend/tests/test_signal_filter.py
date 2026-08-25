@@ -43,12 +43,41 @@ def test_correct_price_minor_typo_auto_fix():
 
 
 def test_correct_price_severe_rejected():
+    # 方向不合理(追高做多)且偏离 33% > 30% → 拒绝信号(由调用方判断)
     p = _parsed(entry_price=150.0, entry_prices=[150.0])
-    # 偏离 40% > 30% → 拒绝信号(由调用方判断)
-    changed, log, rejected = correct_price(p, market_price=250.0)
+    changed, log, rejected = correct_price(p, market_price=100.0)
     assert not changed
     assert rejected
     assert "超过30%" in log
+
+
+def test_correct_price_deep_wait_order_allowed():
+    # 2026-08-24: 方向合理的挂单等待(long低买)不再纠偏为市价,走待触发单
+    # 场景来自 8/22 峰哥SOL事故: 75附近买入计划(市价94.91)曾被误纠偏
+    p = _parsed(entry_price=75.0, entry_prices=[75.0, 62.0, 50.0])
+    changed, log, rejected = correct_price(p, market_price=94.91)
+    assert not changed
+    assert not rejected
+    assert p.entry_price == 75.0
+    assert p.entry_prices == [75.0, 62.0, 50.0]
+
+
+def test_correct_price_deep_wait_short_allowed():
+    # short高卖(等反弹做空)同样放行
+    p = _parsed(side="short", entry_price=120.0, entry_prices=[120.0])
+    changed, log, rejected = correct_price(p, market_price=100.0)
+    assert not changed
+    assert not rejected
+    assert p.entry_price == 120.0
+
+
+def test_correct_price_magnitude_error_rejected():
+    # 数量级错误(偏离>90%)仍拒绝(如 LLM 把 74000 误解析为 5.0)
+    p = _parsed(entry_price=5.0, entry_prices=[5.0])
+    changed, log, rejected = correct_price(p, market_price=76884.1)
+    assert not changed
+    assert rejected
+    assert "超过90%" in log
 
 
 # ---------- 方向纠错 ----------

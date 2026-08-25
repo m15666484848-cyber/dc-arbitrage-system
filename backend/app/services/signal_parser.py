@@ -254,7 +254,7 @@ SHORT_WORDS = {
 EXIT_WORDS = {
     # 明确平仓词
     "出局", "离场", "平仓", "平多", "平空", "全平", "关闭",
-    "清仓", "减仓", "减半", "获利了结", "获利平仓",
+    "清仓", "减仓", "获利了结", "获利平仓",
     "微利出局", "保本出局", "全部止盈出局", "止盈出局", "触发止损出局",
     "全部出局", "全都出局", "止损出局", "打损出局", "成本出局",
     "止损就离场", "止损直接出局", "可以平仓", "可以出来",
@@ -388,7 +388,7 @@ FUZZY_EXIT_PATTERNS = [
     # 保本/止损离场
     r"(?:保本\s*(?:走|出|撤|离场|平)|止损\s*(?:离场|出场|走))",
     # 部分退出/减仓: 统一标记为退出类信号,后续可按仓位比例细化。
-    r"(?:减仓|减半|减掉|减去|减持|先减|部分止盈|部分平仓).{0,12}(?:一半|半仓|部分|[一二两三四五六七八九十\d]+成|[0-9]+%)?",
+    r"(?:减仓|减掉|减去|减持|先减|部分止盈|部分平仓).{0,12}(?:一半|半仓|部分|[一二两三四五六七八九十\d]+成|[0-9]+%)?",
     # "这单/这波 + 动词"
     r"这(?:单|波|次)\s*(?:走|出|跑|撤|平|收|完)",
     # "出来了/走出去了" 等完成态(不匹配"走出区间/走出趋势"等)
@@ -415,13 +415,28 @@ def _detect_cn_direction_priority(text: str) -> str:
     if not text:
         return ""
 
+    # ★ 显式"方向：X"字段最高优先级(2026-08-24): KOL格式化输出的方向标签
+    # 权威性高于散落文本方向词——"方向：空"曾被"高抛低吸"的"低吸"按位置
+    # 覆盖成long, 把LLM判对的short反转(#2801)。显式字段不受出现位置影响。
+    _explicit = re.search(
+        r"方向\s*[:：]\s*(做空|开空单|开空|空单|空|做多单|做多|多单|多|long|short)",
+        text,
+        re.IGNORECASE,
+    )
+    if _explicit:
+        _w = _explicit.group(1).lower()
+        if _w == "short" or "空" in _w:
+            return "short"
+        if _w == "long" or "多" in _w:
+            return "long"
+
     patterns: list[tuple[str, str]] = [
         ("short", r"反弹\s*(?:到|至)?\s*阻力\s*(?:位|附近)?\s*(?:空|做空|开空)?"),
         ("short", r"阻力\s*(?:位|附近)?.{0,8}(?:空|做空|开空)"),
         ("long", r"做多\s*(?:go\s*long)?"),
         ("short", r"做空\s*(?:go\s*short)?"),
         ("long", r"(?:方向\s*[:：]?\s*)?(?:做多|开多|进多|接多|挂多|多单|低多|低吸|逢低做多|逢低接|抄底)"),
-        ("short", r"(?:方向\s*[:：]?\s*)?(?:做空|开空|进空|接空|挂空|空单|高空|逢高做空|反弹空|阻力空)"),
+        ("short", r"(?:方向\s*[:：]?\s*)?(?:做空|开空|进空|接空|挂空|空单|高空|短空|逢高做空|反弹空|阻力空)"),
         ("long", r"1\s*倍\s*(?:多|做多)"),
         ("short", r"1\s*倍\s*(?:空|做空)"),
     ]
@@ -518,6 +533,15 @@ def check_exit_intent(text: str) -> tuple[bool, str]:
     3. 上下文启发式判断 (短消息 + 离场动词暗示)
     """
     low = text.lower()
+
+    # ★ 开仓计划保护: 止盈阶梯中的"全部止盈"是分批止盈计划(订单参数),不是立即平仓指令。
+    # 场景: "第二止盈 81000 全部止盈"(TP阶梯带价格) / "挂75388开多,再挂73888补仓"(完整开仓计划)。
+    # 真实平仓指令(如"做多单止盈70%,剩余仓位挂78888全部止盈")不含止损价定义和补仓结构,不受影响。
+    if re.search(r"第[一二三四五1-9]+\s*止盈\s*[\d.,]+\s*(?:全部|全都)\s*止盈", text) or (
+        re.search(r"(?:做多|做空|开多|开空|建仓|市价进|市价直接)", text)
+        and re.search(r"(?:补仓|加仓|再挂|挂\s*[\d.]+\s*(?:开|补|多|空))", text)
+    ):
+        return False, "开仓计划保护: 止盈阶梯/开仓计划优先于平仓检测"
 
     # Round 5: 已触及 TP 后让剩余仓位继续持有，是持仓描述/复盘，不是新的平仓指令。
     if re.search(r"(?i)\bi\s+hit\s+tp\s*1?\b.{0,80}\blet\s+the\s+rest\b", text):
@@ -627,6 +651,12 @@ UPDATE_KEYWORDS = [
     # Round 3: "止损，我改成X" / "止损改为X" / "止损位下移X点，重设为Y"
     rf"止损\s*[,，]\s*(?:我)?\s*(?:改成|改为|改到)",  # "止损，我改成0.506"
     rf"止损位\s*下移.*重设",  # "止损位下移500点，重设为63300"
+    # 2026-08-25: 成本保护/修改入场价(止损改入场价)是保本止损更新指令,
+    # 防止"空单浮盈1200点...止盈50%...修改入场79300做好成本保护"被持仓
+    # 收益汇报模式(HOLDING_INDICATORS)误拦为持仓继续消息。
+    rf"成本保护",
+    rf"修改入场",
+    rf"改到?入场价",
 ]
 
 
@@ -642,6 +672,98 @@ def check_update_intent(text: str) -> tuple[bool, str]:
         if re.search(pat, text, re.IGNORECASE):
             return True, f"显式更新关键词命中: {pat}"
     return False, ""
+
+
+# 2026-08-25: LLM判无效时的明确全平指令兜底模式。
+# 背景: 陈哥#2979"今日多单收益1500点,空单收益1200点,全部出局空仓休息"
+# 被LLM按日收益汇报判为无效,后续平仓补充检测因confidence<=0提前返回而
+# 跳过,导致全平指令漏执行(持仓#1029/1030过夜)。
+# 这些是无歧义的平仓指令词,收益汇报/叙事文本不会包含。
+STRONG_EXIT_ALL_PATTERNS = [
+    (r"全部出局|全都出局|全部平仓|全平|清仓", "全部平仓词"),
+    (r"全部离场|全部出掉|空仓休息", "空仓离场词"),
+]
+
+# 条件语境词: 出现时说明全平指令是假设/条件触发,不是当前指令。
+_STRONG_EXIT_CONDITIONAL_PATTERNS = [
+    r"如果|若|假如|一旦",
+    r"(?:跌破|突破|回踩|站稳).{0,12}(?:再|就|则)",
+]
+
+# 复盘/过去语境: "恭喜昨天全部出局"是对历史的庆祝,不是当前指令。
+_STRONG_EXIT_REVIEW_PATTERNS = [
+    r"恭喜",
+    r"昨[日夜天]|前天|上周|上礼拜|早已",
+]
+
+
+def check_strong_exit_all(text: str) -> tuple[bool, str]:
+    """LLM判无效时的兜底:识别明确无歧义的全平指令。
+
+    仅匹配"全部出局/全平/清仓/空仓休息"等强平仓词,且排除条件语境
+    ("如果跌破X就全部出局"是条件指令,不是当前平仓)和复盘语境
+    ("恭喜昨天全部出局"是历史回顾)。
+    返回 (是否全平, 命中原因)。
+    """
+    if not text:
+        return False, ""
+    for pat in _STRONG_EXIT_CONDITIONAL_PATTERNS:
+        if re.search(pat, text):
+            return False, ""
+    for pat in _STRONG_EXIT_REVIEW_PATTERNS:
+        if re.search(pat, text):
+            return False, ""
+    for pattern, reason in STRONG_EXIT_ALL_PATTERNS:
+        if re.search(pattern, text):
+            return True, reason
+    return False, ""
+
+
+# ---------- 更正消息识别 (2026-08-25) ----------
+# KOL 发出策略后常紧跟一条自我纠错("止损是X 打错了"),此类口语化更正易被
+# LLM 判为无效而忽略,导致持仓带着错误止损/止盈运行(#2996: SL 76950 应更正
+# 为 79650,被漏后持仓带错止损到收盘)。
+_CORRECTION_KEYWORD_RE = re.compile(r"打错了|打错|写错了|写错|更正|纠正|修正")
+# 更正价格优先取更正关键词后紧跟的数字("止损76950打错了，是79650" → 79650)
+_CORRECTION_AFTER_KW_RE = re.compile(
+    r"(?:打错了|打错|写错了|写错|更正|纠正|修正)[^\n0-9]{0,12}"
+    r"([0-9]{3,7}(?:\.[0-9]+)?)(?!分钟|小时|秒|天)"
+)
+# 兜底: 取止损/止盈字段后的价格(要求3位以上,跳过"15分钟"这类时间数字)
+_CORRECTION_SL_RE = re.compile(r"止损[^\n]{0,30}?([0-9]{3,7}(?:\.[0-9]+)?)(?!分钟|小时|秒|天)")
+_CORRECTION_TP_RE = re.compile(r"止盈[^\n]{0,30}?([0-9]{3,7}(?:\.[0-9]+)?)(?!分钟|小时|秒|天)")
+
+
+def check_correction_update(text: str) -> tuple[bool, str, float | None, list[float]]:
+    """识别"打错了/更正"类更正消息,提取更正后的止损/止盈价。
+
+    返回 (是否更正, 原因, stop_loss, take_profits)。仅当命中更正关键词
+    且能提取到价格时返回 True。
+    """
+    if not text or not _CORRECTION_KEYWORD_RE.search(text):
+        return False, "", None, []
+    sl_val: float | None = None
+    tp_vals: list[float] = []
+    after_kw = _CORRECTION_AFTER_KW_RE.search(text)
+    if after_kw:
+        _v = float(after_kw.group(1))
+        if "止盈" in text and "止损" not in text:
+            tp_vals = [_v]
+        else:
+            sl_val = _v
+    else:
+        m_sl = _CORRECTION_SL_RE.search(text)
+        if m_sl:
+            sl_val = float(m_sl.group(1))
+        tp_vals = [float(m.group(1)) for m in _CORRECTION_TP_RE.finditer(text)]
+    if sl_val is None and not tp_vals:
+        return False, "", None, []
+    parts: list[str] = []
+    if sl_val is not None:
+        parts.append(f"止损→{sl_val:g}")
+    if tp_vals:
+        parts.append("止盈→" + "/".join(f"{v:g}" for v in tp_vals))
+    return True, "更正" + ", ".join(parts), sl_val, tp_vals
 
 
 # ---------- 多动作识别 ----------
@@ -950,6 +1072,7 @@ def _extract_position_context_prices(text: str) -> list[float]:
     """从持仓说明中提取入场/分批价格,过滤批次数、杠杆、百分比等非价格数字。"""
     if not text:
         return []
+    text = _strip_time_expressions(text)
 
     # 持仓上下文里如果同时提到 TP/SL,只取其之前的价格作为入场/持仓成本。
     segment = re.split(r"(?:止盈|止损|\btp\b|\bsl\b|目标)", text, maxsplit=1, flags=re.IGNORECASE)[0]
@@ -1171,6 +1294,27 @@ def apply_actions_to_parsed(text: str, parsed: ParsedSignal) -> ParsedSignal:
 PRICE_RE = r"(\d+(?:[.,]\d+)?(?:[kK])?)"
 
 
+# ---------- 时间表达清洗 (2026-08-25) ----------
+# "止损是15分钟站稳79650"里的"15分钟"是K线周期而非价格,规则提取器曾把15当成
+# 止损价(#2996)。在价格提取入口统一清洗时间表达(中文单位/英文单位/15m、4h、
+# M15类周期写法)。保留k/w/u价格后缀;"日线/周线/月线/天价"等词不清洗。
+_TIME_EXPR_RE = re.compile(
+    r"(?:\d+(?:\.\d+)?\s*(?:个|個)?\s*(?:分钟|分鐘|小时|小時|秒钟|秒鐘|秒"
+    r"|天(?!线|線|价|價)|日(?!线|線)|周(?!线|線)|週(?!线|線)|星期|礼拜|禮拜"
+    r"|月(?!线|線)|年(?!线|線))"
+    r"|\d+(?:\.\d+)?\s*(?:min(?:ute)?s?|sec(?:ond)?s?|hour(?:s)?|day(?:s)?"
+    r"|week(?:s)?|month(?:s)?|year(?:s)?)"
+    r"|\d+(?:\.\d+)?\s*[mhdMH](?![a-zA-Z])"
+    r"|(?<![a-zA-Z\d])[MmHhDd]\d{1,2}(?![\d.]))"
+)
+
+
+def _strip_time_expressions(text: str) -> str:
+    if not text:
+        return text
+    return _TIME_EXPR_RE.sub(" ", text)
+
+
 def _to_float(s: str) -> float | None:
     """将字符串转为浮点数,支持"万"和"k/K"单位(如 6.41万 → 64100, 65k → 65000)。"""
     try:
@@ -1199,6 +1343,7 @@ def extract_cancel_order_prices(text: str) -> list[float]:
         return []
     if not _has_any_pattern(text, CANCEL_ORDER_PATTERNS):
         return []
+    text = _strip_time_expressions(text)
 
     # 如果存在止盈/止损描述,只取其之前的价格,避免误把 TP/SL 当成要撤的挂单点位。
     segment = re.split(r"(?:止盈|止损|\btp\b|\bsl\b)", text, maxsplit=1, flags=re.IGNORECASE)[0]
@@ -1221,6 +1366,7 @@ def _extract_prices_after(text: str, keywords: list[str]) -> list[float]:
     支持"万"单位(如 6.41万 → 64100)。
     支持"改为/调整"等变更动词(如 "止盈改为65000")。
     """
+    text = _strip_time_expressions(text)
     for kw in keywords:
         # 关键词后跟价格(支持 空格 / , ， | 分隔),并支持"万"单位
         # 允许关键词和价格之间有变更动词(改为/调成/调整为等)
@@ -1243,6 +1389,7 @@ def _extract_prices_after(text: str, keywords: list[str]) -> list[float]:
 
 
 def extract_take_profits(text: str) -> list[float]:
+    text = _strip_time_expressions(text)
     tps = []
 
     # 1. 多级 TP1/TP2/TP3 (英文格式,支持"万"单位)
@@ -1361,6 +1508,7 @@ def extract_take_profits(text: str) -> list[float]:
 
 
 def extract_stop_loss(text: str) -> float | None:
+    text = _strip_time_expressions(text)
     # 关键词列表
     keywords = [
         r"止损点位", r"止损位", r"止损价", r"止损线", r"止损", r"防守位", r"防守",
@@ -1443,6 +1591,7 @@ def extract_stop_loss(text: str) -> float | None:
 
 def extract_entry(text: str) -> tuple[float | None, list[float]]:
     """返回 (首个入场价, 分批入场价列表)。"""
+    text = _strip_time_expressions(text)
     # 关键词列表 (按优先级排序)
     # "点位" 放最后,避免优先匹配到 "止盈点位/止损点位" 的价格
     keywords = [
@@ -2559,6 +2708,52 @@ async def parse_message(
                 # (例如: KOL 发了一篇生活感悟,文中出现"卖了"被模糊模式误匹配)
                 if llm_parsed.confidence <= 0:
                     # 规则保底: 撤单已在上面统一处理,这里直接跳过补充检测
+                    # 2026-08-25: 例外——含"全部出局/全平/清仓/空仓休息"等明确
+                    # 全平指令时不能跳过(陈哥#2979收益汇报+全部出局被LLM判无效,
+                    # 导致全平漏执行)。这类强平仓词收益汇报/叙事文本不会出现。
+                    strong_exit, strong_exit_reason = check_strong_exit_all(combined_for_parse)
+                    if strong_exit:
+                        logger.info(
+                            f"[{kol_name}] LLM判无效但含明确全平指令({strong_exit_reason}),"
+                            f"改判为平仓信号"
+                        )
+                        llm_parsed = ParsedSignal(
+                            raw_text=combined,
+                            confidence=0.6,
+                            is_exit_signal=True,
+                            exit_reason=f"LLM判无效但含明确全平指令: {strong_exit_reason}",
+                            position_pct=100.0,
+                            ocr_text=ocr_text,
+                        )
+                        llm_parsed.actions = ["close_position"]
+                        llm_parsed.action = "close_position"
+                        llm_parsed.has_image = has_image
+                        return llm_parsed
+                    # ★ Fix(2026-08-25): 更正消息兜底 — "止损是X 打错了"类更正常被
+                    # LLM判无效直接忽略(#2996: 所长SL 76950→79650 更正被漏,持仓带
+                    # 错误止损运行)。命中更正关键词且能提取到止损/止盈价时,改判为
+                    # 止损止盈更新信号,作用于该KOL当前持仓。
+                    _is_corr, _corr_reason, _corr_sl, _corr_tps = check_correction_update(
+                        combined_for_parse
+                    )
+                    if _is_corr:
+                        logger.info(
+                            f"[{kol_name}] LLM判无效但为更正消息({_corr_reason}),"
+                            f"改判为止损止盈更新信号"
+                        )
+                        _corr_parsed = ParsedSignal(
+                            raw_text=combined,
+                            confidence=0.6,
+                            is_update_signal=True,
+                            update_reason=f"更正消息: {_corr_reason}",
+                            stop_loss=_corr_sl,
+                            take_profits=_corr_tps,
+                            ocr_text=ocr_text,
+                        )
+                        _corr_parsed.actions = ["update_tp_sl"]
+                        _corr_parsed.action = "update_tp_sl"
+                        _corr_parsed.has_image = has_image
+                        return _corr_parsed
                     logger.info(
                         f"[{kol_name}] LLM 判定为无效信号(confidence={llm_parsed.confidence:.2f}),"
                         f"跳过平仓/更新信号补充检测"
@@ -2659,6 +2854,27 @@ async def parse_message(
             and not parsed.is_update_signal
             and "cancel_order" not in parsed.actions
         ):
+            # ★ Fix(2026-08-25): 更正消息兜底(规则路径) — "止损是X 打错了"类口语化
+            # 更正(#2996)规则解析无能为力,补一次更正检测改判为更新信号。
+            _rc_hit, _rc_reason, _rc_sl, _rc_tps = check_correction_update(combined)
+            if _rc_hit:
+                logger.info(
+                    f"[{kol_name}] 规则兜底更正检测命中({_rc_reason}),"
+                    f"改判为止损止盈更新信号"
+                )
+                parsed = ParsedSignal(
+                    raw_text=combined,
+                    confidence=0.6,
+                    is_update_signal=True,
+                    update_reason=f"更正消息: {_rc_reason}",
+                    stop_loss=_rc_sl,
+                    take_profits=_rc_tps,
+                )
+                parsed.actions = ["update_tp_sl"]
+                parsed.action = "update_tp_sl"
+                parsed.has_image = has_image
+                parsed.ocr_text = ocr_text
+                return parsed
             parsed.confidence = 0.0
 
         parsed.ocr_text = ocr_text

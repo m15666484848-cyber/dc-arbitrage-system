@@ -18,6 +18,7 @@ class AlertLog(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, default="")
     success: Mapped[bool] = mapped_column(Boolean, default=False)
     response: Mapped[str] = mapped_column(Text, default="")
+    level: Mapped[str] = mapped_column(String(4), default="P1", server_default="P1", index=True)
 
 
 class AuditLog(Base, TimestampMixin):

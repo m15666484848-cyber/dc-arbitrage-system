@@ -26,8 +26,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import asyncio
+
 import copy
+
 import contextvars
+
+import re
 
 from typing import Any
 
@@ -112,8 +117,157 @@ def _failure_hint(err: Any) -> str:
     if "symbol" in lower or "交易对" in msg:
         return "交易对不存在或交易所不支持该合约"
     if "timeout" in lower or "timed out" in lower:
+
         return "交易所接口超时，未确认成交"
+
     return "交易所或系统返回错误，未确认成功前不会当作已成交"
+
+
+# ★ Fix(2026-08-25): 平仓失败自动重试(后台任务)
+# 背景: 8-24 08:51 客户9 ETH 平仓遇 OKX 50013 "Systems are busy", adapter 内部
+# 快速重试(~15s窗口)后放弃,close_position 失败后无任何后续动作,仓位一直滞留
+# 到 09:25 才被动由交易所止损单平掉。平仓是最不能失败的操作,临时性错误
+# (交易所繁忙/网络抖动/超时)应当自动按退避间隔后台重试,不能阻塞监控循环。
+_CLOSE_RETRY_DELAYS = [30, 90, 300]  # 秒: 3 轮退避,总覆盖约 7 分钟
+
+_close_retry_active: set[int] = set()  # 正在重试的 position_id,防止堆叠重复任务
+
+_close_retry_tasks: set = set()  # 持有任务引用防 GC
+
+
+def _is_retryable_close_error(err: Any) -> bool:
+    """平仓失败是否为临时性错误(值得后台自动重试)。
+
+    永久性错误(参数错误/余额不足/交易对不存在/仓位已不存在)重试无意义;
+    网络/超时/交易所繁忙类错误有重试价值。
+    """
+    try:
+
+        import ccxt
+
+        if isinstance(
+            err,
+            (
+                ccxt.NetworkError,
+                ccxt.ExchangeNotAvailable,
+                ccxt.DDoSProtection,
+                ccxt.RequestTimeout,
+            ),
+        ):
+            return True
+
+    except Exception:
+        pass
+
+    msg = str(err or "").lower()
+
+    if "50013" in msg or "systems are busy" in msg or "system busy" in msg:
+
+        return True  # OKX 系统繁忙
+
+    if "timeout" in msg or "timed out" in msg:
+
+        return True
+
+    if "5xx" in msg or "server error" in msg or "internal error" in msg:
+
+        return True
+
+    return False
+
+
+async def _close_retry_loop(position_id: int, qty: float | None) -> None:
+    """后台平仓重试协程:按 30s/90s/300s 退避重试 close_position。
+
+    - 独立 session,不占用/不阻塞调用方(监控循环/HTTP 请求)
+    - 幂等安全: 仓位已平或不存在时 close_position 直接返回并停止重试
+    - 并发安全: 与手动平仓/监控平仓竞争时由 close_position 内部行锁串行化
+    - 不可重试错误立即停止;全部失败后发告警通知
+    """
+    from app.core.database import AsyncSessionLocal
+
+    try:
+
+        for attempt, delay in enumerate(_CLOSE_RETRY_DELAYS):
+
+            await asyncio.sleep(delay)
+
+            try:
+
+                async with AsyncSessionLocal() as db:
+
+                    result = await close_position(db, position_id, qty)
+
+                if result.get("ok"):
+
+                    logger.info(
+
+                        f"[平仓自动重试] 成功 pos={position_id} 第{attempt + 1}次重试 "
+
+                        f"pnl={result.get('pnl')}"
+
+                    )
+
+                    return
+
+                reason = str(result.get("reason") or "")
+
+                if "已平仓" in reason or "不存在" in reason:
+
+                    logger.info(f"[平仓自动重试] 仓位已处理,停止重试 pos={position_id}: {reason}")
+
+                    return
+
+                logger.warning(f"[平仓自动重试] 第{attempt + 1}次未成功 pos={position_id}: {reason}")
+
+            except Exception as e:
+
+                if not _is_retryable_close_error(e):
+
+                    logger.error(f"[平仓自动重试] 遇不可重试错误,停止 pos={position_id}: {e}")
+
+                    return
+
+                logger.warning(f"[平仓自动重试] 第{attempt + 1}次失败 pos={position_id}: {e}")
+
+        logger.error(f"[平仓自动重试] 全部重试失败 pos={position_id},已发出告警")
+
+        try:
+
+            await notify(
+
+                "error", "平仓重试失败",
+
+                f"仓位ID: {position_id}\n"
+
+                f"执行结果: 自动重试 {_CLOSE_RETRY_DELAYS} 秒间隔共 {len(_CLOSE_RETRY_DELAYS)} 轮后仍未成功\n"
+
+                f"兜底措施: 交易所侧止损单仍有效;请人工检查该仓位",
+
+            )
+
+        except Exception as notify_e:
+
+            logger.warning(f"[平仓自动重试] 告警发送失败: {notify_e}")
+
+    finally:
+
+        _close_retry_active.discard(position_id)
+
+
+def _schedule_close_retry(position_id: int, qty: float | None, err: Exception) -> bool:
+    """close_position 因临时性错误失败后调度后台重试任务。返回是否已调度。"""
+    if position_id in _close_retry_active:
+        logger.info(f"[平仓自动重试] 已有重试任务在跑,跳过调度 pos={position_id}")
+        return False
+    _close_retry_active.add(position_id)
+    task = asyncio.create_task(_close_retry_loop(position_id, qty))
+    _close_retry_tasks.add(task)
+    task.add_done_callback(_close_retry_tasks.discard)
+    logger.warning(
+        f"[平仓自动重试] 已启动后台重试(退避 {_CLOSE_RETRY_DELAYS}s) pos={position_id} 错误: {err}"
+    )
+    return True
 
 
 def _order_success_lines(
@@ -428,12 +582,14 @@ async def _cancel_pending_orders_on_kol_exit(
     from app.models.pending_order import PendingOrder
 
     candidates = []
-    for m in _re.findall(r"(\d{3,6}(?:\.\d+)?)", signal.raw_text or ""):
+    # 2026-08-24: 放宽至1位数(支持低价币如SOL 77/XRP 2.4的止盈位匹配),
+    # 排除百分比; 范围0.5~500000, 0.5以下的档位数字(如"4-4-2档")自动过滤
+    for m in _re.findall(r"(\d{1,6}(?:\.\d+)?)(?![\d.]*%)", signal.raw_text or ""):
         try:
             v = float(m)
         except ValueError:
             continue
-        if 100 <= v <= 500000:
+        if 0.5 <= v <= 500000:
             candidates.append(v)
     if not candidates:
         return []
@@ -750,6 +906,40 @@ async def _process_exit_signal(
 
         return {"ok": False, "reason": "平仓失败"}
 
+    # ★ 联动取消同策略待触发单(2026-08-24): KOL宣布平仓离场,策略生命周期结束,
+    # 同品种/方向的挂单不应在价格回落后继续开仓(峰哥SOL 4-4-2场景:档1平仓后
+    # 档2/档3挂单残留,价格跌到62/50仍会买入已结束策略)。部分平仓不取消。
+    _position_pct_exit = float(getattr(parsed, "position_pct", 0.0) or 0.0)
+    if not (0 < _position_pct_exit < 100):
+        _exit_cancelled_ids = []
+        try:
+            from app.models.pending_order import PendingOrder as _PO
+            _exit_stmt = select(_PO).where(
+                _PO.customer_id == customer_id,
+                _PO.kol_id == signal.kol_id,
+                _PO.status == "pending",
+            )
+            if parsed.symbol:
+                _exit_stmt = _exit_stmt.where(_PO.symbol == parsed.symbol)
+            if parsed.side:
+                _exit_stmt = _exit_stmt.where(_PO.side == parsed.side)
+            _stale_pendings = (await db.execute(_exit_stmt)).scalars().all()
+            for _sp in _stale_pendings:
+                _sp.status = "cancelled"
+                _sp.cancel_reason = (
+                    f"KOL平仓离场(signal#{signal.id}),策略结束,待触发单联动取消"
+                )
+                _exit_cancelled_ids.append(_sp.id)
+            if _exit_cancelled_ids:
+                await db.commit()
+                logger.info(
+                    f"KOL平仓联动取消待触发单: signal={signal.id} kol={signal.kol_id} "
+                    f"cancelled={_exit_cancelled_ids}"
+                )
+        except Exception as _e:
+            await db.rollback()
+            logger.warning(f"平仓联动取消待触发单异常: {_e}")
+
     # 更新信号状态
 
     await _log_signal_status(
@@ -780,7 +970,7 @@ async def _process_exit_signal(
 
     await notify(
 
-        "tp_sl", "平仓成功",
+        "tp_sl", f"平仓完成 {total_pnl:+.2f} U",
 
         f"KOL: {kol_name}\n"
         f"交易所: {ex_acc.exchange.upper()}\n"
@@ -795,7 +985,7 @@ async def _process_exit_signal(
         customer_id,
 
         source_text=signal.raw_text,
-
+        level="P1", pnl=total_pnl,
     )
 
     return {
@@ -809,6 +999,26 @@ async def _process_exit_signal(
         "total_pnl": total_pnl,
 
     }
+
+# 2026-08-25: 成本保护/止损改入场价类更新指令(无显式价格)。
+# 陈哥#2970"中长线止盈50%做成本保护止损改入场价"LLM返回stop_loss=null,
+# _process_update_signal按"无TP/SL参数"忽略,保本止损漏执行需人工补。
+# 检测到该类指令时按各仓位自身入场价回填SL。
+_SL_TO_ENTRY_PATTERNS = [
+    r"成本保护",
+    r"(?:止损|SL).{0,12}(?:改|移|放|设|推).{0,8}(?:入场价|开仓价|入场|开仓|成本价|成本|保本)",
+    r"(?:修改|统一修改|改到?|移动).{0,6}入场(?:价)?",
+    r"(?:放开仓|放成本|推保护|打保护|做保护)",
+    r"保本(?:止损)?",
+]
+
+
+def _has_sl_to_entry_intent(raw_text: str) -> bool:
+    """检测"止损改入场价/成本保护"类保本指令(不含显式止损价)。"""
+    if not raw_text:
+        return False
+    return any(re.search(p, raw_text, re.IGNORECASE) for p in _SL_TO_ENTRY_PATTERNS)
+
 
 async def _process_update_signal(
 
@@ -850,7 +1060,13 @@ async def _process_update_signal(
 
     # 也不应算严重 rejected；记录为 ignored,等待后续明确止损/保本价。
 
-    if not parsed.take_profits and parsed.stop_loss is None:
+    # 2026-08-25: 例外——"成本保护/止损改入场价"类保本指令本身不含显式价格,
+
+    # 按各仓位自身入场价回填SL,不再当作无参数忽略。
+
+    _sl_to_entry = parsed.stop_loss is None and _has_sl_to_entry_intent(signal.raw_text or "")
+
+    if not parsed.take_profits and parsed.stop_loss is None and not _sl_to_entry:
 
         await _log_signal_status(
 
@@ -1048,15 +1264,27 @@ async def _process_update_signal(
 
                 p.tp_levels = new_tp_levels
 
-            if new_sl is not None:
+            # 成本保护改入场价: 无显式SL时按各子仓位自身入场价保本
+            eff_sl = new_sl
+            _entry_be = False
+            if eff_sl is None and _sl_to_entry and p.entry_price:
+                eff_sl = p.entry_price
+                _entry_be = True
 
-                p.sl = new_sl
+            if eff_sl is not None:
+
+                p.sl = eff_sl
+
+                if _entry_be:
+                    # 与自动成本保护口径一致: 标记保本已移动,保留原initial_sl,
+                    # 防止2%自动成本保护重复触发
+                    p.breakeven_moved = True
 
                 # initial_sl 仅在尚未触发成本保护时同步更新
 
-                if not p.breakeven_moved:
+                elif not p.breakeven_moved:
 
-                    p.initial_sl = new_sl
+                    p.initial_sl = eff_sl
 
             # S5修复: 标记tp_sl_source为kol,防止超时保护误覆盖KOL止盈止损
 
@@ -1072,13 +1300,22 @@ async def _process_update_signal(
 
                 m.tp_levels = new_tp_levels
 
-            if new_sl is not None:
+            m_eff_sl = new_sl
+            _m_entry_be = False
+            if m_eff_sl is None and _sl_to_entry and m.entry_price:
+                m_eff_sl = m.entry_price
+                _m_entry_be = True
 
-                m.sl = new_sl
+            if m_eff_sl is not None:
 
-                if not m.breakeven_moved:
+                m.sl = m_eff_sl
 
-                    m.initial_sl = new_sl
+                if _m_entry_be:
+                    m.breakeven_moved = True
+
+                elif not m.breakeven_moved:
+
+                    m.initial_sl = m_eff_sl
 
             # S5修复: 标记tp_sl_source为kol
 
@@ -2494,7 +2731,19 @@ async def process_signal(
             # 仅做多方向用价格几何判定(止盈位被现价甩在下方=价格已涨过目标);
             # 做空止盈位常在现价上方(挂高做空、止盈在入场下方,属正常形态),
             # 纯现价比较会误拦有效策略,做空场景由"止盈消息联动取消"覆盖
-            _expired = parsed.side == "long" and market_price >= _first_tp * 0.998
+            # 2026-08-24: 远端挂单等待(long入场价<市价85%)豁免——现价高于第一止盈
+            # 只说明挂单未触发(如75附近买入/市价95/止盈77),策略并未走完;
+            # 生命周期由待触发单7天过期自然管理,不在此拦截
+            _entry_far_wait = (
+                parsed.side == "long"
+                and parsed.entry_price
+                and parsed.entry_price < market_price * 0.85
+            )
+            _expired = (
+                not _entry_far_wait
+                and parsed.side == "long"
+                and market_price >= _first_tp * 0.998
+            )
             if _expired:
                 reason = (
                     f"止盈位已到达: {'做多' if parsed.side == 'long' else '做空'}第一止盈 "
@@ -2628,6 +2877,49 @@ async def process_signal(
         _num_entries = len(_entry_prices_batch)
 
         _split_notional = round(decision.notional_usdt / _num_entries, 2)
+
+        # ★ Fix(2026-08-25): 分批小单合并 — 每批金额低于交易所最小下单额时,
+        # 每笔都会被预校验/交易所拒绝(客户9 1000U/2批=500U < OKX最小778.92U,
+        # 陈哥/峰哥/飞扬 8/24 三单分批全拒)。此时相邻入场价合并为更少批数
+        # (合并价取组内均价,与等量分批成交的加权均价一致),保证每笔满足最小额。
+        _merge_note = ""
+        try:
+            from app.services.exchange_adapter import get_min_order_notional
+            _ex_batch, _ = await exchange_adapter.load_exchange(
+                db, customer_id, exchange, testnet,
+                exchange_account_id=exchange_account_id,
+            )
+            _batch_min_notional, _batch_min_reason = await get_min_order_notional(
+                _ex_batch, parsed.symbol
+            )
+        except Exception as _e:
+            _batch_min_notional = 0.0
+            logger.debug(f"分批合并: 最小下单额查询失败,按原分批执行: {_e}")
+
+        if (
+            _batch_min_notional > 0
+            and _split_notional < _batch_min_notional
+            and decision.notional_usdt >= _batch_min_notional
+        ):
+            _max_batches = int(decision.notional_usdt // _batch_min_notional)
+            if _max_batches >= 1 and _num_entries > _max_batches:
+                _orig_entries = _num_entries
+                _orig_split = _split_notional
+                _groups: list[list[float]] = [[] for _ in range(_max_batches)]
+                for _gi_idx, _gp in enumerate(_entry_prices_batch):
+                    _gidx = min(_gi_idx * _max_batches // _num_entries, _max_batches - 1)
+                    _groups[_gidx].append(_gp)
+                _entry_prices_batch = [
+                    round(sum(_g) / len(_g), 8) for _g in _groups if _g
+                ]
+                _num_entries = len(_entry_prices_batch)
+                _split_notional = round(decision.notional_usdt / _num_entries, 2)
+                _merge_note = f" (原{_orig_entries}点每笔{_orig_split}U低于最小额合并为{_num_entries}笔)"
+                logger.info(
+                    f"分批建仓小单合并: 原{_orig_entries}个入场点 → {_num_entries}笔, "
+                    f"每笔{_split_notional} USDT ≥ 最小{_batch_min_notional:.2f} USDT "
+                    f"({_batch_min_reason}), 合并后入场价={_entry_prices_batch}"
+                )
 
         _original_ep = fr.signal.entry_price
 
@@ -2809,7 +3101,7 @@ async def process_signal(
 
             db, signal, "ordered",
 
-            f"分批建仓: {_num_entries}个入场点, 成交{_filled}笔, 挂单{_pending}笔, 失败{_failed}笔",
+            f"分批建仓{_merge_note}: {_num_entries}个入场点, 成交{_filled}笔, 挂单{_pending}笔, 失败{_failed}笔",
 
             customer_id, fr.dedup_hash,
 
@@ -3517,6 +3809,49 @@ async def _verify_order_filled(ex, ex_order: dict, symbol: str) -> tuple[float, 
 
     return filled, filled_price
 
+async def _reject_opposite_net_position(ex, exchange: str, symbol: str, new_side: str) -> None:
+    """开仓前校验: 单向/净持仓模式下,交易所侧同币种已有反向净持仓时拒绝开仓。
+
+    背景(#466事故): bybit单向持仓模式同币种多空无法共存,反向开仓会被
+    净额抵消,形成"系统有仓、交易所无仓"的虚假持仓,后续止损/平仓会
+    殃及同账户其他KOL的仓位。OKX仅在明确 net_mode 时才需要校验
+    (long_short_mode 多空独立共存,不受净额抵消影响)。
+    交易所查询失败时放行,由对账兜底,不因查询故障漏单。
+    """
+    ex_name = (exchange or "").lower()
+    if ex_name not in ("bybit", "okx"):
+        return
+    if ex_name == "okx":
+        try:
+            cfg = await ex.private_get_account_config()
+            pos_mode = str(((cfg.get("data") or [{}])[0]).get("posMode") or "")
+        except Exception as e:
+            logger.debug(f"OKX持仓模式查询失败(放行) {symbol}: {str(e)[:150]}")
+            return
+        if pos_mode != "net_mode":
+            return
+    try:
+        positions = await ex.fetch_positions([symbol])
+    except Exception as e:
+        logger.debug(f"反向净持仓校验查询失败(放行) {symbol}: {str(e)[:150]}")
+        return
+    for p in positions or []:
+        pside = (p.get("side") or "").lower()
+        contracts = abs(float(p.get("contracts") or 0))
+        if contracts <= 1e-12 or pside not in ("long", "short") or pside == new_side:
+            continue
+        if ex_name == "bybit":
+            info = p.get("info") or {}
+            pidx = str(info.get("positionIdx", ""))
+            if pidx in ("1", "2"):
+                continue  # 双向持仓模式,反向仓位独立共存
+        raise ValueError(
+            f"开仓被拒: 交易所({ex_name.upper()}单向持仓模式)当前持有 {pside} 净仓位 "
+            f"{contracts} {symbol},同币种反向开仓会被净额抵消形成虚假持仓, "
+            f"已跳过本次 {new_side} 开仓(待反向仓位平仓后再跟)"
+        )
+
+
 async def _place_entry(
 
     db: AsyncSession,
@@ -3592,6 +3927,13 @@ async def _place_entry(
 
     try:
 
+        # ★ Fix(2026-08-24): 前置校验交易对存在性。之前在下单中途才抛 BadSymbol
+        # (SNDK/USDT 分批 batch=2/2 失败,batch=1 已成交造成仓位不完整)。
+        try:
+            ex.market(_normalize_symbol_for_exchange(ex, parsed.symbol))
+        except Exception:
+            raise ValueError(f"无效交易对: {exchange} 不存在 {parsed.symbol} 合约市场")
+
         entry_price = parsed.entry_price or market_price
 
         if not entry_price or entry_price <= 0:
@@ -3612,6 +3954,11 @@ async def _place_entry(
                 f"小单被拒: 下单{notional_usdt} USDT < 交易所最小限制 {min_notional_check:.2f} USDT ({min_reason_check})"
             )
 
+        # FIX-C(2026-08-24): 单向持仓模式反向净持仓校验。
+        # bybit单向模式同币种多空无法共存:交易所侧已有反向净持仓时,本次开仓
+        # 会被净额抵消,形成"系统有仓、交易所无仓"的虚假持仓(#466事故根因),
+        # 后续止损/平仓会殃及同账户其他KOL仓位。检测到即拒绝开仓。
+        await _reject_opposite_net_position(ex, exchange, parsed.symbol, parsed.side)
         order_side = "buy" if parsed.side == "long" else "sell"
 
         if master is None:
@@ -3693,6 +4040,28 @@ async def _place_entry(
             tp_levels_cfg = _build_tp_levels(parsed, defaults, real_entry, parsed.side)
 
             sl = parsed.stop_loss
+            # ★ 止损兜底(2026-08-24): SL缺失或方向错误时按成交价生成分层默认止损。
+            # 触发路径: 方向错误SL在pending创建/触发时被丢弃(置None);若不兜底,
+            # should_trigger_sl 与交易所止损均跳过 sl=None,持仓将无任何止损保护。
+            if real_entry and real_entry > 0 and not defaults.get("no_stop_loss"):
+                _sl_invalid = sl is None or (
+                    (parsed.side == "long" and sl >= real_entry)
+                    or (parsed.side == "short" and sl <= real_entry)
+                )
+                if _sl_invalid:
+                    _cfg_sl = defaults.get("default_sl_pct")
+                    if _cfg_sl is not None:
+                        _sl_pct = -abs(float(_cfg_sl))
+                    else:
+                        _sl_pct = signal_filter.get_tiered_config(parsed.symbol)["sl"]
+                    if parsed.side == "short":
+                        sl = round(real_entry * (1 - _sl_pct), 8)
+                    else:
+                        sl = round(real_entry * (1 + _sl_pct), 8)
+                    logger.info(
+                        f"止损兜底: {parsed.symbol} {parsed.side} entry={real_entry} "
+                        f"SL缺失/方向错误,按默认比例 {_sl_pct} 生成 {sl}"
+                    )
 
             master_position = Position(
 
@@ -3904,35 +4273,34 @@ async def _place_entry(
 
                 raise
 
+            # ★ Fix(2026-08-24): 先快照返回值再调用止损同步。
+            # sync_exchange_stop_for_position 失败路径会 rollback,使本会话所有
+            # ORM 对象过期(expire_on_commit=False 只豁免 commit);之后再访问
+            # order.id/sub_position.id 会触发同步刷新抛 MissingGreenlet,
+            # 导致已成交的进场被误判为下单失败,待触发单不取消而无限重试
+            # (2026-08-24 #226 事故: 交易所已成交,本地反复触发)。
+            _ret = {
+                "order_id": order.id,
+                "position_id": sub_position.id,
+                "order": _order_dict(order, kol_id),
+                "exchange_order_id": order.exchange_order_id,
+                "filled_qty": filled_qty,
+                "filled_price": real_entry,
+                "requested_entry_price": entry_price,
+                "exchange_account_id": exchange_account_id,
+                "entry_fee": entry_fee,
+            }
+            _sl_snapshot = sub_position.sl
+
             # 交易所侧止损即时挂单(市价开仓路径,不等15秒同步循环)
-            if sub_position.sl and sub_position.sl > 0:
+            if _sl_snapshot and _sl_snapshot > 0:
                 try:
                     from app.services import exchange_stop_manager as _exstop_mod
                     await _exstop_mod.sync_exchange_stop_for_position(db, sub_position)
                 except Exception as _exstop_e:
-                    logger.warning(f"交易所侧止损即时挂单失败 pos={sub_position.id}: {_exstop_e}")
+                    logger.warning(f"交易所侧止损即时挂单失败 pos={_ret['position_id']}: {_exstop_e}")
 
-            return {
-
-                "order_id": order.id,
-
-                "position_id": sub_position.id,
-
-                "order": _order_dict(order, kol_id),
-
-                "exchange_order_id": order.exchange_order_id,
-
-                "filled_qty": filled_qty,
-
-                "filled_price": real_entry,
-
-                "requested_entry_price": entry_price,
-
-                "exchange_account_id": exchange_account_id,
-
-                "entry_fee": entry_fee,
-
-            }
+            return _ret
 
         else:
 
@@ -4219,35 +4587,30 @@ async def _place_entry(
 
                 raise
 
+            # ★ Fix(2026-08-24): 同上分支,先快照返回值再调用止损同步,
+            # 防止其内部 rollback 过期 ORM 对象后访问属性抛 MissingGreenlet
+            _ret = {
+                "order_id": order.id,
+                "position_id": sub_position.id,
+                "order": _order_dict(order, kol_id),
+                "exchange_order_id": order.exchange_order_id,
+                "filled_qty": filled_qty,
+                "filled_price": sub_entry,
+                "requested_entry_price": entry_price,
+                "exchange_account_id": exchange_account_id,
+                "entry_fee": entry_fee,
+            }
+            _sl_snapshot = sub_position.sl
+
             # 交易所侧止损即时挂单(待触发开仓路径,不等15秒同步循环)
-            if sub_position.sl and sub_position.sl > 0:
+            if _sl_snapshot and _sl_snapshot > 0:
                 try:
                     from app.services import exchange_stop_manager as _exstop_mod
                     await _exstop_mod.sync_exchange_stop_for_position(db, sub_position)
                 except Exception as _exstop_e:
-                    logger.warning(f"交易所侧止损即时挂单失败 pos={sub_position.id}: {_exstop_e}")
+                    logger.warning(f"交易所侧止损即时挂单失败 pos={_ret['position_id']}: {_exstop_e}")
 
-            return {
-
-                "order_id": order.id,
-
-                "position_id": sub_position.id,
-
-                "order": _order_dict(order, kol_id),
-
-                "exchange_order_id": order.exchange_order_id,
-
-                "filled_qty": filled_qty,
-
-                "filled_price": sub_entry,
-
-                "requested_entry_price": entry_price,
-
-                "exchange_account_id": exchange_account_id,
-
-                "entry_fee": entry_fee,
-
-            }
+            return _ret
 
     finally:
 
@@ -4431,9 +4794,32 @@ async def _log_signal_status(
 
 ) -> None:
 
+    # OM-EXPIRE-FIX: 前序链路(如平仓失败rollback)可能已使 signal 属性过期,
+    # 同步读取 signal.note 会触发懒加载抛 MissingGreenlet,中断整个信号处理;
+    # 先探测属性,过期则用 db.refresh 异步重载,不再吞掉真实异常
+    try:
+        _ = signal.note
+    except Exception:
+        try:
+            await db.refresh(signal)
+        except Exception as refresh_e:
+            logger.warning(f"刷新过期信号对象失败,跳过状态记录: {refresh_e}")
+            return
+
     signal.status = status
 
-    signal.note = (signal.note + f"\n[客户{customer_id}] {note}").strip()
+    # OM-NOTE-ATOMIC(2026-08-24): 多客户并发处理同一信号时,各session读旧note
+    # 再整体写回,后提交者覆盖先提交者(8/22 信号#2365 客户1执行记录被客户20
+    # 的rejected记录覆盖)。改为数据库端原子拼接,消除丢失更新。
+    try:
+        await db.execute(
+            text(
+                "UPDATE signals SET note = COALESCE(note, '') || :addition "
+                "WHERE id = :sid"
+            ).bindparams(addition=f"\n[客户{customer_id}] {note}", sid=signal.id)
+        )
+    except Exception as _note_e:
+        logger.warning(f"信号note原子追加失败 signal={signal.id}: {_note_e}")
 
     if dedup_hash:
 
@@ -4501,6 +4887,9 @@ _GONE_ERROR_PATTERNS = (
     "position does not exist",  # okx 51023 / 通用
     "position not exist",
     "no open position",         # 通用兜底
+    # ★ Fix(2026-08-24): okx 51169 "you don't have any positions in this direction
+    # for this contract to reduce or close"(pos=981 平仓反复失败未触发幽灵核销)
+    "don't have any positions in this direction",
 )
 
 
@@ -4552,7 +4941,49 @@ async def _auto_close_ghost_position(
         )
     ).scalars().all()
     now = datetime.now(timezone.utc)
+
+    # ★ 盈亏回填(2026-08-24): 核销不再把盈亏记 0。
+    # 平仓价优先取交易所止损单实际成交均价(须在撤单前查询),取不到退回最终止损价。
+    close_price_map: dict[int, float | None] = {}
     for pos in targets:
+        est_price: float | None = None
+        if pos.exchange_stop_order_id:
+            try:
+                od = await ex.fetch_order(pos.exchange_stop_order_id, pos.symbol)
+                if od and str(od.get("status") or "").lower() in ("closed", "filled"):
+                    avg = od.get("average") or od.get("price")
+                    if avg and float(avg) > 0:
+                        est_price = float(avg)
+            except Exception as fetch_e:
+                logger.debug(f"[幽灵核销] 查止损单成交价失败 pos={pos.id}: {fetch_e}")
+        if not est_price and pos.sl and pos.sl > 0:
+            est_price = float(pos.sl)
+        close_price_map[pos.id] = est_price
+
+    def _ghost_est_pnl(pos: Position, close_price: float) -> float:
+        if (pos.side or "").lower() == "long":
+            return (close_price - pos.entry_price) * pos.qty
+        return (pos.entry_price - close_price) * pos.qty
+
+    def _ghost_close_trade(pos: Position, close_price: float, est_pnl: float) -> None:
+        db.add(Trade(
+            customer_id=pos.customer_id,
+            kol_id=pos.kol_id,
+            position_id=pos.id,
+            exchange_account_id=pos.exchange_account_id,
+            exchange=pos.exchange,
+            symbol=pos.symbol,
+            side="sell" if (pos.side or "").lower() == "long" else "buy",
+            qty=pos.qty,
+            price=close_price,
+            fee=0.0,
+            realized_pnl=est_pnl,
+            is_close=True,
+            tp_level=-1,
+            executed_at=now,
+        ))
+
+    async def _ghost_cancel_stop(pos: Position) -> None:
         if pos.exchange_stop_order_id:
             try:
                 await exchange_adapter.cancel_native_stop_loss_order(
@@ -4560,14 +4991,42 @@ async def _auto_close_ghost_position(
                 )
             except Exception as cancel_e:
                 logger.warning(f"[幽灵核销] 撤遗留止损单失败 pos={pos.id}: {cancel_e}")
+
+    children = [p for p in targets if p.parent_id is not None]
+    master_pos = next((p for p in targets if p.parent_id is None), None)
+    child_pnl_sum = 0.0
+    for pos in children:
+        await _ghost_cancel_stop(pos)
+        est_price = close_price_map.get(pos.id)
+        est_pnl = _ghost_est_pnl(pos, est_price) if est_price and pos.qty > 0 else 0.0
+        pos.realized_pnl += est_pnl
+        child_pnl_sum += est_pnl
+        if est_price and pos.qty > 0:
+            _ghost_close_trade(pos, est_price, est_pnl)
         pos.status = "closed"
         pos.qty = 0
         pos.closed_at = now
+    est_pnl_total = child_pnl_sum
+    if master_pos is not None:
+        await _ghost_cancel_stop(master_pos)
+        if children:
+            master_est = child_pnl_sum  # master 只镜像子仓盈亏,保持 sum 不变式
+        else:
+            est_price = close_price_map.get(master_pos.id)
+            master_est = _ghost_est_pnl(master_pos, est_price) if est_price and master_pos.qty > 0 else 0.0
+            if est_price and master_pos.qty > 0:
+                _ghost_close_trade(master_pos, est_price, master_est)
+            est_pnl_total = master_est
+        master_pos.realized_pnl += master_est
+        master_pos.status = "closed"
+        master_pos.qty = 0
+        master_pos.closed_at = now
     await db.commit()
     ids = [p.id for p in targets]
     logger.warning(
         f"[幽灵核销] pos={position.id} {position.symbol} {position.side} 平仓报'仓位不存在',"
-        f"实时核实交易所侧无持仓,已自动核销 {ids}(可能已被交易所侧止损单平掉或手动平仓)"
+        f"实时核实交易所侧无持仓,已自动核销 {ids},估算回填盈亏 {est_pnl_total:+.2f} USDT"
+        f"(可能已被交易所侧止损单平掉或手动平仓)"
     )
     try:
         await notify(
@@ -4577,12 +5036,224 @@ async def _auto_close_ghost_position(
             f"仓位ID: {', '.join(str(i) for i in ids)}\n"
             f"触发原因: 平仓时交易所返回'仓位不存在',实时核实交易所侧已无该持仓,\n"
             f"系统已自动核销并停止重试平仓\n"
+            f"估算回填盈亏: {est_pnl_total:+.2f} USDT(按止损触发价估算)\n"
             f"原始错误: {err_text[:200]}",
             position.customer_id,
         )
     except Exception as e:
         logger.opt(exception=True).warning(f"Unexpected error: {e}")
     return {"ok": True, "ghost_closed": True, "position_id": position.id, "closed_ids": ids}
+
+
+async def close_position_by_stop_fill(
+    db: AsyncSession,
+    position_id: int,
+    stop_order_id: str,
+    fill_price: float | None,
+    fill_qty: float | None = None,
+    close_fee: float | None = None,
+) -> dict:
+    """交易所侧止损单已成交后的本地记账平仓(不再向交易所发单)。
+
+    exchange_stop_manager 同步循环检测到 reduceOnly 条件止损单已触发成交时
+    调用。记账口径与 close_position 完全一致(Order/Trade/主子仓同步/策略
+    结果/邀请佣金/dedup清理/通知),区别仅在于成交已由交易所完成:
+    fill_price 优先取止损单实际成交均价,取不到时退回止损触发价。
+    """
+    from app.services.signal_filter import compute_full_strategy_hash
+
+    position = (await db.execute(
+        select(Position).where(Position.id == position_id).with_for_update()
+    )).scalar_one_or_none()
+    if not position or position.status != "open":
+        return {"ok": False, "reason": "持仓不存在或已平仓"}
+
+    from app.services.position_manager import _add_closing_position, _remove_closing_position
+    if not await _add_closing_position(position_id):
+        return {"ok": False, "reason": "已有平仓进行中"}
+    _locked = True
+    try:
+        master = None
+        if position.parent_id is not None:
+            master = (await db.execute(
+                select(Position).where(Position.id == position.parent_id).with_for_update()
+            )).scalar_one_or_none()
+
+        filled = float(fill_qty) if fill_qty and float(fill_qty) > 0 else float(position.qty or 0)
+        filled = min(filled, float(position.qty or 0))
+        if filled <= 0:
+            return {"ok": False, "reason": "平仓数量为0"}
+
+        close_px = float(fill_price) if fill_price and float(fill_price) > 0 else float(position.sl or 0)
+        if not close_px or close_px <= 0:
+            close_px = float(position.entry_price or 0)
+        fee = float(close_fee) if close_fee is not None else 0.0
+
+        if position.initial_qty and position.initial_qty > 0:
+            opening_fee_portion = (position.entry_fee or 0) * (filled / position.initial_qty)
+        else:
+            opening_fee_portion = 0.0
+        if position.side == "long":
+            gross_pnl = (close_px - position.entry_price) * filled
+        else:
+            gross_pnl = (position.entry_price - close_px) * filled
+        pnl = gross_pnl - opening_fee_portion - fee
+
+        _dedup_keys_to_clear: list[str] = []
+        now = _utcnow()
+        order = Order(
+            customer_id=position.customer_id,
+            kol_id=position.kol_id,
+            position_id=position.id,
+            exchange_account_id=position.exchange_account_id,
+            exchange=position.exchange,
+            symbol=position.symbol,
+            side="sell" if position.side == "long" else "buy",
+            type="market",
+            qty=filled,
+            price=close_px,
+            notional_usdt=close_px * filled,
+            leverage=position.leverage,
+            status="filled",
+            exchange_order_id=str(stop_order_id or ""),
+            filled_qty=filled,
+            filled_price=close_px,
+            filled_at=now,
+            created_at=now,
+            tp_level=-1,
+        )
+        db.add(order)
+        await db.flush()
+        trade = Trade(
+            customer_id=position.customer_id,
+            kol_id=position.kol_id,
+            position_id=position.id,
+            order_id=order.id,
+            exchange_account_id=position.exchange_account_id,
+            exchange=position.exchange,
+            symbol=position.symbol,
+            side=order.side,
+            qty=filled,
+            price=close_px,
+            fee=fee,
+            realized_pnl=pnl,
+            is_close=True,
+            tp_level=-1,
+            executed_at=now,
+        )
+        db.add(trade)
+
+        position.qty -= filled
+        position.realized_pnl += pnl
+        position.exchange_stop_order_id = ""
+        position.exchange_stop_qty = 0.0
+        position.exchange_stop_price = 0.0
+        if position.qty <= 0.0000001:
+            position.qty = 0
+            position.status = "closed"
+            position.closed_at = now
+            try:
+                from app.core.redis import get_redis as _get_redis
+                _redis = await _get_redis()
+                _tp_prices = [float(tp.get("price", 0)) for tp in (position.tp_levels or []) if tp.get("price")]
+                _full_hash = compute_full_strategy_hash(
+                    position.kol_id, position.symbol, position.side,
+                    position.entry_price, _tp_prices,
+                )
+                if _full_hash:
+                    _dedup_keys_to_clear.append(f"dedup_long:{_full_hash}")
+                    if position.exchange_account_id:
+                        _dedup_keys_to_clear.append(
+                            f"dedup_long:acct:{position.exchange_account_id}:{_full_hash}"
+                        )
+            except Exception as _e:
+                logger.warning(f"dedup key收集失败(不影响平仓记账): {_e}")
+            try:
+                if position.parent_id is not None and position.kol_id:
+                    strat, _ = await _get_cached_strategy_for_follow(db, position.customer_id, position.kol_id)
+                    if strat:
+                        notional = (position.entry_price or 0) * (position.initial_qty or 0)
+                        await strategy_engine.record_trade_result(
+                            db, strat.id,
+                            won=position.realized_pnl > 0,
+                            notional_usdt=notional,
+                            break_even=abs(position.realized_pnl) < 0.01,
+                            kol_id=position.kol_id,
+                            symbol=position.symbol,
+                        )
+                        _invalidate_strategy_cache(position.customer_id, position.kol_id)
+            except Exception as strat_e:
+                logger.warning(f"策略结果记录失败(不影响平仓记账): {strat_e}")
+
+        if master is not None and master.status == "open":
+            master.qty -= filled
+            master.realized_pnl += pnl
+            if master.qty <= 0.0000001:
+                master.qty = 0
+                master.status = "closed"
+                master.closed_at = now
+
+        try:
+            await _create_referral_commission(
+                db, position.customer_id, trade.id, trade.realized_pnl, position.symbol
+            )
+        except Exception as comm_e:
+            logger.warning(f"邀请佣金结算失败(不影响平仓记账): {comm_e}")
+
+        try:
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            logger.error(f"[止损单成交记账] 数据库提交失败 pos={position_id}: {e}")
+            raise
+
+        if _dedup_keys_to_clear:
+            try:
+                from app.core.redis import get_redis as _get_redis
+                _redis = await _get_redis()
+                if _redis:
+                    for _key in _dedup_keys_to_clear:
+                        await _redis.delete(_key)
+            except Exception as _e:
+                logger.warning(f"post-commit dedup clear failed: {_e}")
+
+        try:
+            await bus.publish_customer(
+                position.customer_id, "position",
+                {"id": position.id, "status": position.status, "pnl": pnl},
+            )
+        except Exception:
+            pass
+        try:
+            _pos_src = await _get_position_source_text(db, position.id, position.kol_id, position.symbol)
+            _pos_kol_name = await _get_kol_name(db, position.kol_id)
+            await notify(
+                "tp_sl", f"止损平仓 {pnl:+.2f} U",
+                f"品种: {position.symbol}\n方向: {position.side}\n"
+                f"交易所: {position.exchange.upper()}\n"
+                f"API账户: #{position.exchange_account_id or '未知'}\n"
+                f"仓位ID: {position.id}\n止损单ID: {stop_order_id}\n"
+                f"入场价: {_fmt_value(position.entry_price)}\n止损触发价: {_fmt_value(position.sl)}\n"
+                f"成交平仓价: {_fmt_value(close_px)}\n平仓数量: {_fmt_value(filled)}\n"
+                f"净盈亏: {pnl:.2f} USDT\n"
+                f"说明: 交易所侧reduceOnly条件止损单已成交,系统按成交均价完成记账",
+                position.customer_id,
+                source_text=_pos_src,
+                kol_name=_pos_kol_name,
+        pnl=pnl,
+    )
+        except Exception as e:
+            logger.opt(exception=True).warning(f"[止损单成交记账] 通知发送失败: {e}")
+
+        logger.info(
+            f"[止损单成交记账] pos={position_id} {position.symbol} {position.side} "
+            f"qty={filled} price={close_px} pnl={pnl:+.2f} stopId={stop_order_id}"
+        )
+        return {"ok": True, "pnl": pnl, "status": position.status,
+                "filled_qty": filled, "filled_price": close_px}
+    finally:
+        if _locked:
+            await _remove_closing_position(position_id)
 
 
 async def close_position(db: AsyncSession, position_id: int, qty: float | None = None) -> dict:
@@ -4604,6 +5275,9 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
     # OM-BUG4: 函数级初始化,分批部分平仓(qty>0)不走完全平仓分支,
     # 否则commit后清理段引用未赋值变量导致 UnboundLocalError 平仓失败
     _dedup_keys_to_clear: list[str] = []
+    # OM-SCOPE-FIX: 提前导入 compute_full_strategy_hash,
+    # 避免分散在各分支导致部分路径 NameError(罕见但致命)
+    from app.services.signal_filter import compute_full_strategy_hash
 
     # 行级锁:防止并发平仓(手动+止盈止损同时触发)导致超卖/重复结算
 
@@ -4688,6 +5362,17 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                     _dust_reason = (
                         f"名义价值{close_qty * _last_price:.2f}USDT < 最小下单额{_cost_min}USDT"
                     )
+            # OM-DUST-PRICE: amount分支未取行情,_last_price=0 会把 Trade 记成
+            # price=0、盈亏=-(入场价*数量) 的虚假亏损;核销前补取最新价,
+            # 行情不可用退回入场价(盈亏记0,中性)。
+            if _dust_writeoff and _last_price <= 0:
+                try:
+                    _tk = await ex.fetch_ticker(exchange_position.symbol)
+                    _last_price = float(_tk.get("last") or _tk.get("close") or 0)
+                except Exception as _lp_e:
+                    logger.debug(f"灰尘核销取行情失败,退回入场价 pos={position_id}: {_lp_e}")
+                if _last_price <= 0:
+                    _last_price = float(position.entry_price or 0)
         except Exception as _dust_e:
             logger.debug(f"灰尘仓位检查失败,按正常平仓处理 pos={position_id}: {_dust_e}")
 
@@ -4704,6 +5389,43 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                 f"qty={close_qty} price={fill_price} 原因: {_dust_reason}",
             )
         else:
+            # FIX: 有交易所止损单的持仓,平仓前先确认交易所侧还有持仓。
+            # 防止交易所止损单已触发并平掉仓位后,DB侧止损监控/手动平仓
+            # 再次发 reduce-only 平仓单产生无效请求和错误日志。
+            if (
+                position.exchange_stop_order_id
+                and (position.exchange or "").lower() == "bybit"
+            ):
+                try:
+                    _pre_positions = await ex.fetch_positions([exchange_position.symbol])
+                    _has_pos = False
+                    for _p in _pre_positions:
+                        _pside = (_p.get("side") or "").lower()
+                        _contracts = abs(float(_p.get("contracts") or 0))
+                        if _contracts > 0 and (
+                            _pside == exchange_position.side.lower()
+                            or _pside in ("long", "short")  # 双向模式精确匹配
+                        ):
+                            # 单向模式下 side 可能为 None/empty,只看数量>0且符号匹配
+                            if _pside == exchange_position.side.lower():
+                                _has_pos = True
+                                break
+                    if not _has_pos:
+                        # 交易所侧已无持仓,直接触发幽灵仓位核销
+                        from app.services.exchange_adapter import fetch_positions as _fp  # noqa
+                        raise ValueError(
+                            "current position is zero (pre-check: exchange stop already filled)"
+                        )
+                except Exception as _pre_e:
+                    # 检查失败不阻断正常流程,继续走原下单逻辑
+                    if "position is zero" not in str(_pre_e).lower():
+                        logger.debug(
+                            f"平仓前持仓检查失败,继续原流程 pos={position_id}: {_pre_e}"
+                        )
+                    else:
+                        # 持仓确认为0,抛出异常让下方幽灵核销逻辑处理
+                        raise
+
             ex_order = await exchange_adapter.close_position_market(
                 ex, exchange_position.symbol, exchange_position.side, close_qty
             )
@@ -5150,6 +5872,15 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
         except Exception as _exstop_e:
             logger.warning(f"平仓后交易所侧止损处理失败 pos={position.id}: {_exstop_e}")
 
+        # ★ Fix(2026-08-24): 止损善后内部失败路径会 rollback 使 ORM 对象过期,
+        # refresh 恢复,防止下方成功路径读属性抛 MissingGreenlet,
+        # 把已成功的平仓误判为失败并发出假告警
+        try:
+            await db.refresh(position)
+            await db.refresh(order)
+        except Exception:
+            pass
+
         # OM-BUG4修复: commit成功后清理Redis去重key,防止回滚后重复入场
         if _dedup_keys_to_clear:
             try:
@@ -5306,7 +6037,19 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
 
         logger.opt(exception=True).error(f"平仓失败 pos={position_id} qty={close_qty} symbol={_pos_symbol} side={_pos_side} customer={_pos_customer_id}: {e}")
 
+        # ★ Fix(2026-08-25): 临时性错误(交易所繁忙/网络/超时)自动启动后台重试,
+        # 避免仓位滞留至止损价才被动平掉;重试不阻塞当前调用方。
+        _retry_scheduled = False
+        if _is_retryable_close_error(e):
+            _retry_scheduled = _schedule_close_retry(position_id, close_qty, e)
+
         try:
+
+            _retry_line = (
+                f"后续处理: 系统已启动自动重试(30/90/300秒),成功后会另行通知\n"
+                if _retry_scheduled
+                else "后续处理: 非临时性错误,需人工处理\n"
+            )
 
             await notify(
 
@@ -5319,6 +6062,7 @@ async def close_position(db: AsyncSession, position_id: int, qty: float | None =
                 f"系统剩余数量: {_fmt_value(_pos_qty_left)}\n"
                 f"本次请求平仓数量: {_fmt_value(close_qty)}\n"
                 f"执行结果: 未确认平仓成功,系统不会改成已平仓\n"
+                f"{_retry_line}"
                 f"失败原因: {e}\n"
                 f"判断依据: {_failure_hint(e)}",
 
@@ -5403,7 +6147,7 @@ async def delete_order(db: AsyncSession, order_id: int, customer_id: int) -> dic
 
     return {"ok": True}
 
-async def apply_cost_protection(db: AsyncSession, position: Position) -> bool:
+async def apply_cost_protection(db: AsyncSession, position: Position, ref_price: float | None = None) -> bool:
 
     """达到 TP1 或 +2% 利润后,止损上移至入场价+缓冲(成本保护)。返回是否更新。"""
 
@@ -5457,6 +6201,17 @@ async def apply_cost_protection(db: AsyncSession, position: Position) -> bool:
                 buffer = float(strat.params.get("cost_protection_buffer", 0.02))
 
     new_sl = position.entry_price * (1 + buffer) if position.side == "long" else position.entry_price * (1 - buffer)
+
+    # ★ Fix(2026-08-25): 成本保护止损必须落在回撤触发一侧(多头低于现价/空头
+    # 高于现价)。当buffer超出当前浮盈(如TP1仅+0.6%而buffer=2%)时,原公式
+    # 会把空头止损压到现价下方——交易所触发方向反转成止盈单,而原亏损侧止损
+    # 已被替换,仓位彻底失去亏损保护。用参考价(止盈触发价/现价)clamp。
+    _ref = float(ref_price or 0)
+    if _ref > 0:
+        if position.side == "long":
+            new_sl = min(new_sl, _ref * (1 - 0.001))
+        else:
+            new_sl = max(new_sl, _ref * (1 + 0.001))
 
     position.sl = new_sl
 
@@ -5864,7 +6619,7 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
 
                 for sib, _, _ in hit_siblings:
 
-                    await apply_cost_protection(db, sib)
+                    await apply_cost_protection(db, sib, price)
 
             await bus.publish_customer(master.customer_id, "position", {
 
@@ -5882,7 +6637,7 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
 
             await notify(
 
-                "tp_sl", f"第{level}止盈达成(聚合)",
+                "tp_sl", f"第{level}止盈达成 {actual_total_pnl:+.2f} U",
 
                 f"品种: {master.symbol}\n方向: {master.side}\n平仓价: {fill_price}\n聚合数量: {filled}\n"
 
@@ -5893,8 +6648,8 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
                 source_text=_tp_agg_src,
 
                 kol_name=_tp_agg_kol,
-
-            )
+        pnl=actual_total_pnl,
+    )
 
             result["pnl"] = actual_total_pnl  # 用实际值覆盖估算值
 
@@ -5943,7 +6698,7 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
 
             if level == 1:
 
-                await apply_cost_protection(db, position)
+                await apply_cost_protection(db, position, price)
 
             try:
 
@@ -5988,7 +6743,7 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
 
             await notify(
 
-                "tp_sl", f"第{level}止盈达成",
+                "tp_sl", f"第{level}止盈达成 {result.get('pnl', 0):+.2f} U",
 
                 f"品种: {position.symbol}\n平仓比例: {target.get('pct')}\n平仓价: {price}\n盈亏: {result.get('pnl', 0):.2f}",
 
@@ -5997,8 +6752,8 @@ async def close_at_tp_level(db: AsyncSession, position: Position, level: int, pr
                 source_text=_tp_src,
 
                 kol_name=_tp_kol,
-
-            )
+        pnl=result.get('pnl', 0),
+    )
 
         else:
 

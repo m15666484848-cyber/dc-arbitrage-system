@@ -51,40 +51,64 @@ def _feishu_sign(secret: str) -> tuple[str, str]:
     return timestamp, sign
 
 
-def _alert_style(event: str, title: str) -> dict:
-    """根据事件和标题返回飞书卡片样式。"""
+def _infer_level(event: str, title: str) -> str:
+    """告警级别自动推断。
+
+    P0=需立即处理(下单/平仓失败、欠费、急停) 红
+    P1=交易动作与风控状态(开平仓、止盈止损触发、连亏暂停) 推送
+    P2=信息性事件(挂单创建/过期、止盈止损更新、防重复跳过、业务拒绝) 静默落库+日报汇总
+    """
     t = title or ""
-    lower = t.lower()
+    if event == "error":
+        if "已拒绝" in t:
+            return "P2"  # 业务拒绝(策略过期/风控拦截/参数不符)属正常流程
+        return "P0"
+    if event == "risk":
+        return "P0" if "急停" in t else "P1"
+    if event == "auth_expire":
+        return "P1"
+    if event == "correct":
+        return "P2"
+    if event == "warning":
+        return "P1" if "余额" in t else "P2"
+    if event == "tp_sl":
+        quiet_kw = ("平仓成交", "止盈止损已更新", "成本保护", "追踪止损", "超72小时")
+        return "P2" if any(k in t for k in quiet_kw) else "P1"
+    if event == "order":
+        quiet_kw = ("待触发", "已过期", "已撤销")
+        return "P2" if any(k in t for k in quiet_kw) else "P1"
+    return "P1"
 
-    # 先按标题语义判断(更精确)
-    if "止盈" in t or "盈利" in t or "profit" in lower:
-        return {"header_bg": "yellow", "header_title": "💰 止盈平仓", "icon": "🎉"}
-    if "止损" in t and ("触发" in t or "平仓" in t or "亏损" in t):
-        return {"header_bg": "red", "header_title": "⚠️ 止损平仓", "icon": "💥"}
-    if "开仓" in t or "建仓" in t or "跟单下单" in t:
-        return {"header_bg": "green", "header_title": "🟢 开仓信号", "icon": "📈"}
-    if "平仓" in t:
-        return {"header_bg": "blue", "header_title": "🔵 平仓信号", "icon": "📉"}
-    if "风险" in t or "警告" in t or "告警" in t or "跳过" in t or "超限" in t:
-        return {"header_bg": "orange", "header_title": "⚠️ 风控警告", "icon": "🚨"}
-    if "错误" in t or "失败" in t or "异常" in t or "熔断" in t:
-        return {"header_bg": "red", "header_title": "❌ 系统错误", "icon": "⛔"}
-    if "纠错" in t or "修正" in t:
-        return {"header_bg": "blue", "header_title": "🔧 信号纠错", "icon": "✏️"}
-    if "挂单" in t or "等待" in t:
-        return {"header_bg": "green", "header_title": "🟢 挂单等待", "icon": "⏳"}
 
-    # 再按事件类型兜底
-    event_map = {
-        "signal": {"header_bg": "blue", "header_title": "📩 信号通知", "icon": "📩"},
-        "order": {"header_bg": "green", "header_title": "🟢 订单执行", "icon": "📈"},
-        "tp_sl": {"header_bg": "yellow", "header_title": "💰 止盈止损", "icon": "🎯"},
-        "correct": {"header_bg": "blue", "header_title": "🔧 信号纠错", "icon": "✏️"},
-        "risk": {"header_bg": "orange", "header_title": "⚠️ 风控警告", "icon": "🚨"},
-        "auth_expire": {"header_bg": "grey", "header_title": "🔑 授权到期", "icon": "🔔"},
-        "error": {"header_bg": "red", "header_title": "❌ 系统错误", "icon": "⛔"},
-    }
-    return event_map.get(event, {"header_bg": "grey", "header_title": "🔔 系统通知", "icon": "🔔"})
+def _alert_style(event: str, title: str, level: str = "P1", pnl: float | None = None) -> dict:
+    """按级别+动作返回飞书卡片样式(表头直接用动作标题,颜色即语义)。"""
+    t = title or ""
+    if level == "P0":
+        return {"header_bg": "red", "icon": "⛔"}
+    if level == "P2":
+        return {"header_bg": "grey", "icon": "📝"}
+    if event == "risk":
+        return {"header_bg": "orange", "icon": "🚨"}
+    if event == "auth_expire":
+        return {"header_bg": "grey", "icon": "🔑"}
+    if event == "warning":
+        return {"header_bg": "orange", "icon": "⚠️"}
+    open_kw = ("开仓", "建仓", "进场", "开多", "开空")
+    if any(k in t for k in open_kw):
+        return {"header_bg": "green", "icon": "🟢"}
+    if pnl is not None:
+        if pnl > 0:
+            return {"header_bg": "green", "icon": "✅"}
+        if pnl < 0:
+            return {"header_bg": "red", "icon": "🔻"}
+        return {"header_bg": "blue", "icon": "➖"}
+    if "止损" in t or "亏损" in t:
+        return {"header_bg": "red", "icon": "🔻"}
+    if "止盈" in t or "盈利" in t:
+        return {"header_bg": "green", "icon": "✅"}
+    if "失败" in t or event == "error":
+        return {"header_bg": "red", "icon": "⛔"}
+    return {"header_bg": "blue", "icon": "🔵"}
 
 
 async def _send_feishu(
@@ -93,9 +117,11 @@ async def _send_feishu(
     content: str,
     event: str = "system",
     secret: str = "",
+    level: str = "P1",
+    pnl: float | None = None,
 ) -> tuple[bool, str]:
     """发送飞书互动卡片消息。设置 secret 时携带签名校验。"""
-    style = _alert_style(event, title)
+    style = _alert_style(event, title, level=level, pnl=pnl)
     now_str = _now_beijing_str()
 
     payload = {
@@ -105,7 +131,7 @@ async def _send_feishu(
             "header": {
                 "title": {
                     "tag": "plain_text",
-                    "content": title if style["header_title"] == "🟢 开仓信号" else f"{style['icon']} {style['header_title']}",
+                    "content": f"{style['icon']} {title}",
                 },
                 "template": style["header_bg"],
             },
@@ -114,7 +140,7 @@ async def _send_feishu(
                     "tag": "div",
                     "text": {
                         "tag": "lark_md",
-                        "content": f"**{title}**\n\n{content}",
+                        "content": content,
                     },
                 },
                 {"tag": "hr"},
@@ -158,16 +184,22 @@ async def notify(
     customer_id: int | None = None,
     source_text: str = "",
     kol_name: str = "",
+    level: str = "",
+    pnl: float | None = None,
 ) -> None:
     """按客户/全局告警配置发送飞书通知并落日志(使用独立事务,不影响调用方)。
 
-    event: signal|order|tp_sl|correct|risk|auth_expire|error
+    event: signal|order|tp_sl|correct|risk|auth_expire|error|warning
     source_text: 触发本次告警的原始 KOL 消息文本(可选,用于溯源)
     kol_name: KOL 名称(可选,自动添加到通知内容开头,便于识别信号来源)
+    level: P0=需立即处理(红,推送) P1=交易动作/风控(推送) P2=信息性(静默落库,日报汇总);空=自动推断
+    pnl: 平仓类盈亏(USDT),用于卡片颜色: 盈利绿/亏损红
 
     去重:同一 alert_config_id 在 ALERT_DEDUP_SECONDS 内的相同内容(title+content 哈希)
     只发送+记录一次,避免短时间内重复告警刷屏。
     """
+    if not level:
+        level = _infer_level(event, title)
     # ★ 自动添加 KOL 名称到通知内容开头(如果尚未包含)
     if kol_name and "KOL" not in content[:50]:
         content = f"👤 KOL: {kol_name}\n{content}"
@@ -223,7 +255,15 @@ async def notify(
         configs = result.scalars().all()
 
         for cfg in configs:
+            # 事件开关对所有级别一致: 关闭的类型不推送、不落库、不进日报
             if flag_col is not None and not getattr(cfg, flag_col.key):
+                continue
+            # P2 静默: 只落库不发飞书(信息性事件不刷屏,由每日日报汇总)
+            if level == "P2":
+                db.add(AlertLog(
+                    alert_config_id=cfg.id, event=event, title=title,
+                    content=content, success=True, response="quiet", level=level,
+                ))
                 continue
             if not cfg.webhook_url:
                 logger.warning(f"告警配置 {cfg.id} webhook_url 为空,跳过发送")
@@ -236,7 +276,8 @@ async def notify(
                 continue
 
             success, resp = await _send_feishu(
-                cfg.webhook_url, title, content, event=event, secret=cfg.webhook_secret or ""
+                cfg.webhook_url, title, content, event=event,
+                secret=cfg.webhook_secret or "", level=level, pnl=pnl,
             )
             # ★ 修复: 发送失败时清除去重标记,允许 60 秒内重试
             if not success and redis is not None:
@@ -252,6 +293,7 @@ async def notify(
                 content=content,
                 success=success,
                 response=resp,
+                level=level,
             )
             db.add(log)
         try:
@@ -260,3 +302,89 @@ async def notify(
             await db.rollback()
             logger.exception("db commit failed")
             raise
+
+
+async def send_quiet_digest() -> int:
+    """每日P2静默事件汇总。窗口按配置独立(各自上次成功日报以来),发送失败不推进窗口、次日重发。"""
+    from sqlalchemy import text as _text, bindparam
+
+    flag_map = {
+        "signal": AlertConfig.on_signal,
+        "order": AlertConfig.on_order,
+        "tp_sl": AlertConfig.on_tp_sl,
+        "correct": AlertConfig.on_correct,
+        "risk": AlertConfig.on_risk,
+        "auth_expire": AlertConfig.on_auth_expire,
+        "error": AlertConfig.on_error,
+    }
+
+    async with AsyncSessionLocal() as db:
+        cfgs = (await db.execute(
+            select(AlertConfig).where(
+                AlertConfig.enabled.is_(True),
+                AlertConfig.webhook_url.is_not(None),
+            )
+        )).scalars().all()
+
+        sent_total = 0
+        for cfg in cfgs:
+            allowed = [ev for ev, col in flag_map.items() if getattr(cfg, col.key)]
+            if not allowed:
+                continue
+            # F1: 窗口=该配置自身上次成功日报时间(失败不落digest行,故失败不推进窗口)
+            last = (await db.execute(_text(
+                "select max(created_at), "
+                "to_char(max(created_at) at time zone 'Asia/Shanghai', 'MM-DD HH24:MI') "
+                "from alert_logs where response = 'digest' and alert_config_id = :cfg_id"
+            ), {"cfg_id": cfg.id})).fetchone()
+            if last and last[0] is not None:
+                start_sql, params, start_label = ":start_ts", {"start_ts": last[0]}, last[1]
+            else:
+                start_sql = ("date_trunc('day', now() at time zone 'Asia/Shanghai') "
+                             "at time zone 'Asia/Shanghai'")
+                params, start_label = {}, "今日 00:00"
+
+            q = _text(
+                "select regexp_replace(title, '[0-9]+(\\.[0-9]+)?', 'N', 'g') as t, count(*) as c, "
+                "to_char(max(created_at) at time zone 'Asia/Shanghai', 'HH24:MI') as last_t "
+                "from alert_logs "
+                "where level = 'P2' and alert_config_id = :cfg_id and event in :events "
+                f"and created_at >= {start_sql} "
+                "group by 1 order by 2 desc limit 20"
+            ).bindparams(bindparam("events", expanding=True))
+            p = dict(params)
+            p.update({"cfg_id": cfg.id, "events": allowed})
+            rows = (await db.execute(q, p)).fetchall()
+            if not rows:
+                continue
+            total = sum(r[1] for r in rows)
+            lines = [f"• {r[0]} ×{r[1]}(最近{r[2]})" for r in rows]
+            content = (
+                f"自 {start_label} 以来共 {total} 条静默事件(P2级,未实时推送):\n"
+                + "\n".join(lines)
+                + "\n\n说明: P2为信息性事件(挂单创建/过期、止盈止损更新、成本保护、防重复跳过、业务拒绝等),"
+                "已全部落库,明细可在告警日志中查询"
+            )
+            # F2: _send_feishu 失败时返回(False,resp)而非抛异常,必须解包判断
+            try:
+                ok, resp = await _send_feishu(
+                    cfg.webhook_url, "静默事件日报", content,
+                    event="signal", secret=cfg.webhook_secret or "", level="P1",
+                )
+            except Exception:
+                logger.opt(exception=True).warning(f"日报发送异常 cfg={cfg.id}")
+                ok, resp = False, "exception"
+            if ok:
+                db.add(AlertLog(
+                    alert_config_id=cfg.id, event="signal", title="静默事件日报",
+                    content=content, success=True, response="digest", level="P1",
+                ))
+                sent_total += total
+            else:
+                logger.warning(f"日报发送失败(窗口不前移,次日重发) cfg={cfg.id}: {str(resp)[:200]}")
+                db.add(AlertLog(
+                    alert_config_id=cfg.id, event="signal", title="静默事件日报(发送失败)",
+                    content=content, success=False, response=str(resp)[:500], level="P1",
+                ))
+        await db.commit()
+        return sent_total

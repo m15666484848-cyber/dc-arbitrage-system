@@ -19,8 +19,9 @@ from app.services.notification import notify
 # 入场价偏离市价超过此阈值(0.1%)时,创建待触发单而非直接市价下单
 ENTRY_DEVIATION_THRESHOLD = 0.001
 
-# 默认过期时间(7天)
-DEFAULT_EXPIRE_DAYS = 7
+# 默认过期时间(2天):KOL信号时效性有限,超期未触发的挂单自动作废,
+# 避免陈旧信号(如8/22挂单8/24才触发)在行情变化后意外成交
+DEFAULT_EXPIRE_DAYS = 2
 
 # 每客户最多待触发单数(防滥用)
 MAX_PENDING_PER_CUSTOMER = 50
@@ -206,8 +207,46 @@ async def create_pending_order(
                 "new_entry_price": parsed.entry_price,
             }
 
+    # ★ Fix(2026-08-24): 创建时预校验交易对存在性与最小下单额。
+    # 之前挂单数日后触发时才发现"小单被拒/BadSymbol"(待触发单230/500U<770U、
+    # SNDK 不存在),反复失败告警;创建时拦截可直接给用户明确反馈。
+    # 预校验基础设施异常(网络/API不可用)不阻断创建,触发时仍有二次校验兜底。
+    try:
+        from app.services import exchange_adapter as _exad
+        _pre_ex, _ = await _exad.load_exchange(
+            db, customer_id, exchange, exchange_account_id=exchange_account_id
+        )
+        _pre_sym = _exad._normalize_symbol(exchange, parsed.symbol)
+        try:
+            _pre_ex.market(_pre_sym)
+        except Exception:
+            return {"ok": False, "reason": f"无效交易对: {exchange} 不存在 {parsed.symbol} 合约市场"}
+        _pre_min, _pre_min_reason = await _exad.get_min_order_notional(_pre_ex, parsed.symbol)
+        if _pre_min > 0 and notional_usdt < _pre_min:
+            return {
+                "ok": False,
+                "reason": f"小单被拒: 下单{notional_usdt} USDT < 交易所最小限制 {_pre_min:.2f} USDT ({_pre_min_reason})",
+            }
+    except Exception as _pre_e:
+        logger.debug(f"待触发单创建预校验失败(不阻断创建): {exchange} {parsed.symbol}: {_pre_e}")
+
     # 构建止盈配置(基于入场价)
     tp_levels = order_manager._build_tp_levels(parsed, defaults, parsed.entry_price, parsed.side)
+
+    # ★ 止损方向校验: 多单 sl>=入场 或 空单 sl<=入场 属于方向错误。
+    # 典型成因: 信号无止损时,默认止损按"当时市价"计算,而分批入场价远低于市价,
+    # 导致默认止损高于入场价;开仓即触发止损监控,形成开平循环(2026-08-22 SOL事故)。
+    # 处理: 丢弃方向错误的止损,触发时 _place_entry→filter_signal 按入场价重新生成。
+    pending_sl = parsed.stop_loss
+    if pending_sl is not None and parsed.entry_price:
+        if (parsed.side == "long" and pending_sl >= parsed.entry_price) or (
+            parsed.side == "short" and pending_sl <= parsed.entry_price
+        ):
+            logger.warning(
+                f"待触发单止损方向错误已丢弃(触发时按入场价重算): "
+                f"{parsed.symbol} {parsed.side} entry={parsed.entry_price} sl={pending_sl}"
+            )
+            pending_sl = None
 
     pending = PendingOrder(
         customer_id=customer_id,
@@ -221,7 +260,7 @@ async def create_pending_order(
         notional_usdt=notional_usdt,
         leverage=parsed.leverage,
         tp_levels=tp_levels,
-        sl=parsed.stop_loss,
+        sl=pending_sl,
         strategy_params={
             "defaults": defaults,
             "strategy_id": strategy_id,
@@ -287,6 +326,19 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
         stop_loss=pending.sl,
         leverage=pending.leverage,
     )
+
+    # ★ 止损方向兜底校验(历史遗留待触发单可能带方向错误的止损):
+    # 多单 sl>=入场/空单 sl<=入场 会开仓即触发止损。置空后由
+    # _place_entry→filter_signal 按入场价(market_price=entry)重新生成正确方向止损。
+    if parsed.stop_loss is not None and parsed.entry_price:
+        if (parsed.side == "long" and parsed.stop_loss >= parsed.entry_price) or (
+            parsed.side == "short" and parsed.stop_loss <= parsed.entry_price
+        ):
+            logger.warning(
+                f"待触发单 {pending.id} 止损方向错误"
+                f"(sl={parsed.stop_loss} entry={parsed.entry_price}),触发时按入场价重算止损"
+            )
+            parsed.stop_loss = None
 
     strategy_params = pending.strategy_params or {}
     defaults = strategy_params.get("defaults", {})
@@ -379,6 +431,39 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
         logger.warning(f"待触发单 {pending.id} 因客户急停自动取消")
         return {"ok": False, "reason": "客户急停已激活,待触发单已取消"}
 
+    # ★ 动态风控检查(2026-08-24): 挂单创建时风控通过不代表触发时仍通过。
+    # 客户授权到期/静默时段/并发持仓超限/单日亏损熔断时不应开仓;
+    # 取消(而非跳过)避免监控循环反复重试。急停已在上方单独处理。
+    try:
+        from app.services.risk_manager import check_can_trade
+        _can, _risk_reason = await check_can_trade(
+            db, pending.customer_id, pending.exchange, pending.symbol
+        )
+        if not _can:
+            pending.status = "cancelled"
+            pending.cancel_reason = f"触发时风控不通过,自动取消: {_risk_reason}"
+            try:
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.exception("db commit failed")
+                raise
+            logger.warning(
+                f"待触发单 {pending.id} 触发时风控拒绝已取消: {_risk_reason}"
+            )
+            await notify(
+                "warning", "待触发单已取消(风控)",
+                f"待触发单: #{pending.id}\n品种: {pending.symbol} {pending.side}\n"
+                f"目标入场价: {pending.entry_price}\n"
+                f"原因: 价格已触及但当前风控不通过: {_risk_reason}",
+                pending.customer_id,
+            )
+            return {"ok": False, "reason": pending.cancel_reason}
+    except Exception as _risk_e:
+        await db.rollback()
+        logger.exception(f"触发时风控检查异常: {_risk_e}")
+        return {"ok": False, "reason": f"风控检查异常: {_risk_e}"}
+
     try:
         result = await order_manager._place_entry(
             db,
@@ -462,6 +547,13 @@ async def trigger_pending_order(db: AsyncSession, pending: PendingOrder, trigger
             source_text=_src_text,
         )
         return {"ok": False, "reason": f"下单异常: {e}"}
+
+    # ★ Fix(2026-08-24): _place_entry 内部止损同步失败会 rollback 使 pending 过期,
+    # 读取属性前先 refresh,防止 MissingGreenlet 导致已成交的触发被误判失败重试
+    try:
+        await db.refresh(pending)
+    except Exception:
+        pass
 
     # 标记持仓来源为待触发单触发(不计入冷却)
     _triggered_pos_id = result.get("position_id")

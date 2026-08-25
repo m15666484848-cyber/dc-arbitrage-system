@@ -236,7 +236,9 @@ async def _check_one_position_with_price(db: AsyncSession, position: Position, c
         return
 
     # 止损触发 → 全部平仓
-    if should_trigger_sl(position, current_price):
+    # Fix A(2026-08-24): 交易所侧已挂止损单时跳过内部止损触发(防止双路重复
+    # 平仓,单向持仓模式下殃及其他KOL仓位);触发成交由同步循环感知记账
+    if not position.exchange_stop_order_id and should_trigger_sl(position, current_price):
         logger.info(f"止损触发 pos={position.id} {position.symbol} price={current_price} sl={position.sl}")
         # 使用 Redis 锁防止重复平仓(与 stop_loss_monitor_loop 一致)
         if not await _add_closing_position(position.id):
@@ -265,7 +267,7 @@ async def _check_one_position_with_price(db: AsyncSession, position: Position, c
 
     # 成本保护(+2% 利润,且 TP1 未触发时也保护)
     if should_trigger_cost_protection(position, current_price):
-        await order_manager.apply_cost_protection(db, position)
+        await order_manager.apply_cost_protection(db, position, current_price)
         return
 
     # 追踪止损:盈利时按回撤比例动态上移止损
@@ -443,14 +445,15 @@ async def check_orphaned_master_positions(db: AsyncSession) -> int:
                             _src = await _get_position_source_text(close_db, pos_id, m["kol_id"], symbol)
                             _kol = await _get_kol_name(close_db, m["kol_id"])
                             await notify(
-                                "tp_sl", "孤立主仓位超时自动平仓",
+                                "tp_sl", f"超时自动平仓(孤立) {float(result.get('pnl', 0)):+.2f} U",
                                 f"品种: {symbol}\n方向: {side}\n"
                                 f"持仓时间: 超过 {timeout_h} 小时 (无子仓位)\n"
                                 f"盈亏: {float(result.get('pnl', 0)):.2f} USDT",
                                 m["customer_id"],
                                 source_text=_src,
                                 kol_name=_kol,
-                            )
+        pnl=float(result.get('pnl', 0)),
+    )
                         except Exception as e:
                             logger.opt(exception=True).warning(f"Unexpected error: {e}")
                     else:
@@ -608,14 +611,15 @@ async def check_and_close_timeout_positions(db: AsyncSession) -> int:
                     _timeout_src = await _get_position_source_text(db, pos.id, pos.kol_id, pos.symbol)
                     _timeout_kol = await _get_kol_name(db, pos.kol_id)
                     await notify(
-                        "tp_sl", "持仓超时自动平仓",
+                        "tp_sl", f"超时自动平仓 {result.get('pnl', 0):+.2f} U",
                         f"品种: {pos.symbol}\n方向: {pos.side}\n"
                         f"持仓时间: 超过 {timeout_hours} 小时\n"
                         f"盈亏: {result.get('pnl', 0):.2f} USDT(净,已扣手续费)",
                         pos.customer_id,
                         source_text=_timeout_src,
                         kol_name=_timeout_kol,
-                    )
+        pnl=result.get('pnl', 0),
+    )
                 else:
                     logger.warning(f"超时平仓未成功 pos={pos.id}: {result.get('reason')}")
             except Exception as e:
@@ -816,7 +820,7 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                             _src = await _get_position_source_text(db, pos.id, pos.kol_id, pos.symbol)
                             _kol = await _get_kol_name(db, pos.kol_id)
                             await notify(
-                                "tp_sl", "持仓超96小时已自动平仓",
+                                "tp_sl", f"超96小时自动平仓 {result.get('pnl', 0):+.2f} U",
                                 "品种: " + pos.symbol + "\n"
                                 "方向: " + pos.side + "\n"
                                 "交易所: " + pos.exchange.upper() + "\n"
@@ -826,7 +830,8 @@ async def check_and_apply_tpsl_timeout_protection(db: AsyncSession) -> int:
                                 pos.customer_id,
                                 source_text=_src,
                                 kol_name=_kol,
-                            )
+        pnl=result.get('pnl', 0),
+    )
                         except Exception as e:
                             logger.opt(exception=True).warning(f"Unexpected error: {e}")
                     else:
@@ -1163,11 +1168,18 @@ async def stop_loss_monitor_loop() -> None:
                         pos_entry_price = pos.entry_price
                         pos_realized_pnl = pos.realized_pnl
                         pos_exchange_account_id = pos.exchange_account_id
+                        pos_exchange_stop_id = pos.exchange_stop_order_id
                         key = (pos_exchange, pos_symbol)
                         current_price = price_cache.get(key, 0)
                         if not current_price or current_price <= 0:
                             continue
 
+                        # Fix A(2026-08-24): 交易所侧已挂止损单时跳过内部止损触发。
+                        # 交易所撮合直接触发快于轮询,若内部同时市价平仓,单向持仓
+                        # 模式下会吃掉同账户其他KOL仓位(#466事故);成交由
+                        # exchange_stop_manager 15秒循环感知并按成交均价记账。
+                        if pos_exchange_stop_id:
+                            continue
                         # 检查止损触发
                         if should_trigger_sl(pos, current_price):
                             # Redis锁:跳过正在平仓中的仓位,防止重复触发(跨进程)

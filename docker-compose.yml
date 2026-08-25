@@ -76,7 +76,10 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 15s
-      timeout: 5s
+      # ★ Fix(2026-08-25): 5s→10s。uvicorn 单进程事件循环偶发瞬时阻塞(GC/慢请求)
+      # 会造成单分钟级误报 unhealthy(8-22 曾连报19分钟);10s 容忍瞬时抖动,
+      # 真实宕机仍会在 15s*10 次内被判出。
+      timeout: 10s
       retries: 5
       start_period: 30s
 

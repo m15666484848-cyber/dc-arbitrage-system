@@ -34,7 +34,7 @@ from sqlalchemy import select, update as sa_update
 from app.core.database import AsyncSessionLocal
 from app.models.audit import AuditLog
 from app.models.config import ExchangeAccount
-from app.models.trading import Order, Position
+from app.models.trading import Order, Position, Trade
 from app.services import exchange_adapter
 from app.services.notification import notify
 
@@ -389,13 +389,11 @@ async def _fix_ghost_position(
     now = datetime.now(timezone.utc)
     try:
         async with AsyncSessionLocal() as db:
-            # 标记 master
-            await db.execute(
-                sa_update(Position)
-                .where(Position.id == master_pos_id)
-                .values(status="closed", qty=0, closed_at=now)
-            )
-            # 标记所有子仓位
+            master = (await db.execute(
+                select(Position).where(Position.id == master_pos_id)
+            )).scalar_one_or_none()
+            if not master or master.status != "open":
+                return
             children = (
                 await db.execute(
                     select(Position).where(
@@ -404,18 +402,64 @@ async def _fix_ghost_position(
                     )
                 )
             ).scalars().all()
+
+            # ★ 盈亏回填(2026-08-24): 按最终止损价估算平仓价与盈亏,
+            # 子仓位记 Trade + realized_pnl;master 只累加,保持
+            # master.realized_pnl == sum(children) 不变式。无止损价时不估算(记 0)。
+            def _est_pnl(pos: Position) -> tuple[float, float | None]:
+                if not pos.sl or pos.sl <= 0 or pos.qty <= 0:
+                    return 0.0, None
+                close_price = float(pos.sl)
+                if (pos.side or "").lower() == "long":
+                    return (close_price - pos.entry_price) * pos.qty, close_price
+                return (pos.entry_price - close_price) * pos.qty, close_price
+
+            def _close_trade(pos: Position, close_price: float, est_pnl: float) -> None:
+                db.add(Trade(
+                    customer_id=pos.customer_id,
+                    kol_id=pos.kol_id,
+                    position_id=pos.id,
+                    exchange_account_id=pos.exchange_account_id,
+                    exchange=pos.exchange,
+                    symbol=pos.symbol,
+                    side="sell" if (pos.side or "").lower() == "long" else "buy",
+                    qty=pos.qty,
+                    price=close_price,
+                    fee=0.0,
+                    realized_pnl=est_pnl,
+                    is_close=True,
+                    tp_level=-1,
+                    executed_at=now,
+                ))
+
+            child_pnl_sum = 0.0
             for child in children:
-                await db.execute(
-                    sa_update(Position)
-                    .where(Position.id == child.id)
-                    .values(status="closed", qty=0, closed_at=now)
-                )
+                est_pnl, close_price = _est_pnl(child)
+                child.realized_pnl += est_pnl
+                child_pnl_sum += est_pnl
+                if close_price is not None:
+                    _close_trade(child, close_price, est_pnl)
+                child.status = "closed"
+                child.qty = 0
+                child.closed_at = now
+            est_pnl_total = child_pnl_sum
+            if children:
+                master.realized_pnl += child_pnl_sum
+            else:
+                est_pnl, close_price = _est_pnl(master)
+                master.realized_pnl += est_pnl
+                if close_price is not None:
+                    _close_trade(master, close_price, est_pnl)
+                est_pnl_total = est_pnl
+            master.status = "closed"
+            master.qty = 0
+            master.closed_at = now
             # 记录审计日志
             db.add(AuditLog(
                 user_id=None,
                 action="reconciliation_fix",
                 target=f"position:{master_pos_id}",
-                detail=f"对账自动修复: 持仓 #{master_pos_id} ({master_pos_symbol} {master_pos_side}) 交易所无持仓,已标记 closed (含 {len(children)} 个子仓位)",
+                detail=f"对账自动修复: 持仓 #{master_pos_id} ({master_pos_symbol} {master_pos_side}) 交易所无持仓,已标记 closed (含 {len(children)} 个子仓位),估算回填盈亏 {est_pnl_total:+.2f} USDT",
             ))
             try:
                 await db.commit()
@@ -426,7 +470,7 @@ async def _fix_ghost_position(
             report.auto_fixed += 1 + len(children)
             logger.info(
                 f"[对账] 幽灵持仓修复: pos={master_pos_id} {master_pos_symbol} {master_pos_side} "
-                f"已标记 closed (含 {len(children)} 个子仓位)"
+                f"已标记 closed (含 {len(children)} 个子仓位),估算回填盈亏 {est_pnl_total:+.2f} USDT"
             )
     except Exception as e:
         await db.rollback()
@@ -696,7 +740,8 @@ async def _recover_close_failed_positions() -> int:
                                 f"持仓 #{pos_id} {pos_symbol} 交易所仍有持仓,"
                                 f"需人工确认平仓操作是否完成",
                                 pos_customer_id,
-                            )
+        level="P0",
+    )
                         except Exception as e:
                             logger.opt(exception=True).warning(f"Unexpected error: {e}")
                 finally:

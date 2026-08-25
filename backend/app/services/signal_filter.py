@@ -381,28 +381,43 @@ async def clear_dedup_keys(redis, dedup_hash: str = "", full_hash: str = ""):
 
 
 def correct_price(parsed: ParsedSignal, market_price: float | None) -> tuple[bool, str, bool]:
-    """价格纠错:偏离市价过大判定笔误。返回 (是否修改, 说明, 是否拒绝)。"""
+    """价格纠错:偏离市价过大判定笔误。返回 (是否修改, 说明, 是否拒绝)。
+
+    2026-08-24 修复: 方向合理的挂单等待(long低买/short高卖)不再纠偏为市价。
+    8/22 SOL/BTC事故: KOL"75/63000附近买入"计划被纠偏为市价立即买入,
+    梯次价同步缩放后默认止损方向错误,引发开平循环。此类信号应走待触发单。
+    """
     if not parsed.entry_price or market_price is None or market_price <= 0:
         return False, "", False
     dev = abs(parsed.entry_price - market_price) / market_price
+    if dev <= 0.15:
+        return False, "", False
+    side = (parsed.side or "").lower()
+    # 方向合理的挂单等待: long等回调低买 / short等反弹高卖 → 交给待触发单机制
+    directional_wait = (side == "long" and parsed.entry_price < market_price) or (
+        side == "short" and parsed.entry_price > market_price
+    )
+    if directional_wait and dev <= 0.90:
+        return False, "", False
+    if dev > 0.90:
+        return False, f"入场价 {parsed.entry_price} 偏离市价 {market_price} 超过90%,疑似数量级错误", True
     if dev > 0.30:
         return False, f"入场价 {parsed.entry_price} 偏离市价 {market_price} 超过30%,疑似严重错误", True
-    if dev > 0.15:
-        old = parsed.entry_price
-        ratio = market_price / old
-        parsed.entry_price = market_price
-        # 同步缩放分批建仓价格,保留分批信息(而非覆盖为单元素)
-        if parsed.entry_prices:
-            parsed.entry_prices = [ep * ratio for ep in parsed.entry_prices]
-        else:
-            parsed.entry_prices = [market_price]
-        # 同步调整TP/SL,保持相对比例
-        if parsed.take_profits:
-            parsed.take_profits = [tp * ratio for tp in parsed.take_profits]
-        if parsed.stop_loss:
-            parsed.stop_loss *= ratio
-        return True, f"入场价纠偏 {old} → {market_price} (偏离{dev:.1%}),TP/SL/分批价同步调整", False
-    return False, "", False
+    # 方向不合理(追高做多/杀跌做空)且偏离15%~30% → 判定笔误,纠偏为市价
+    old = parsed.entry_price
+    ratio = market_price / old
+    parsed.entry_price = market_price
+    # 同步缩放分批建仓价格,保留分批信息(而非覆盖为单元素)
+    if parsed.entry_prices:
+        parsed.entry_prices = [ep * ratio for ep in parsed.entry_prices]
+    else:
+        parsed.entry_prices = [market_price]
+    # 同步调整TP/SL,保持相对比例
+    if parsed.take_profits:
+        parsed.take_profits = [tp * ratio for tp in parsed.take_profits]
+    if parsed.stop_loss:
+        parsed.stop_loss *= ratio
+    return True, f"入场价纠偏 {old} → {market_price} (偏离{dev:.1%}),TP/SL/分批价同步调整", False
 
 
 def correct_direction(parsed: ParsedSignal) -> tuple[bool, str]:

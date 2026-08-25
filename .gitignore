@@ -78,3 +78,6 @@ dcquant_backups/
 
 # 审计报告产物
 backend/reports/
+
+# Debug archives (temporary scripts/reports, server-only)
+dcquant_debug_archive*/

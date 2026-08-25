@@ -64,7 +64,6 @@ export default function KolsPage() {
     const map = new Map<number, KolSetting>();
     for (const k of kols) {
       if (k.followed) {
-        sel.add(k.id);
         const s = k.follow_settings || {};
         map.set(k.id, {
           kol_id: k.id,
@@ -73,6 +72,12 @@ export default function KolsPage() {
           // 编辑时必须使用 raw_notional_usdt，否则会把策略默认金额误存成自定义金额，导致切换策略后金额不跟随策略变化。
           notional_usdt: s.raw_notional_usdt ?? null,
         });
+        // BUGFIX(2026-08-24): 已停用(取消订阅/风控停用)的订阅不进入 selected。
+        // setFollows 是全量替换语义: 提交列表中的 KOL 一律会被置 enabled=true,
+        // 若把已停用的 KOL 一并提交,之前取消过的订阅会被自动恢复。
+        // 已停用 KOL 仍保留在 settings 中,点击行可显式重新勾选恢复。
+        if (k.follow_settings?.follow_status?.status === "disabled") continue;
+        sel.add(k.id);
       }
     }
     setSelected(sel);

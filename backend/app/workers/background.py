@@ -57,6 +57,7 @@ def _setup_scheduler_jobs(scheduler: AsyncIOScheduler) -> None:
     scheduler.add_job(_kol_risk_check_job, "interval", minutes=10, id="kol_risk_check", **_job_kwargs)
     scheduler.add_job(_reconciliation_job, "interval", minutes=10, id="reconciliation", **_job_kwargs)
     scheduler.add_job(_data_archival_job, "interval", hours=24, id="data_archival", **_job_kwargs)
+    scheduler.add_job(_quiet_digest_job, "cron", hour=21, minute=0, id="quiet_digest", timezone="Asia/Shanghai", **_job_kwargs)
 
 
 
@@ -176,6 +177,17 @@ async def _daily_risk_snapshot_job() -> None:
                     logger.warning(f"日风控汇总快照失败 customer={cid}: {e}")
     except Exception as e:
         logger.exception(f"日风控快照任务异常: {e}")
+
+
+async def _quiet_digest_job() -> None:
+    """每日21:00(北京时间)推送P2静默事件汇总日报。"""
+    try:
+        from app.services.notification import send_quiet_digest
+        n = await send_quiet_digest()
+        if n:
+            logger.info(f"静默事件日报已推送: {n}条P2汇总")
+    except Exception:
+        logger.opt(exception=True).error("静默事件日报任务失败")
 
 
 async def _auth_expire_job() -> None:

@@ -112,6 +112,14 @@ _PRIMARY_TIMEOUT = 8
 # ★ P1 修复: 备用模型超时时间(秒)
 _FALLBACK_TIMEOUT = 10
 
+# ★ Fix(2026-08-25): 图片解析专用超时。图片信号带 base64 大负载 + 多模态推理,
+# 10s 普遍不够(8-24/8-25 三次"LLM 调用在 2 次尝试后仍超时"全部是图片解析,
+# 失败后图片信号直接丢弃)。文本信号不受影响,维持原超时。
+_IMAGE_TIMEOUT = 45
+
+# 图片解析首轮失败后,最后一轮加长超时重试(给慢响应模型一次机会)
+_IMAGE_FINAL_TIMEOUT = 90
+
 # ★ P1 修复: LLM 调用重试次数(2 次重试 = 最多 3 次尝试)
 _MAX_RETRIES = 1
 
@@ -814,30 +822,48 @@ async def parse_image_with_llm(
 
         # 直接调 vision client 的 analyze_signal(带图片)
         # 图片 LLM 也使用失败重试；有效信号但低置信度时，额外重试 2 次。
-        for low_conf_attempt in range(_LOW_CONFIDENCE_RETRY_COUNT + 1):
+        # ★ Fix(2026-08-25): 图片负载大,改用 _IMAGE_TIMEOUT(45s,原 10s 不够导致
+        # 图片信号超时丢弃);两轮均失败后再用 90s 长超时做最后一轮降级重试。
+        image_timeout = _IMAGE_TIMEOUT
+        try:
+            for low_conf_attempt in range(_LOW_CONFIDENCE_RETRY_COUNT + 1):
+                response = await _call_llm_with_retry(
+                    client, text,
+                    image_urls=image_urls,
+                    image_base64_list=image_base64_list,
+                    timeout=image_timeout,
+                    max_retries=_MAX_RETRIES,
+                    retry_delays=_RETRY_DELAYS,
+                )
+                result = response.get("result", {})
+                usage = response.get("usage", {})
+
+                if not _as_bool(result.get("is_valid_signal", False)):
+                    break
+
+                confidence = max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0))
+                if confidence >= threshold:
+                    break
+
+                if low_conf_attempt < _LOW_CONFIDENCE_RETRY_COUNT:
+                    logger.warning(
+                        f"图片 LLM 置信度偏低 {confidence:.2f} < 阈值 {threshold:.2f}, "
+                        f"重新解析 {low_conf_attempt + 1}/{_LOW_CONFIDENCE_RETRY_COUNT}"
+                    )
+        except (asyncio.TimeoutError, httpx.HTTPError, ConnectionError, OSError) as _img_e:
+            # ★ Fix(2026-08-25): 超时/网络类失败后,用 90s 长超时做最后一轮重试,
+            # 避免图片信号因模型偶发慢响应被直接丢弃。
+            logger.warning(f"图片 LLM 解析超时/网络失败,启用长超时最终重试: {_img_e}")
             response = await _call_llm_with_retry(
                 client, text,
                 image_urls=image_urls,
                 image_base64_list=image_base64_list,
-                timeout=_FALLBACK_TIMEOUT,
-                max_retries=_MAX_RETRIES,
+                timeout=_IMAGE_FINAL_TIMEOUT,
+                max_retries=0,
                 retry_delays=_RETRY_DELAYS,
             )
             result = response.get("result", {})
             usage = response.get("usage", {})
-
-            if not _as_bool(result.get("is_valid_signal", False)):
-                break
-
-            confidence = max(0.0, min(_as_float(result.get("confidence"), 0.5), 1.0))
-            if confidence >= threshold:
-                break
-
-            if low_conf_attempt < _LOW_CONFIDENCE_RETRY_COUNT:
-                logger.warning(
-                    f"图片 LLM 置信度偏低 {confidence:.2f} < 阈值 {threshold:.2f}, "
-                    f"重新解析 {low_conf_attempt + 1}/{_LOW_CONFIDENCE_RETRY_COUNT}"
-                )
 
         if not _as_bool(result.get("is_valid_signal", False)):
             logger.info(f"图片 LLM 判定为无效信号: {result.get('reasoning', 'N/A')}")

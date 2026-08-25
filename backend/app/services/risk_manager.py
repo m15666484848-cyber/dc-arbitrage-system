@@ -168,6 +168,9 @@ async def check_can_trade(
                         Position.customer_id == customer_id,
                         Position.exchange == exchange,
                         Position.status == "open",
+                        # FIX: master(parent_id IS NULL)是聚合视图,与子仓位同值;
+                        # 只统计子仓位,每笔成交算1个,防止并发上限被腰斩
+                        Position.parent_id.is_not(None),
                     )
                 )
             ).scalar_one()
@@ -200,6 +203,10 @@ async def check_can_trade(
                         Position.customer_id == customer_id,
                         Position.exchange == exchange,
                         Position.status == "open",
+                        # FIX: master与子仓位qty相同,不过滤会双倍计算浮亏,
+                        # 导致单日亏损熔断提前触发(误拒开仓);与
+                        # position_manager/analytics 口径一致只算子仓位
+                        Position.parent_id.is_not(None),
                     )
                 )
             ).scalars().all()
@@ -315,14 +322,20 @@ async def check_kol_consecutive_losses(db: AsyncSession) -> None:
         if threshold <= 0:
             continue
 
-        # 获取该客户+KOL 的最近交易结果
+        # 获取该客户+KOL 的最近交易结果(按母仓=整笔交易计数)
+        # ★ Fix(2026-08-25): 只取母仓行(parent_id IS NULL)。母仓的 realized_pnl
+        # 是整笔交易全部子仓盈亏之和,代表该笔交易的最终结果。
+        # 旧逻辑按子仓行计数: 一笔交易分批平仓会产生多个子仓,整体盈利的交易
+        # 若末批离场子仓为亏(先止盈后止损离场),该亏损子仓仍被计入连亏,盈利
+        # 交易无法中断连亏计数(所长 8/20 盈利ENA交易未中断连亏,8/21凌晨被
+        # 错误暂停24h);无子仓的整笔交易则被完全漏计。
         recent_trades = (
             await db.execute(
                 select(Position).where(
                     Position.kol_id == kol.id,
                     Position.customer_id == follow.customer_id,
                     Position.status == "closed",
-                    Position.parent_id.is_not(None),
+                    Position.parent_id.is_(None),
                 ).order_by(Position.closed_at.desc()).limit(threshold + 2)
             )
         ).scalars().all()
