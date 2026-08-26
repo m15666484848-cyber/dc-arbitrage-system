@@ -543,6 +543,14 @@ def check_exit_intent(text: str) -> tuple[bool, str]:
     ):
         return False, "开仓计划保护: 止盈阶梯/开仓计划优先于平仓检测"
 
+    # ★ 条件离场守卫(2026-08-26): "如果/一旦跌破X就考虑离场"是价格条件句,
+    # 价格未到不应触发平仓(#3290 "如果跌破我们就考虑离场"被误判立即平仓
+    # 50%提前减仓)。离场词全部位于条件句中时不视为平仓;真实立即平仓
+    # ("所有人全部多单出掉")不含条件词不受影响;条件句与立即平仓并存时,
+    # 立即平仓部分经剩余文本检测仍会放行。
+    if is_conditional_exit_only(text):
+        return False, "条件离场守卫: 离场词均在条件句中(如果/一旦跌破X才离场),非立即平仓"
+
     # Round 5: 已触及 TP 后让剩余仓位继续持有，是持仓描述/复盘，不是新的平仓指令。
     if re.search(r"(?i)\bi\s+hit\s+tp\s*1?\b.{0,80}\blet\s+the\s+rest\b", text):
         return False, "Round5英文TP1持仓描述: let the rest"
@@ -665,6 +673,87 @@ UPDATE_KEYWORDS = [
 ]
 
 
+# ★ 条件离场守卫(2026-08-26): 条件句识别正则。
+# 背景 #3290: "重点关注77600-77900，如果跌破我们就考虑离场" — LLM 把
+# "考虑离场"判为立即平仓 50%,实际是价格条件句,价格未到不应触发平仓。
+_COND_EXIT_MARKER_RE = re.compile(r"如果|假如|假若|若是|如若|一旦|要是|万一|除非|若|的话")
+_COND_EXIT_PRICE_RE = re.compile(r"跌破|跌至|跌到|失守|下破|破位|突破|上破|站稳|收复|回踩|回落|反弹|上涨到|涨到|到达|触及|看到|到\s*[\d.]")
+_COND_EXIT_HEDGE_RE = re.compile(r"考虑|观察|再说|到时候|再看|再决定|择机|视情况|伺机")
+_COND_EXIT_WORD_RE = re.compile(r"出局|离场|出场|平仓|清仓|出掉|走人|跑路|止损|止盈|获利了结|全部出|减仓|先跑|跑掉|跑吧|全跑|撤出")
+# 无条件词变体: "跌破80000就出掉"(价格条件动词+价格+就/再/则/才+离场词)。
+# (?![了着]) 排除"跌破了就出局"——已经跌破,是立即平仓指令不是条件句。
+_COND_EXIT_IMPLICIT_RE = re.compile(
+    r"(?:跌破|跌至|跌到|失守|下破|突破|上破|站稳|回踩|回落)(?![了着])[^，,。；;！？\n]{0,4}"
+    r"\d[\d.,\s\-]*[^，,。；;！？\n]{0,10}"
+    r"(?:就|再|则|才)[^，,。；;！？\n]{0,12}"
+    r"(?:出局|离场|出场|平仓|清仓|出掉|走人|跑路|止损|止盈|获利了结|全部出|减仓|先跑|跑掉|跑吧|全跑)"
+)
+
+
+def _is_conditional_exit_unit(u: str) -> bool:
+    """判断单个语句单元是否为条件离场句(价格条件触发的离场描述)。"""
+    if not u:
+        return False
+    if _COND_EXIT_IMPLICIT_RE.search(u):
+        return True
+    return bool(
+        _COND_EXIT_MARKER_RE.search(u)
+        and _COND_EXIT_WORD_RE.search(u)
+        and (_COND_EXIT_PRICE_RE.search(u) or _COND_EXIT_HEDGE_RE.search(u))
+    )
+
+
+def is_conditional_exit_only(text: str) -> bool:
+    """判断文本的离场意图是否全部为价格条件式("如果跌破X才离场")。
+
+    判定:
+    1. 按句号/问叹号/换行切分语句单元(逗号不切分 — 中文条件从句常跨逗号,
+       如"要是跌破80000，我们再考虑出掉");
+    2. 含[条件词+离场词+(价格条件动词或观望词)]或[价格条件动词+价格+
+       就/再/则+离场词]的单元视为条件离场单元;
+    3. 移除条件单元后剩余文本不再含平仓指令 → 整条消息无立即平仓意图。
+    """
+    if not text:
+        return False
+    units = [u.strip() for u in re.split(r"[。！？!?\n；;]+", text) if u.strip()]
+    if not units:
+        return False
+    cond_flags = [_is_conditional_exit_unit(u) for u in units]
+    if not any(cond_flags):
+        return False
+    remaining = " ".join(u for u, c in zip(units, cond_flags) if not c)
+    if not remaining:
+        return True
+    is_exit, _ = check_exit_intent(remaining)
+    return not is_exit
+
+
+def _apply_conditional_exit_guard(
+    text: str, parsed: ParsedSignal, kol_name: str = "", source: str = "LLM"
+) -> ParsedSignal:
+    """条件离场守卫: LLM 判平仓但离场词均在条件句中时,覆盖为非平仓信号。
+
+    系统无条件价触发机制,保守不动作(持仓原有止损仍有效)。
+    必须同时清空方向/入场价,否则 apply_actions_to_parsed 会兜底生成
+    open_ 动作导致误开仓。
+    """
+    if not parsed.is_exit_signal or not is_conditional_exit_only(text):
+        return parsed
+    logger.info(f"[{kol_name}] 条件离场守卫: {source}判定平仓,但离场词均在条件句中,覆盖为非平仓")
+    parsed.is_exit_signal = False
+    parsed.is_update_signal = False
+    parsed.exit_reason = ""
+    parsed.position_pct = 0.0
+    parsed.side = ""
+    parsed.symbol = ""
+    parsed.entry_price = None
+    parsed.entry_prices = []
+    parsed.take_profits = []
+    parsed.stop_loss = None
+    parsed.reason = "条件离场(如果/一旦跌破X才离场),非立即平仓指令"
+    return parsed
+
+
 def check_update_intent(text: str) -> tuple[bool, str]:
     """检查是否为止盈止损更新信号(显式关键词检测)。
 
@@ -691,7 +780,7 @@ STRONG_EXIT_ALL_PATTERNS = [
 
 # 条件语境词: 出现时说明全平指令是假设/条件触发,不是当前指令。
 _STRONG_EXIT_CONDITIONAL_PATTERNS = [
-    r"如果|若|假如|一旦",
+    r"如果|若|假如|一旦|要是|万一|除非|的话",
     r"(?:跌破|突破|回踩|站稳).{0,12}(?:再|就|则)",
 ]
 
@@ -2487,6 +2576,7 @@ def parse_text(text: str) -> ParsedSignal:
         and re.search(r"(?:止盈|分批|部分|先出|减仓|平掉|平仓|推保护|保护价)", text, re.IGNORECASE)
         and not any(a.startswith("open_") for a in pre_actions)
         and not _open_plan_guard
+        and not is_conditional_exit_only(text)
     ):
         return ParsedSignal(
             symbol=symbol,
@@ -2670,6 +2760,8 @@ async def parse_message(
                     f"tokens={usage.get('total_tokens', 0)}"
                 )
                 llm_parsed.has_image = True
+                # ★ 条件离场守卫(2026-08-26): 同文本路径,防条件句误判平仓。
+                llm_parsed = _apply_conditional_exit_guard(combined, llm_parsed, kol_name, "图片LLM")
                 llm_parsed = apply_actions_to_parsed(combined, llm_parsed)
                 return llm_parsed
         except Exception as e:
@@ -2704,6 +2796,8 @@ async def parse_message(
                     f"tokens={usage.get('total_tokens', 0)}"
                 )
                 llm_parsed.has_image = True
+                # ★ 条件离场守卫(2026-08-26): 同文本路径,防条件句误判平仓。
+                llm_parsed = _apply_conditional_exit_guard(combined, llm_parsed, kol_name, "图片LLM(OCR回退)")
                 llm_parsed = apply_actions_to_parsed(combined, llm_parsed)
                 llm_parsed.ocr_text = ocr_text
                 return llm_parsed
@@ -2921,6 +3015,9 @@ async def parse_message(
                         logger.info(f"[{kol_name}] LLM 结果补充标记为更新信号: {update_reason}")
                 llm_parsed.raw_text = combined
                 llm_parsed = _apply_cn_direction_override(combined_for_parse, llm_parsed)
+                # ★ 条件离场守卫(2026-08-26): LLM 可能把"如果跌破X就考虑离场"
+                # 条件句判为立即平仓(#3290 被判 close_position 50% 提前减仓)。
+                llm_parsed = _apply_conditional_exit_guard(combined_for_parse, llm_parsed, kol_name, "LLM")
                 llm_parsed = apply_actions_to_parsed(combined_for_parse, llm_parsed)
                 if llm_parsed.actions == ["hold_pending"]:
                     llm_parsed.confidence = 0.0
