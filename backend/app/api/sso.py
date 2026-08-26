@@ -102,7 +102,8 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
         cust = Customer(
             username=body.username,
             password_hash=hash_password(secrets.token_urlsafe(24)),
-            display_name=body.display_name or body.username,
+            # 显示名固定为 登录名_主服务器用户名,便于管理端区分SSO账户归属
+            display_name=f"{body.username}_{body.display_name}" if body.display_name and body.display_name != body.username else body.username,
             is_active=True,
             status="active",
             register_source="sso",
@@ -118,8 +119,8 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
             cust.status = "active"
         if not cust.is_active:
             cust.is_active = True
-        if body.display_name and cust.display_name != body.display_name:
-            cust.display_name = body.display_name
+        if body.display_name and cust.display_name != f"{body.username}_{body.display_name}":
+            cust.display_name = f"{body.username}_{body.display_name}"
 
     auth = (
         await db.execute(
