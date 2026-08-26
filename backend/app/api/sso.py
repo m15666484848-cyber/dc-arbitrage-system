@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password
 from app.models.customer import Authorization, Customer
+from app.models.config import ExchangeAccount
 from app.models.kol import Kol, KolFollow
 from app.services.authz import get_authorization_status
 
@@ -61,6 +62,9 @@ class SsoTokenRequest(BaseModel):
     display_name: str = ""
     expires_at: datetime
     max_order_usdt: float = 5000.0
+    # 下单模式: fixed=固定金额(策略基准x倍率) | equity_pct=资金比例(账户权益x百分比)
+    position_mode: str = "fixed"
+    position_pct: float = 0.0
 
 
 class SsoTokenResponse(BaseModel):
@@ -143,6 +147,23 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
         auth.active = True
 
     await _ensure_default_follows(db, cust, is_new)
+
+    # SSO 下单模式同步: 新账户/主服务器明确传值时,同步到该客户所有跟单 API
+    if is_new or body.position_mode in ("fixed", "equity_pct"):
+        if body.position_mode in ("fixed", "equity_pct"):
+            from sqlalchemy import update as sa_update
+            await db.execute(
+                sa_update(ExchangeAccount)
+                .where(ExchangeAccount.customer_id == cust.id)
+                .values(
+                    position_mode=body.position_mode,
+                    position_pct=max(0.0, min(100.0, body.position_pct)),
+                )
+            )
+            logger.info(
+                f"SSO账户 {cust.username} 下单模式同步: {body.position_mode} "
+                f"pct={body.position_pct}"
+            )
 
     cust.last_login_at = now
     try:

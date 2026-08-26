@@ -2410,6 +2410,34 @@ async def process_signal(
             f"API级倍率: account={exchange_account_id} weight={follow_weight} "
             f"notional={before}->{decision.notional_usdt}"
         )
+    # 下单模式 A+B: equity_pct=资金比例(账户权益x百分比), fixed=固定金额(现状)
+    pos_mode = str(getattr(ex_acc, "position_mode", "fixed") or "fixed")
+    pos_pct_cfg = float(getattr(ex_acc, "position_pct", 0.0) or 0.0)
+    if pos_mode == "equity_pct" and pos_pct_cfg > 0:
+        try:
+            from app.services.exchange_adapter import fetch_balance_fast
+            bal = await fetch_balance_fast(
+                exchange, db, customer_id, testnet,
+                exchange_account_id=exchange_account_id,
+            )
+            equity = float(bal.get("equity", 0.0) or bal.get("balance", 0.0) or 0.0)
+            if equity > 0:
+                before = decision.notional_usdt
+                decision.notional_usdt = round(equity * pos_pct_cfg / 100.0, 2)
+                logger.info(
+                    f"下单模式(资金比例): account={exchange_account_id} equity={equity:.2f} "
+                    f"pct={pos_pct_cfg}% notional={before}->{decision.notional_usdt}"
+                )
+            else:
+                logger.warning(
+                    f"下单模式(资金比例)权益为0,回退固定金额: account={exchange_account_id} "
+                    f"notional={decision.notional_usdt}"
+                )
+        except Exception as e:
+            logger.warning(
+                f"下单模式(资金比例)权益查询失败,回退固定金额: account={exchange_account_id} err={e}"
+            )
+
     account_max_order = float(getattr(ex_acc, "max_order_usdt", 0.0) or 0.0)
     if account_max_order > 0 and decision.notional_usdt > account_max_order:
         before = decision.notional_usdt
