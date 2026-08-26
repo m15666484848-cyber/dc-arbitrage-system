@@ -121,6 +121,9 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173"
 
+    # SSO服务密钥: 主授权服务器(pro.dclh.net)调用 /api/sso/token 时校验
+    sso_service_key: str = ""
+
     # P2 修复: 默认 TAKER 手续费率,可通过环境变量配置
     default_taker_fee_rate: float = 0.001
 

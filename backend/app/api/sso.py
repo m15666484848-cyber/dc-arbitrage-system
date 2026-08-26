@@ -1,0 +1,131 @@
+"""SSO服务端点: 主授权服务器(pro.dclh.net)换取客户token。
+
+设计: 主服务器的admin给用户分配 ai_trading license后, 客户端用主账号JWT
+调用主服务器的 /api/AiTradingToken, 主服务器再调用本端点换取DC QUANT token。
+本端点以服务密钥认证(非用户密码), 自动建户(register_source='sso')并同步授权期限,
+保证主服务器是授权唯一来源。
+"""
+from datetime import datetime, timezone
+import secrets
+
+from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.database import get_db
+from app.core.security import create_access_token, hash_password
+from app.models.customer import Authorization, Customer
+from app.services.authz import get_authorization_status
+
+router = APIRouter(prefix="/sso", tags=["SSO"])
+
+
+class SsoTokenRequest(BaseModel):
+    username: str = Field(min_length=2, max_length=64)
+    display_name: str = ""
+    expires_at: datetime
+    max_order_usdt: float = 5000.0
+
+
+class SsoTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    role: str = "customer"
+    user_id: int
+    username: str
+    display_name: str = ""
+
+
+def _require_sso_key(x_sso_key: str = Header(default="")) -> None:
+    if not settings.sso_service_key or x_sso_key != settings.sso_service_key:
+        raise HTTPException(401, "SSO服务密钥无效")
+
+
+def _validate_sso_username(name: str) -> None:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+    if not name or any(ch not in allowed for ch in name):
+        raise HTTPException(400, "SSO用户名仅允许字母/数字/下划线/横线")
+
+
+@router.post("/token", dependencies=[Depends(_require_sso_key)])
+async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
+    _validate_sso_username(body.username)
+    now = datetime.now(timezone.utc)
+    if body.expires_at.tzinfo is None:
+        body.expires_at = body.expires_at.replace(tzinfo=timezone.utc)
+
+    cust = (
+        await db.execute(select(Customer).where(Customer.username == body.username))
+    ).scalar_one_or_none()
+
+    if cust is None:
+        cust = Customer(
+            username=body.username,
+            password_hash=hash_password(secrets.token_urlsafe(24)),
+            display_name=body.display_name or body.username,
+            is_active=True,
+            status="active",
+            register_source="sso",
+            note="主服务器SSO自动开通",
+            max_order_usdt=body.max_order_usdt,
+        )
+        db.add(cust)
+        await db.flush()
+    else:
+        if cust.status not in ("active",):
+            cust.status = "active"
+        if not cust.is_active:
+            cust.is_active = True
+        if body.display_name and cust.display_name != body.display_name:
+            cust.display_name = body.display_name
+
+    auth = (
+        await db.execute(
+            select(Authorization).where(
+                Authorization.customer_id == cust.id,
+                Authorization.exchange == "all",
+                Authorization.note == "SSO",
+            )
+        )
+    ).scalar_one_or_none()
+    if auth is None:
+        db.add(
+            Authorization(
+                customer_id=cust.id,
+                exchange="all",
+                starts_at=now,
+                expires_at=body.expires_at,
+                active=True,
+                note="SSO",
+            )
+        )
+    else:
+        auth.starts_at = now
+        auth.expires_at = body.expires_at
+        auth.active = True
+
+    cust.last_login_at = now
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise HTTPException(500, "SSO登录失败,请稍后重试")
+    await db.refresh(cust)
+
+    token = create_access_token(cust.username, "customer", {"customer_id": cust.id})
+    auth_status = await get_authorization_status(db, cust.id)
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": {
+            "access_token": token,
+            "token_type": "bearer",
+            "role": "customer",
+            "user_id": cust.id,
+            "username": cust.username,
+            "display_name": cust.display_name,
+            "authorization": auth_status,
+        },
+    }

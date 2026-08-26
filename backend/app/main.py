@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 
 from app.api import admin, analytics, auth, health, settings, strategy, trading, ws
+from app.api import sso
 from app.core.config import settings as cfg
 from app.core.database import AsyncSessionLocal, Base, engine
 from app.core.logging import setup_logging
@@ -513,6 +514,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 api_prefix = "/api"
 app.include_router(health.router, prefix=api_prefix)
 app.include_router(auth.router, prefix=api_prefix)
+app.include_router(sso.router, prefix=api_prefix)
 app.include_router(admin.router, prefix=api_prefix)
 app.include_router(trading.router, prefix=api_prefix)
 app.include_router(strategy.router, prefix=api_prefix)
