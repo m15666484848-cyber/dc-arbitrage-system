@@ -68,6 +68,7 @@ services:
     volumes:
       # bind mount 应用代码和迁移文件,修改宿主文件后 recreate/restart 即可生效
       - ./backend/app:/app/app
+      - ./backend/scripts:/app/scripts
       - ./backend/alembic:/app/alembic
       - ./backend/alembic.ini:/app/alembic.ini
       - ./backend/tests:/app/tests
