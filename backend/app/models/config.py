@@ -40,6 +40,10 @@ class ExchangeAccount(Base, TimestampMixin):
     follow_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     follow_weight: Mapped[float] = mapped_column(default=1.0)
     max_order_usdt: Mapped[float] = mapped_column(default=0.0)  # 0=不限
+    # 下单模式: fixed=固定金额(策略基准×倍率) | equity_pct=资金比例(账户权益×百分比)
+    position_mode: Mapped[str] = mapped_column(String(16), default="fixed")
+    # equity_pct 模式下单笔占账户权益百分比(0.01~5), fixed 模式忽略
+    position_pct: Mapped[float] = mapped_column(default=0.0)
     strategy_id: Mapped[int | None] = mapped_column(ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True, index=True)
 
 

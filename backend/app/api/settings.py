@@ -214,6 +214,8 @@ async def add_exchange_account(
         follow_enabled=body.follow_enabled,
         follow_weight=body.follow_weight,
         max_order_usdt=body.max_order_usdt,
+        position_mode=body.position_mode,
+        position_pct=body.position_pct,
         strategy_id=body.strategy_id,
         # 多 API 场景下,"默认下单 API" 是客户级唯一入口。
         # 新增账号不会抢占已有默认账号；只有客户没有任何默认账号时才自动设为默认。
@@ -325,7 +327,7 @@ async def update_exchange_account_follow(
         if not strat:
             raise HTTPException(400, "策略不存在或已停用")
 
-    for field in ("follow_enabled", "follow_weight", "max_order_usdt", "strategy_id"):
+    for field in ("follow_enabled", "follow_weight", "max_order_usdt", "position_mode", "position_pct", "strategy_id"):
         if field in data:
             setattr(acc, field, data[field])
 
