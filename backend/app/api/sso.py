@@ -63,8 +63,9 @@ class SsoTokenRequest(BaseModel):
     expires_at: datetime
     max_order_usdt: float = 5000.0
     # 下单模式: fixed=固定金额(策略基准x倍率) | equity_pct=资金比例(账户权益x百分比)
-    position_mode: str = "fixed"
-    position_pct: float = 0.0
+    # None=主服务器未指定,不覆盖客户已有设置(PRO 端 DcqSsoService 不传这两个字段)
+    position_mode: str | None = Field(default=None, pattern="^(fixed|equity_pct)$")
+    position_pct: float | None = None
 
 
 class SsoTokenResponse(BaseModel):
@@ -102,8 +103,8 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
         cust = Customer(
             username=body.username,
             password_hash=hash_password(secrets.token_urlsafe(24)),
-            # 显示名固定为 登录名_主服务器用户名,便于管理端区分SSO账户归属
-            display_name=f"{body.username}_{body.display_name}" if body.display_name and body.display_name != body.username else body.username,
+            # 登录名已含主服务器用户名(dclh_{uid}_{username});显示名直接用主服务器显示名
+            display_name=body.display_name or body.username,
             is_active=True,
             status="active",
             register_source="sso",
@@ -119,8 +120,8 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
             cust.status = "active"
         if not cust.is_active:
             cust.is_active = True
-        if body.display_name and cust.display_name != f"{body.username}_{body.display_name}":
-            cust.display_name = f"{body.username}_{body.display_name}"
+        if body.display_name and cust.display_name != body.display_name:
+            cust.display_name = body.display_name
 
     auth = (
         await db.execute(
@@ -149,22 +150,21 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
 
     await _ensure_default_follows(db, cust, is_new)
 
-    # SSO 下单模式同步: 新账户/主服务器明确传值时,同步到该客户所有跟单 API
-    if is_new or body.position_mode in ("fixed", "equity_pct"):
-        if body.position_mode in ("fixed", "equity_pct"):
-            from sqlalchemy import update as sa_update
-            await db.execute(
-                sa_update(ExchangeAccount)
-                .where(ExchangeAccount.customer_id == cust.id)
-                .values(
-                    position_mode=body.position_mode,
-                    position_pct=max(0.0, min(100.0, body.position_pct)),
-                )
+    # SSO 下单模式同步: 仅主服务器明确传值时同步;未传(None)时保留客户在客户端的设置
+    if body.position_mode is not None:
+        from sqlalchemy import update as sa_update
+        await db.execute(
+            sa_update(ExchangeAccount)
+            .where(ExchangeAccount.customer_id == cust.id)
+            .values(
+                position_mode=body.position_mode,
+                position_pct=max(0.0, min(100.0, body.position_pct or 0.0)),
             )
-            logger.info(
-                f"SSO账户 {cust.username} 下单模式同步: {body.position_mode} "
-                f"pct={body.position_pct}"
-            )
+        )
+        logger.info(
+            f"SSO账户 {cust.username} 下单模式同步: {body.position_mode} "
+            f"pct={body.position_pct}"
+        )
 
     cust.last_login_at = now
     try:
