@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import secrets
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +18,40 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password
 from app.models.customer import Authorization, Customer
+from app.models.kol import Kol, KolFollow
 from app.services.authz import get_authorization_status
+
+# SSO 自动开通账户的默认关注 KOL
+DEFAULT_FOLLOW_KOL_NAMES = ("飞扬", "所长", "舒琴", "陈哥", "峰哥")
+
+
+async def _ensure_default_follows(db: AsyncSession, cust: Customer, is_new: bool) -> None:
+    """新账户自动关注默认 KOL;已有账户仅在从未配置过关注时补一次。
+
+    已有任何关注记录的账户不再补,避免覆盖客户主动取消的关注。
+    """
+    existing = set(
+        (await db.execute(select(KolFollow.kol_id).where(KolFollow.customer_id == cust.id)))
+        .scalars()
+        .all()
+    )
+    if existing and not is_new:
+        return
+    kol_ids = (
+        (await db.execute(
+            select(Kol.id).where(Kol.name.in_(DEFAULT_FOLLOW_KOL_NAMES), Kol.enabled.is_(True))
+        ))
+        .scalars()
+        .all()
+    )
+    added = 0
+    for kid in kol_ids:
+        if kid not in existing:
+            db.add(KolFollow(customer_id=cust.id, kol_id=kid, enabled=True))
+            added += 1
+    if added:
+        logger.info(f"SSO账户 {cust.username} 默认关注 {added} 个KOL: {DEFAULT_FOLLOW_KOL_NAMES}")
+
 
 router = APIRouter(prefix="/sso", tags=["SSO"])
 
@@ -73,7 +107,9 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
         )
         db.add(cust)
         await db.flush()
+        is_new = True
     else:
+        is_new = False
         if cust.status not in ("active",):
             cust.status = "active"
         if not cust.is_active:
@@ -105,6 +141,8 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
         auth.starts_at = now
         auth.expires_at = body.expires_at
         auth.active = True
+
+    await _ensure_default_follows(db, cust, is_new)
 
     cust.last_login_at = now
     try:
