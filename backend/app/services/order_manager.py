@@ -2023,10 +2023,21 @@ async def process_signal(
                 action_parsed.side = "long"
             elif action == "open_short":
                 action_parsed.side = "short"
-            elif action in ("close_position", "cancel_order", "update_tp_sl"):
-                # 对非开仓动作,避免后续开仓路径误触发。
-                if action != "close_position" and action_parsed.action != "open_long" and action_parsed.action != "open_short":
-                    pass
+            elif action == "cancel_order":
+                # ★ Fix(2026-08-26): 复合指令(撤X直接开Y) — 解析器已把 parsed.symbol
+                # 指向新开仓品种(ETH),撤单动作须改回撤单目标品种(BTC),否则撤错单。
+                # 入场价属于新单,不能用于过滤旧挂单,一并清空。
+                from app.services import signal_parser as _sp
+
+                _cancel_sym, _cancel_side = _sp.extract_cancel_target(
+                    getattr(parsed, "raw_text", "") or ""
+                )
+                if _cancel_sym:
+                    action_parsed.symbol = _cancel_sym
+                    if _cancel_side:
+                        action_parsed.side = _cancel_side
+                    action_parsed.entry_price = None
+                    action_parsed.entry_prices = []
             try:
                 one = await process_signal(
                     db,

@@ -641,7 +641,12 @@ UPDATE_KEYWORDS = [
     rf"上移\s*止损", rf"下移\s*止损", rf"上移\s*止盈", rf"下移\s*止盈",
     rf"推\s*止损", rf"拉\s*止损", rf"止损\s*保护",
     rf"推\s*保护价|推\s*保护|保护价(?:下来|上去|到|至)?|保护成本|保护利润",
-    rf"保本(?:止损)?", rf"保护(?:利润|本金)",
+    # ★ Fix(2026-08-26): 裸"保本"精确化 — 排除止盈阶梯描述"走X%移动保本"
+    # (8-26 三马哥#3212/3213/3243 完整开仓单被裸"保本"关键词误判为更新信号,
+    # 导致挂单未建、多单按"已达成止盈"误平)。前接"移动"=止盈阶梯描述;
+    # 后接"出局/走"=平仓指令(EXIT 词表已覆盖);"保本止损"等其余仍按更新。
+    rf"(?<!移动)保本(?!(?:出局|离场|出场|走人|走|了))",
+    rf"保护(?:利润|本金)",
     rf"止盈(?:先看|看到|看至|看向)",
     rf"\bTP\s*{UPDATE_VERBS}", rf"\bSL\s*{UPDATE_VERBS}",
     # Round 2: 补充更新信号变体
@@ -842,6 +847,10 @@ REOPEN_AFTER_CANCEL_PATTERNS = [
     r"重新挂|再挂|新挂|补挂",
     r"重新进|再次进|再开|重新开",
     r"重新改(?:这个|一下|个)?",  # P0-4: "重新改这个"=新开仓,非更新
+    # ★ Fix(2026-08-26): "撤掉X，直接(市价)做空/做多Y"复合指令 —
+    # "直接+开仓动词"表示撤旧单后立即开新仓(8-26 三马哥#3238 撤BTC空单
+    # 直接市价做空ETH,只执行了撤单,ETH空单漏开)。
+    r"直接.{0,10}(?:市价|限价|现价)?(?:做多|做空|开多|开空|买入|卖出|进多|进空|挂多|挂空)",
 ]
 
 # ---------- 场景分类与话术库 ----------
@@ -976,7 +985,11 @@ def classify_signal_scene(text: str) -> tuple[str, str]:
         return "narrative", "生活吐槽/叙事内容"
     if _has_any_pattern(text, CANCEL_ORDER_PATTERNS):
         return "cancel_order", "撤销挂单话术"
-    if _has_any_pattern(text, UPDATE_KEYWORDS):
+    if _has_any_pattern(text, UPDATE_KEYWORDS) and not has_trade_block:
+        # ★ Fix(2026-08-26): 含完整交易参数块(方向+建仓要素)的策略单优先按
+        # trade_block 场景处理 — 止盈阶梯里的"移动保本/推保护"等描述会误命中
+        # 更新关键词,完整开仓单曾被整体误判为更新信号(#3212/3213/3243)。
+        # 真正的更新消息(如"止损改成75000")没有建仓/入场要素,不受影响。
         return "update_tp_sl", "止盈止损更新话术"
     if _has_any_pattern(text, PENDING_STATUS_PATTERNS) and has_trade_block:
         return "refresh_pending", "挂着且包含完整交易参数"
@@ -1269,6 +1282,56 @@ def detect_signal_actions(
     return _sort_signal_actions(actions)
 
 
+# ★ Fix(2026-08-26): 复合指令(撤X直接开Y)品种提取。
+# 背景: "撤掉BTC的空单，直接头仓市价做空ETH"含两个品种 — 撤单目标BTC、
+# 开仓目标ETH。extract_symbol 取首个出现的品种(BTC),会把新开仓错误地开在
+# 撤单目标品种上。开仓品种取"直接做空/做多"动词后紧跟的币种。
+_COMPOUND_OPEN_SYMBOL_RE = re.compile(
+    r"(?:直接|改成|改做|换成?|切换到?|换到)\s*"
+    r"(?:头仓|首仓|轻仓|半仓|重仓|底仓)?\s*"
+    r"(?:市价|限价|现价)?\s*"
+    r"(?:做多|做空|开多|开空|买入|卖出|进多|进空|挂多|挂空)"
+    r"\s*([A-Za-z]{2,10})"
+)
+
+# 撤单目标品种: "撤掉BTC的空单"→BTC,供多动作拆分时撤单动作单独使用。
+# 第二组捕获单据类型(多单/空单/挂单...),用于推断撤单方向。
+_CANCEL_TARGET_SYMBOL_RE = re.compile(
+    r"(?:撤掉|撤销|撤了|撤回|取消|不挂)\s*([A-Za-z]{2,10})\s*的?\s*"
+    r"(多单|空单|挂单|委托|单子|仓位)"
+)
+
+
+def extract_compound_open_symbol(text: str) -> str:
+    """复合指令(撤X直接开Y)中新开仓的目标品种,如"直接市价做空ETH"→ETH/USDT。"""
+    if not text:
+        return ""
+    m = _COMPOUND_OPEN_SYMBOL_RE.search(text)
+    if m:
+        return normalize_symbol(m.group(1))
+    return ""
+
+
+def extract_cancel_target(text: str) -> tuple[str, str]:
+    """复合指令中撤单动作的目标(品种,方向),如"撤掉BTC的空单"→("BTC/USDT","short")。
+
+    方向:多单→long、空单→short;挂单/委托/单子/仓位等中性词返回空串(撤单时不按方向过滤)。
+    """
+    if not text:
+        return "", ""
+    m = _CANCEL_TARGET_SYMBOL_RE.search(text)
+    if not m:
+        return "", ""
+    sym = normalize_symbol(m.group(1))
+    side = {"多单": "long", "空单": "short"}.get(m.group(2), "")
+    return sym, side
+
+
+def extract_cancel_target_symbol(text: str) -> str:
+    """复合指令中撤单动作的目标品种,如"撤掉BTC的空单"→BTC/USDT。"""
+    return extract_cancel_target(text)[0]
+
+
 def apply_actions_to_parsed(text: str, parsed: ParsedSignal) -> ParsedSignal:
     """根据解析结果补齐 actions/action,同时兼容旧布尔字段。"""
     actions = detect_signal_actions(
@@ -1287,6 +1350,18 @@ def apply_actions_to_parsed(text: str, parsed: ParsedSignal) -> ParsedSignal:
     actions = _sort_signal_actions(actions)
     parsed.actions = actions
     parsed.action = actions[0] if actions else ""
+    # ★ Fix(2026-08-26): 复合指令(撤X直接开Y) — 同时含撤单和开仓动作时,
+    # 开仓品种取"直接做空/做多"后的新目标(如ETH),不能用首个出现的撤单
+    # 目标品种(如BTC)。撤单动作的品种由 order_manager 多动作拆分单独处理。
+    if "cancel_order" in actions and any(a.startswith("open_") for a in actions):
+        open_sym = extract_compound_open_symbol(text)
+        if open_sym:
+            parsed.symbol = open_sym
+            # "直接市价做空ETH"是市价开仓:规则路径从保证金倍数/强平价等残数
+            # 提取的"入场价"(如3000)不是真实入场价,清空后下游按市价单执行。
+            if re.search(r"(?:直接|改成|改做|换成?|切换到?|换到).{0,10}市价", text):
+                parsed.entry_price = None
+                parsed.entry_prices = []
     return parsed
 
 
@@ -2394,11 +2469,24 @@ def parse_text(text: str) -> ParsedSignal:
 
     # 5.4 部分止盈/分批止盈优先按部分平仓处理。
     # 只在带百分比或明确"分批/部分止盈"时触发,避免把"止盈67200"误当平仓。
+    # ★ Fix(2026-08-26): 完整开仓策略保护 — "第一止盈 2428 走70%移动保本"类
+    # 止盈阶梯描述(挂单多/空+多级止盈+止损+补仓结构)不是立即部分平仓指令
+    # (#3212/3213 在 LLM 超时规则兜底时曾被"走70%"误判为平仓,会误平真实仓位)。
+    # 真实部分平仓消息(如"止盈70%,剩余仓位挂78888全部止盈")没有止损价和
+    # 多级止盈结构;"挂单成交"类真实平仓消息不含"挂价/挂单多空"结构,不受保护。
     partial_exit_pct = extract_position_pct(text)
+    _open_plan_guard = bool(
+        re.search(r"(?:挂单[多空]|挂\s*[\d.]+|再挂|补仓|建仓|市价进)", text)
+        and (
+            re.search(r"第[一二三四五1-9]\s*止盈", text)
+            or (sl is not None and (entry_prices or entry))
+        )
+    )
     if (
         partial_exit_pct > 0
         and re.search(r"(?:止盈|分批|部分|先出|减仓|平掉|平仓|推保护|保护价)", text, re.IGNORECASE)
         and not any(a.startswith("open_") for a in pre_actions)
+        and not _open_plan_guard
     ):
         return ParsedSignal(
             symbol=symbol,
@@ -2806,6 +2894,23 @@ async def parse_message(
                         if has_tp_or_sl and llm_has_no_entry and llm_has_no_side:
                             is_update = True
                             update_reason = "隐式更新信号: 有止盈/止损但无入场价和方向"
+                    # ★ Fix(2026-08-26): LLM 已提取完整开仓要素(方向+入场价+止盈/止损)
+                    # 且文本含明确开仓词时,不再因更新关键词命中改判为更新信号 —
+                    # "走X%移动保本"类止盈阶梯描述会误触发更新关键词
+                    # (8-26 三马哥#3212/3213 LLM 正确识别开仓却被覆盖成更新,挂单未建)。
+                    # 真正的更新消息 LLM 不会返回入场价(prompt 明确要求更新信号价格
+                    # 填 stop_loss/take_profits 而非 entry_price),此守卫不影响其生效。
+                    if (
+                        is_update
+                        and llm_parsed.side in ("long", "short")
+                        and (llm_parsed.entry_price is not None or llm_parsed.entry_prices)
+                        and (llm_parsed.take_profits or llm_parsed.stop_loss is not None)
+                        and _has_any_pattern(combined_for_parse, EXPLICIT_OPEN_PATTERNS)
+                    ):
+                        logger.info(
+                            f"[{kol_name}] LLM 已提取完整开仓要素,忽略更新关键词命中: {update_reason}"
+                        )
+                        is_update = False
                     if is_update:
                         llm_parsed.is_update_signal = True
                         llm_parsed.update_reason = update_reason
