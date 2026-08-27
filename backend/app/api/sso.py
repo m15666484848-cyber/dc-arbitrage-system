@@ -61,10 +61,10 @@ class SsoTokenRequest(BaseModel):
     username: str = Field(min_length=2, max_length=64)
     display_name: str = ""
     expires_at: datetime
-    max_order_usdt: float = 5000.0
+    max_order_usdt: float = Field(default=5000.0, ge=0, le=99999)
     # 下单模式: fixed=固定金额(策略基准x倍率) | equity_pct=资金比例(账户权益x百分比)
     # None=主服务器未指定,不覆盖客户已有设置(PRO 端 DcqSsoService 不传这两个字段)
-    position_mode: str | None = Field(default=None, pattern="^(fixed|equity_pct)$")
+    position_mode: str | None = Field(default=None, pattern="^(fixed|equity_pct|fixed_amount)$")
     position_pct: float | None = None
 
 
@@ -122,6 +122,12 @@ async def sso_token(body: SsoTokenRequest, db: AsyncSession = Depends(get_db)):
             cust.is_active = True
         if body.display_name and cust.display_name != body.display_name:
             cust.display_name = body.display_name
+        # 管理员单笔上限同步: 主服务器(PRO)始终携带该值,是唯一配置来源
+        if cust.max_order_usdt != body.max_order_usdt:
+            cust.max_order_usdt = body.max_order_usdt
+            logger.info(
+                f"SSO账户 {cust.username} 管理员单笔上限同步: {body.max_order_usdt} USDT"
+            )
 
     auth = (
         await db.execute(

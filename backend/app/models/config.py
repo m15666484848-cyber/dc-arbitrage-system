@@ -44,6 +44,8 @@ class ExchangeAccount(Base, TimestampMixin):
     position_mode: Mapped[str] = mapped_column(String(16), default="fixed")
     # equity_pct 模式下单笔占账户权益百分比(0.01~5), fixed 模式忽略
     position_pct: Mapped[float] = mapped_column(default=0.0)
+    # fixed_amount 模式下单笔固定金额(USDT), 其余模式忽略
+    fixed_amount_usdt: Mapped[float] = mapped_column(default=0.0)
     strategy_id: Mapped[int | None] = mapped_column(ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True, index=True)
 
 

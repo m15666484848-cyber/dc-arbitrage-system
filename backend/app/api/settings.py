@@ -198,6 +198,9 @@ async def add_exchange_account(
         if not strat:
             raise HTTPException(400, "策略不存在或已停用")
 
+    if body.position_mode == "fixed_amount" and body.fixed_amount_usdt <= 0:
+        raise HTTPException(400, "固定金额(USDT)模式必须设置大于0的单笔金额")
+
     has_default = any(a.is_default for a in existing)
 
     acc = ExchangeAccount(
@@ -216,6 +219,7 @@ async def add_exchange_account(
         max_order_usdt=body.max_order_usdt,
         position_mode=body.position_mode,
         position_pct=body.position_pct,
+        fixed_amount_usdt=body.fixed_amount_usdt,
         strategy_id=body.strategy_id,
         # 多 API 场景下,"默认下单 API" 是客户级唯一入口。
         # 新增账号不会抢占已有默认账号；只有客户没有任何默认账号时才自动设为默认。
@@ -312,6 +316,10 @@ async def update_exchange_account_follow(
         raise HTTPException(404, "账号不存在或已禁用")
 
     data = body.model_dump(exclude_unset=True)
+    if data.get("position_mode") == "fixed_amount":
+        _amt = data.get("fixed_amount_usdt")
+        if _amt is None or _amt <= 0:
+            raise HTTPException(400, "固定金额(USDT)模式必须设置大于0的单笔金额")
     if "strategy_id" in data and data["strategy_id"]:
         from app.models.strategy import Strategy
 
@@ -327,7 +335,7 @@ async def update_exchange_account_follow(
         if not strat:
             raise HTTPException(400, "策略不存在或已停用")
 
-    for field in ("follow_enabled", "follow_weight", "max_order_usdt", "position_mode", "position_pct", "strategy_id"):
+    for field in ("follow_enabled", "follow_weight", "max_order_usdt", "position_mode", "position_pct", "fixed_amount_usdt", "strategy_id"):
         if field in data:
             setattr(acc, field, data[field])
 

@@ -17,8 +17,9 @@ class ExchangeAccountOut(BaseModel):
     follow_enabled: bool = False
     follow_weight: float = Field(1.0, ge=0)
     max_order_usdt: float = Field(0.0, ge=0)
-    position_mode: str = "fixed"  # fixed|equity_pct
+    position_mode: str = "fixed"  # fixed|equity_pct|fixed_amount
     position_pct: float = Field(0.0, ge=0)
+    fixed_amount_usdt: float = Field(0.0, ge=0)
     strategy_id: int | None = None
     last_error: str = ""
     last_verified_at: datetime | None = None
@@ -40,8 +41,9 @@ class ExchangeAccountCreate(BaseModel):
     follow_enabled: bool = False
     follow_weight: float = Field(default=1.0, ge=0, le=100)
     max_order_usdt: float = Field(default=0.0, ge=0)
-    position_mode: str = "fixed"  # fixed|equity_pct
+    position_mode: str = "fixed"  # fixed|equity_pct|fixed_amount
     position_pct: float = Field(default=0.0, ge=0, le=5)
+    fixed_amount_usdt: float = Field(default=0.0, ge=0)
     strategy_id: int | None = None
 
 
@@ -51,8 +53,9 @@ class ExchangeAccountFollowUpdate(BaseModel):
     follow_enabled: bool | None = None
     follow_weight: float | None = Field(default=None, ge=0, le=100)
     max_order_usdt: float | None = Field(default=None, ge=0)
-    position_mode: str | None = Field(default=None, pattern="^(fixed|equity_pct)$")
+    position_mode: str | None = Field(default=None, pattern="^(fixed|equity_pct|fixed_amount)$")
     position_pct: float | None = Field(default=None, ge=0, le=5)
+    fixed_amount_usdt: float | None = Field(default=None, ge=0)
     strategy_id: int | None = None
 
 
