@@ -230,6 +230,7 @@ LONG_WORDS = {
     "进行方向：做多", "进行方向:做多", "方向：多", "方向:多",
     # KOL 常用做多术语(不含已有词的子串)
     "挂多", "挂单多", "进多", "接多", "加多", "低多", "看涨", "低吸", "多军", "起涨",
+    "多进去", "多进入",  # ★ Fix(2026-08-27): 倒装方向词(#3321 同类格式)
     "逢低接", "逢低买入", "逢低做多",
     # Emoji 方向标识
     "📈", "🐂", "🈵", "🚀", "🟢",
@@ -242,6 +243,7 @@ SHORT_WORDS = {
     # KOL 常用做空术语(不含已有词的子串)
     "挂空", "挂单空", "进空", "接空", "加空", "高空", "看跌", "高抛", "空军", "起跌",
     "逢高抛", "逢高做空", "逢高卖出",
+    "空进去", "空进入",  # ★ Fix(2026-08-27): #3321 "反弹78100附近空进去"曾被"反弹"长词误判为做多
     # Emoji 方向标识
     "📉", "🐻", "🈳", "🔻", "🔴",
 }
@@ -1813,6 +1815,12 @@ def extract_stop_loss(text: str) -> float | None:
 def extract_entry(text: str) -> tuple[float | None, list[float]]:
     """返回 (首个入场价, 分批入场价列表)。"""
     text = _strip_time_expressions(text)
+    # ★ Fix(2026-08-27): "2457附近市价已经进场 100倍 2%保证金"(#3243) —
+    # 市价进场类描述本身无入场价,后续批次/关键词提取器会把"100倍
+    # 3%保证金"的倍数/保证金数字误当入场价(100/3),下游按远离市价的
+    # 待触发单挂7天过期,仓位永远开不出。市价进场 → 清空入场价,按市价执行。
+    if re.search(r"(?:市价|现价)[^。！？!?\n，,]{0,6}(?:进场|入场|进入|开仓|建仓|介入)", text):
+        return None, []
     # 关键词列表 (按优先级排序)
     # "点位" 放最后,避免优先匹配到 "止盈点位/止损点位" 的价格
     keywords = [
@@ -1842,9 +1850,15 @@ def extract_entry(text: str) -> tuple[float | None, list[float]]:
     # 三马哥式挂单格式: "79450 100倍 2%保证金" / "再挂81088 100倍 3%保证金"。
     # 价格后紧跟 倍数+百分比保证金 标注的数字是分批入场价(带杠杆信息),
     # 不是止盈止损。背景#3213: 该格式挂单计划曾因无入场价被当市价/更新处理。
-    leverage_entry_pat = rf"(?<!止盈)(?<!止损)(?<!目标){PRICE_RE}\b\s*\d{{1,3}}\s*倍\s*\d+(?:\.\d+)?\s*%\s*保证金"
+    # ★ Fix(2026-08-27): 价格与倍数之间允许衔接词(#3401 "78800附近直接进
+    #  100倍 2%保证金"曾因\b被阻断,只匹配到补仓价76888,主入场价78800丢失);
+    # 同时兼容"再挂2288补仓 100倍"带补仓词格式,两批入场价都能提取。
+    leverage_entry_pat = rf"(?<!止盈)(?<!止损)(?<!目标){PRICE_RE}(?:\s*(?:附近|左右|直接|市价|现价|已经?|经|进|场|入|进入|进场|入场|补仓|加仓))*\s*\d{{1,3}}\s*倍\s*\d+(?:\.\d+)?\s*%\s*保证金"
     lev_prices: list[float] = []
     for m in re.finditer(leverage_entry_pat, text):
+        # 价格组后紧跟数字说明数字被拆分("100倍"拆成"10"+"0倍"),跳过该误匹配
+        if m.end(1) < len(text) and text[m.end(1)].isdigit():
+            continue
         p = _to_float(m.group(1))
         if p and p > 0 and p not in lev_prices:
             lev_prices.append(p)
@@ -1853,12 +1867,16 @@ def extract_entry(text: str) -> tuple[float | None, list[float]]:
 
     # "分批建仓/分2次入场/挂单/建仓" 后直接跟多个价格,视为分批入场价。
     batch_then_prices = re.search(
-        rf"(?:分\s*[一二两三四五六七八九十\d]+\s*(?:批|笔|次)\s*)?(?:分批|分批建仓|分批入场|分批进场|建仓|挂单|埋伏|接|低吸|补仓)\s*[:：]?\s*(.*?)(?=止损|止盈|目标|\bsl\b|\btp\b|$)",
+        rf"(?:分\s*[一二两三四五六七八九十\d]+\s*(?:批|笔|次)\s*)?(?:分批|分批建仓|分批入场|分批进场|建仓|挂单|埋伏|接|低吸|补仓)\s*[:：]?\s*(.*?)(?=止损|止盈|目标|[，。；！？]|\bsl\b|\btp\b|$)",
         text,
         re.IGNORECASE,
     )
     if batch_then_prices:
         segment = batch_then_prices.group(1)
+        # ★ Fix(2026-08-27): 剔除杠杆/保证金标注数字("100倍 3%保证金"),
+        # 防止#3243"不提前发补仓点...100倍 3%保证金"误提取为入场价(100/3)。
+        segment = re.sub(r"\d+(?:[.,]\d+)?\s*倍", " ", segment)
+        segment = re.sub(r"\d+(?:[.,]\d+)?\s*%", " ", segment)
         nums = re.findall(PRICE_RE, segment)
         prices: list[float] = []
         is_wan = "万" in segment
@@ -1901,12 +1919,15 @@ def extract_entry(text: str) -> tuple[float | None, list[float]]:
     # 特殊模式: "开多 65000/64000" / "重新挂多 65000 64000"。
     # 方向/挂单动作后直接跟多个价格时,这些价格就是分批入场价。
     action_then_prices = re.search(
-        rf"(?:重新挂|再挂|新挂|补挂|分批建仓|分批入场|分批进场|挂多|挂空|挂单|建仓|开多|开空|进多|进空|做多|做空|买入|卖出|入场|进场|entry)\s*[:：]?\s*(.*?)(?=止损|止盈|目标|\bsl\b|\btp\b|$)",
+        rf"(?:重新挂|再挂|新挂|补挂|分批建仓|分批入场|分批进场|挂多|挂空|挂单|建仓|开多|开空|进多|进空|做多|做空|买入|卖出|入场|进场|entry)\s*[:：]?\s*(.*?)(?=止损|止盈|目标|[，。；！？]|\bsl\b|\btp\b|$)",
         text,
         re.IGNORECASE,
     )
     if action_then_prices:
         segment = action_then_prices.group(1)
+        # ★ Fix(2026-08-27): 同上,剔除杠杆/保证金标注数字防误取。
+        segment = re.sub(r"\d+(?:[.,]\d+)?\s*倍", " ", segment)
+        segment = re.sub(r"\d+(?:[.,]\d+)?\s*%", " ", segment)
         nums = re.findall(PRICE_RE, segment)
         prices = []
         is_wan = "万" in segment
