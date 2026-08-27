@@ -860,6 +860,30 @@ def check_correction_update(text: str) -> tuple[bool, str, float | None, list[fl
     return True, "更正" + ", ".join(parts), sl_val, tp_vals
 
 
+# 反手指令: "空单换手做多/反手做空/空翻多" = 平掉反向仓+开新仓的复合指令。
+# 背景(2026-08-27): 陈哥#3416"BTC空单市价78800附近成本附近换手做多"被解析成
+# 单纯open_long,反向持仓守卫拦截开仓,旧空单既没平也没反手,信号整体漏执行。
+_REVERSE_OPEN_RE = re.compile(
+    r"(?:换手|反手|翻仓|翻转|调转)(?:.{0,6}?)(做多|做空|开多|开空)"
+    r"|(空翻多|空转多|多翻空|多转空)"
+)
+
+
+def detect_reverse_open_side(text: str) -> str:
+    """识别反手指令的新方向: "换手做多"→long, "多翻空"→short, 无则返回空串。"""
+    if not text:
+        return ""
+    m = _REVERSE_OPEN_RE.search(text)
+    if not m:
+        return ""
+    g = m.group(1) or m.group(2) or ""
+    if g in ("做空", "开空", "多翻空", "多转空"):
+        return "short"
+    if g in ("做多", "开多", "空翻多", "空转多"):
+        return "long"
+    return ""
+
+
 # ---------- 多动作识别 ----------
 # 第7步: 信号分类与优先级排序。
 # 说明: 一条 KOL 消息可能同时包含平仓/撤单/更新/开仓。
@@ -1334,6 +1358,12 @@ def detect_signal_actions(
     - 只有明确出现开仓/新挂单词,才生成 open_long/open_short。
     """
     actions: list[str] = []
+    # 反手指令优先: "换手做多"=平反向仓+开多, 直接产出复合动作,
+    # 避免被当作单纯开仓后遭反向持仓守卫拦截(旧仓不平、新仓不开)。
+    reverse_side = detect_reverse_open_side(text)
+    if reverse_side:
+        actions.append("close_position")
+        actions.append(f"open_{reverse_side}")
     has_cancel = _has_any_pattern(text, CANCEL_ORDER_PATTERNS)
     has_pending_status = _has_any_pattern(text, PENDING_STATUS_PATTERNS)
     has_explicit_open = _has_any_pattern(text, EXPLICIT_OPEN_PATTERNS)
@@ -1439,6 +1469,15 @@ def apply_actions_to_parsed(text: str, parsed: ParsedSignal) -> ParsedSignal:
     actions = _sort_signal_actions(actions)
     parsed.actions = actions
     parsed.action = actions[0] if actions else ""
+    # 反手复合指令: 若方向未被主流程识别,用反手方向兜底
+    if (
+        "close_position" in actions
+        and any(a.startswith("open_") for a in actions)
+        and parsed.side not in ("long", "short")
+    ):
+        _rev = detect_reverse_open_side(text)
+        if _rev:
+            parsed.side = _rev
     # ★ Fix(2026-08-26): 复合指令(撤X直接开Y) — 同时含撤单和开仓动作时,
     # 开仓品种取"直接做空/做多"后的新目标(如ETH),不能用首个出现的撤单
     # 目标品种(如BTC)。撤单动作的品种由 order_manager 多动作拆分单独处理。

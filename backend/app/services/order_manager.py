@@ -2023,6 +2023,16 @@ async def process_signal(
                 action_parsed.side = "long"
             elif action == "open_short":
                 action_parsed.side = "short"
+            elif action == "close_position":
+                # 反手复合指令(换手做多/空翻多): 平仓动作明确平反向仓,
+                # 不依赖"不限方向"兜底,避免误平同向仓。
+                from app.services import signal_parser as _sp
+
+                _rev_side = _sp.detect_reverse_open_side(
+                    getattr(parsed, "raw_text", "") or ""
+                )
+                if _rev_side:
+                    action_parsed.side = "short" if _rev_side == "long" else "long"
             elif action == "cancel_order":
                 # ★ Fix(2026-08-26): 复合指令(撤X直接开Y) — 解析器已把 parsed.symbol
                 # 指向新开仓品种(ETH),撤单动作须改回撤单目标品种(BTC),否则撤错单。
@@ -2410,10 +2420,25 @@ async def process_signal(
             f"API级倍率: account={exchange_account_id} weight={follow_weight} "
             f"notional={before}->{decision.notional_usdt}"
         )
-    # 下单模式 A+B: equity_pct=资金比例(账户权益x百分比), fixed=固定金额(现状)
+    # 下单模式 A+B+C: equity_pct=资金比例(账户权益x百分比), fixed=固定金额(策略基准x倍率),
+    # fixed_amount=固定金额(绝对值,每笔按用户设置的USDT金额下单,不随策略基准浮动)
     pos_mode = str(getattr(ex_acc, "position_mode", "fixed") or "fixed")
     pos_pct_cfg = float(getattr(ex_acc, "position_pct", 0.0) or 0.0)
-    if pos_mode == "equity_pct" and pos_pct_cfg > 0:
+    fixed_amt_cfg = float(getattr(ex_acc, "fixed_amount_usdt", 0.0) or 0.0)
+    if pos_mode == "fixed_amount":
+        if fixed_amt_cfg > 0:
+            before = decision.notional_usdt
+            decision.notional_usdt = round(fixed_amt_cfg, 2)
+            logger.info(
+                f"下单模式(固定金额USDT): account={exchange_account_id} "
+                f"notional={before}->{decision.notional_usdt}"
+            )
+        else:
+            logger.warning(
+                f"下单模式(固定金额USDT)未设置金额,按策略基准金额下单: "
+                f"account={exchange_account_id} notional={decision.notional_usdt}"
+            )
+    elif pos_mode == "equity_pct" and pos_pct_cfg > 0:
         try:
             from app.services.exchange_adapter import fetch_balance_fast
             bal = await fetch_balance_fast(
