@@ -229,7 +229,7 @@ LONG_WORDS = {
     "bull", "bullish",
     "进行方向：做多", "进行方向:做多", "方向：多", "方向:多",
     # KOL 常用做多术语(不含已有词的子串)
-    "挂多", "进多", "接多", "加多", "低多", "看涨", "低吸", "多军", "起涨",
+    "挂多", "挂单多", "进多", "接多", "加多", "低多", "看涨", "低吸", "多军", "起涨",
     "逢低接", "逢低买入", "逢低做多",
     # Emoji 方向标识
     "📈", "🐂", "🈵", "🚀", "🟢",
@@ -240,7 +240,7 @@ SHORT_WORDS = {
     "bear", "bearish",
     "进行方向：做空", "进行方向:做空", "方向：空", "方向:空",
     # KOL 常用做空术语(不含已有词的子串)
-    "挂空", "进空", "接空", "加空", "高空", "看跌", "高抛", "空军", "起跌",
+    "挂空", "挂单空", "进空", "接空", "加空", "高空", "看跌", "高抛", "空军", "起跌",
     "逢高抛", "逢高做空", "逢高卖出",
     # Emoji 方向标识
     "📉", "🐻", "🈳", "🔻", "🔴",
@@ -435,8 +435,8 @@ def _detect_cn_direction_priority(text: str) -> str:
         ("short", r"阻力\s*(?:位|附近)?.{0,8}(?:空|做空|开空)"),
         ("long", r"做多\s*(?:go\s*long)?"),
         ("short", r"做空\s*(?:go\s*short)?"),
-        ("long", r"(?:方向\s*[:：]?\s*)?(?:做多|开多|进多|接多|挂多|多单|低多|低吸|逢低做多|逢低接|抄底)"),
-        ("short", r"(?:方向\s*[:：]?\s*)?(?:做空|开空|进空|接空|挂空|空单|高空|短空|逢高做空|反弹空|阻力空)"),
+        ("long", r"(?:方向\s*[:：]?\s*)?(?:做多|开多|进多|接多|挂多|挂单多|多单|低多|低吸|逢低做多|逢低接|抄底)"),
+        ("short", r"(?:方向\s*[:：]?\s*)?(?:做空|开空|进空|接空|挂空|挂单空|空单|高空|短空|逢高做空|反弹空|阻力空)"),
         ("long", r"1\s*倍\s*(?:多|做多)"),
         ("short", r"1\s*倍\s*(?:空|做空)"),
     ]
@@ -1820,6 +1820,18 @@ def extract_entry(text: str) -> tuple[float | None, list[float]]:
                 batch_labeled_prices.append(p)
     if batch_labeled_prices:
         return batch_labeled_prices[0], batch_labeled_prices
+
+    # 三马哥式挂单格式: "79450 100倍 2%保证金" / "再挂81088 100倍 3%保证金"。
+    # 价格后紧跟 倍数+百分比保证金 标注的数字是分批入场价(带杠杆信息),
+    # 不是止盈止损。背景#3213: 该格式挂单计划曾因无入场价被当市价/更新处理。
+    leverage_entry_pat = rf"(?<!止盈)(?<!止损)(?<!目标){PRICE_RE}\b\s*\d{{1,3}}\s*倍\s*\d+(?:\.\d+)?\s*%\s*保证金"
+    lev_prices: list[float] = []
+    for m in re.finditer(leverage_entry_pat, text):
+        p = _to_float(m.group(1))
+        if p and p > 0 and p not in lev_prices:
+            lev_prices.append(p)
+    if lev_prices:
+        return lev_prices[0], lev_prices
 
     # "分批建仓/分2次入场/挂单/建仓" 后直接跟多个价格,视为分批入场价。
     batch_then_prices = re.search(
