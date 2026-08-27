@@ -690,9 +690,27 @@ _COND_EXIT_IMPLICIT_RE = re.compile(
 )
 
 
+# ★ 行为条件豁免(2026-08-27): #3398 "如果你没有严格执行现在直接把剩余
+# 仓位全部平掉不要犹豫" — "如果"从句指向执行状态(没执行/没跟上)而非价格,
+# 且句内带立即平仓指令词,属于立即执行命令,不是价格条件离场,守卫不得拦截
+# (否则#3398被误判条件观察导致漏平仓,持仓持续亏损)。
+_COND_BEHAVIORAL_RE = re.compile(
+    r"(?:如果|若|假如|假若|若是|如若|要是|万一)[^。！？!?\n]{0,24}"
+    r"(?:没有严格(?:执行|跟)|没严格(?:执行|跟)|没有执行|没执行|没有跟上|没跟上"
+    r"|还没(?:平|跑|出|离场|执行)|尚未(?:平|跑|出|离场|执行))"
+)
+_COND_IMMEDIATE_CLOSE_RE = re.compile(
+    r"(?:直接|现在|立刻|马上|立即|赶紧|尽快)[^。！？!?\n]{0,20}"
+    r"(?:平掉|平仓|出局|离场|出掉|清仓|全部出|全平|全部平)"
+)
+
+
 def _is_conditional_exit_unit(u: str) -> bool:
     """判断单个语句单元是否为条件离场句(价格条件触发的离场描述)。"""
     if not u:
+        return False
+    # ★ 行为条件豁免: 行为条件+立即平仓指令 → 立即执行命令,非条件离场。
+    if _COND_BEHAVIORAL_RE.search(u) and _COND_IMMEDIATE_CLOSE_RE.search(u):
         return False
     if _COND_EXIT_IMPLICIT_RE.search(u):
         return True
